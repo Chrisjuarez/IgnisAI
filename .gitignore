@@ -1,0 +1,23 @@
+# --- staged rollout rules (top of file) ---
+# Ignore everything under backend & frontend now…
+backend/**
+frontend/**
+
+# …but allow package manifests so CI can exist without app code:
+!backend/
+!frontend/
+!backend/package.json
+!backend/package-lock.json
+!frontend/package.json
+!frontend/package-lock.json
+
+# Keep docs/tests
+!docs/**
+!tests/**
+
+# (leave your normal Node/git ignores below)
+node_modules/
+.env
+coverage/
+dist/
+build/
