@@ -10,6 +10,9 @@ frontend/**
 !backend/package-lock.json
 !frontend/package.json
 !frontend/package-lock.json
+!backend/app.js
+!backend/jest.config.cjs
+!backend/__tests__/**
 
 # Keep docs/tests
 !docs/**
@@ -21,3 +24,4 @@ node_modules/
 coverage/
 dist/
 build/
+.DS_Store
