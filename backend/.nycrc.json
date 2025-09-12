@@ -1,1 +1,0 @@
-{ "all": true, "include": ["**/*.js"], "exclude": ["**/__tests__/**","node_modules/**"] }
