@@ -2,7 +2,8 @@
 # Ignore everything under backend & frontend now…
 backend/**
 frontend/**
-
+!backend/__tests__/
+!backend/__tests__/**
 # …but allow package manifests so CI can exist without app code:
 !backend/
 !frontend/
@@ -10,6 +11,9 @@ frontend/**
 !backend/package-lock.json
 !frontend/package.json
 !frontend/package-lock.json
+!backend/app.js
+!backend/jest.config.cjs
+!backend/__tests__/**
 
 # Keep docs/tests
 !docs/**
@@ -21,3 +25,4 @@ node_modules/
 coverage/
 dist/
 build/
+.DS_Store
