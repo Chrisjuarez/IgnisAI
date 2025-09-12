@@ -37,6 +37,12 @@ app.use('/api/topography', topographyRoutes);
 //app.use('/api/human-factors', humanFactorsRoutes);
 app.use('/api/predict-fire-spread', predictFireSpreadRouter);
 
+// Error handling middleware
+app.use((err, req, res, next) => {
+  console.error("🔥 Server Error:", err.message);
+  res.status(500).json({ error: "Internal Server Error", details: err.message });
+});
+
 // Only start the server if this file is run directly: `node backend/app.js`
 if (require.main === module) {
   const PORT = process.env.PORT || 3001;
