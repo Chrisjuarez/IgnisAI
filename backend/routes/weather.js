@@ -36,10 +36,23 @@ router.get('/', async (req, res) => {
       return res.status(500).json({ error: "No forecast data available." });
     }
     
-    // Return raw forecast data for now
+    // Step 3: Format the weather data into standardized structure
+    const weatherData = forecastResponse.data.properties.periods.map(period => ({
+      latitude,
+      longitude,
+      temperature: period.temperature,
+      humidity: period.relativeHumidity?.value || null,
+      windSpeed: parseFloat(period.windSpeed.split(" ")[0]),
+      windDirection: period.windDirection,
+      precipitation: period.probabilityOfPrecipitation?.value || 0,
+      forecast: period.shortForecast,
+      timestamp: new Date(period.startTime)
+    }));
+
     res.json({
-      message: "NOAA Weather data retrieved successfully",
-      data: forecastResponse.data.properties.periods
+      message: "NOAA Weather data formatted successfully",
+      count: weatherData.length,
+      data: weatherData
     });
     
   } catch (error) {
