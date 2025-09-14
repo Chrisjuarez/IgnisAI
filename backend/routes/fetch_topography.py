@@ -33,6 +33,24 @@ def lonlat_to_tile(lon, lat):
 def decode_elev(r, g, b):
     return ((r*256*256 + g*256 + b)*0.1) - 10000
 
+def compute_slope(img, cx, cy):
+    """Calculate slope using Sobel operator on elevation grid"""
+    grid = []
+    for dy in (-1,0,1):
+        row = []
+        for dx in (-1,0,1):
+            r, g, b, _ = img.getpixel((cx+dx, cy+dy))
+            row.append(decode_elev(r, g, b))
+        grid.append(row)
+    
+    # Sobel operator for gradient calculation
+    dzdx = ((grid[0][2] + 2*grid[1][2] + grid[2][2]) -
+            (grid[0][0] + 2*grid[1][0] + grid[2][0]))/(8*30)
+    dzdy = ((grid[2][0] + 2*grid[2][1] + grid[2][2]) -
+            (grid[0][0] + 2*grid[0][1] + grid[0][2]))/(8*30)
+    
+    return float(np.degrees(np.arctan(np.hypot(dzdx, dzdy))))
+
 def main():
     lats = np.arange(SOUTH, NORTH+1e-9, STEP_DEG)
     lons = np.arange(WEST,  EAST+1e-9, STEP_DEG)
@@ -60,13 +78,16 @@ def main():
             cx, cy = img.width//2, img.height//2
             elev = decode_elev(*img.getpixel((cx, cy))[:3])
             
-            # Skip ocean/sea‑level points for now
+            # Skip ocean/sea‑level points
             if elev <= 0:
                 continue
                 
-            logging.info(f"{idx}/{total} Elevation: {elev}m @ {lat:.5f},{lon:.5f}")
+            slope = compute_slope(img, cx, cy)
+            
+            if idx % 100 == 0 or idx == total:
+                logging.info(f"{idx}/{total} Elev: {elev:.2f}m, Slope: {slope:.2f}° @ {lat:.5f},{lon:.5f}")
     
-    logging.info("✅ Basic elevation fetching complete")
+    logging.info("✅ Elevation and slope calculation complete")
 
 if __name__ == "__main__":
     main()
