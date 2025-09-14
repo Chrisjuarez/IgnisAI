@@ -1,7 +1,8 @@
+<<<<<<< Updated upstream
 # --- staged rollout rules (top of file) ---
 # Ignore everything under backend & frontend now…
-backend/**
-frontend/**
+backend
+frontend
 !backend/__tests__/
 !backend/__tests__/**
 # …but allow package manifests so CI can exist without app code:
@@ -20,9 +21,69 @@ frontend/**
 !tests/**
 
 # (leave your normal Node/git ignores below)
+=======
+>>>>>>> Stashed changes
 node_modules/
-.env
-coverage/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+*.tsbuildinfo
+.cache/
+.parcel-cache/
+.turbo/
+.swc/
+.eslintcache
+
+# Builds & test artifacts
 dist/
 build/
-.DS_Store!backend/.nycrc.json
+coverage/
+junit*.xml
+.lcov
+*.lcov
+
+# Env & secrets (keep a sample)
+.env
+.env.*
+!.env.example
+
+# Editor/OS cruft
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# ----------------------------
+# Python / data science bits (your backend has some)
+# ----------------------------
+__pycache__/
+*.pyc
+*.pyo
+.ipynb_checkpoints/
+.venv/
+venv/
+env/
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# ----------------------------
+# Project-specific (safe to ignore)
+# uncomment if present in repo
+# ----------------------------
+# backend/saved_models/
+# backend/ml/
+# **/catboost_info/
+# **/*.pkl
+# **/*.ipynb
+
+# Optional: large raw datasets (if you don’t want them in git)
+# datasets/
+# data/
+# **/*.csv
+# **/*.xlsx
