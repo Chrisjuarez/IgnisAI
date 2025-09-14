@@ -51,6 +51,26 @@ def compute_slope(img, cx, cy):
     
     return float(np.degrees(np.arctan(np.hypot(dzdx, dzdy))))
 
+def fetch_landuse(lat, lon, radius=50):
+    """Fetch landuse data from OpenStreetMap via Overpass API"""
+    query = f"""
+    [out:json][timeout:25];
+    (
+      way(around:{radius},{lat},{lon})["landuse"];
+      relation(around:{radius},{lat},{lon})["landuse"];
+    );
+    out tags 1;
+    """
+    try:
+        res = requests.post(OVERPASS_URL, data=query, headers={"Content-Type":"text/plain"}, timeout=30)
+        res.raise_for_status()
+        elems = res.json().get("elements", [])
+        if elems:
+            return elems[0].get("tags", {}).get("landuse", "Unknown")
+    except Exception as e:
+        logging.warning(f"Overpass failed @ {lat:.5f},{lon:.5f}: {e}")
+    return "Unknown"
+
 def main():
     lats = np.arange(SOUTH, NORTH+1e-9, STEP_DEG)
     lons = np.arange(WEST,  EAST+1e-9, STEP_DEG)
@@ -85,7 +105,7 @@ def main():
             slope = compute_slope(img, cx, cy)
             
             if idx % 100 == 0 or idx == total:
-                logging.info(f"{idx}/{total} Elev: {elev:.2f}m, Slope: {slope:.2f}° @ {lat:.5f},{lon:.5f}")
+                logging.info(f"{idx}/{total} Elev: {elev:.2f}m, Slope: {slope:.2f}°, Landuser: {veg} @ {lat:.5f},{lon:.5f}")
     
     logging.info("✅ Elevation and slope calculation complete")
 
