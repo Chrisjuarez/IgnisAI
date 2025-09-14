@@ -3,6 +3,7 @@
 const express = require('express');
 const router = express.Router();
 const axios = require('axios');
+const Weather = require('../models/Weather')
 require('dotenv').config();
 
 router.get('/', async (req, res) => {
@@ -36,7 +37,7 @@ router.get('/', async (req, res) => {
       return res.status(500).json({ error: "No forecast data available." });
     }
     
-    // Step 3: Format the weather data into standardized structure
+    // Step 3: Format the weather data
     const weatherData = forecastResponse.data.properties.periods.map(period => ({
       latitude,
       longitude,
@@ -49,8 +50,12 @@ router.get('/', async (req, res) => {
       timestamp: new Date(period.startTime)
     }));
 
+    // Optional: Store these forecasts in MongoDB if we want to merge features later.
+    await Weather.insertMany(weatherData);
+    console.log("🌤 NOAA Weather data saved to MongoDB.");
+
     res.json({
-      message: "NOAA Weather data formatted successfully",
+      message: "NOAA Weather data stored successfully",
       count: weatherData.length,
       data: weatherData
     });
