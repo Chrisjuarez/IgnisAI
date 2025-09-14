@@ -12,6 +12,7 @@ from dotenv import load_dotenv
 load_dotenv()
 MONGO_URI    = os.getenv("MONGODB_URI")
 MAPBOX_TOKEN = os.getenv("MAPBOX_ACCESS_TOKEN")
+OVERPASS_URL = "https://overpass-api.de/api/interpreter"
 
 assert MONGO_URI and MAPBOX_TOKEN, "Set MONGOdb_URI & MAPBOX_ACCESS_TOKEN in .env"
 
@@ -103,11 +104,33 @@ def main():
                 continue
                 
             slope = compute_slope(img, cx, cy)
+
+                        veg = fetch_landuse(lat, lon)
+            
+            # Create GeoJSON structure for MongoDB
+            geo = {
+                "type":        "Point",
+                "coordinates": [round(lon,6), round(lat,6)]
+            }
+            
+            doc = {
+                "location":       geo,
+                "elevation":      round(elev,2),
+                "slope":          round(slope,2),
+                "vegetationType": veg
+            }
+            
+            # Upsert based on the GeoJSON location
+            topo.update_one(
+                { "location": geo },
+                { "$set": doc },
+                upsert=True
+            )
             
             if idx % 100 == 0 or idx == total:
-                logging.info(f"{idx}/{total} Elev: {elev:.2f}m, Slope: {slope:.2f}°, Landuser: {veg} @ {lat:.5f},{lon:.5f}")
+                logging.info(f"{idx}/{total} stored {doc}")
     
-    logging.info("✅ Elevation and slope calculation complete")
+    logging.info("✅ Topography + landuse loading complete")
 
 if __name__ == "__main__":
     main()
