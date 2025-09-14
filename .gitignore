@@ -4,6 +4,9 @@ backend/**
 frontend/**
 !backend/__tests__/
 !backend/__tests__/**
+!backend/
+!backend/models/
+!backend/models/Wildfire.js
 # …but allow package manifests so CI can exist without app code:
 !backend/
 !frontend/
