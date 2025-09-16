@@ -87,6 +87,41 @@ router.get('/process-historical-fires', async (req, res) => {
     const clusters = dbscan.run(dataset, epsilon, minPts);
     
     console.log(`Found ${clusters.length} clusters (potential fire events).`);
+
+    // Process each cluster to calculate event-based spread metrics.
+    const events = [];
+    clusters.forEach(cluster => {
+      const clusterRecords = cluster.map(idx => records[idx]);
+      
+      // Sort detections in each cluster by timestamp.
+      clusterRecords.sort((a, b) => a.timestamp - b.timestamp);
+
+      const startRecord = clusterRecords[0];
+      const endRecord = clusterRecords[clusterRecords.length - 1];
+
+      const distance = haversineDistance(startRecord.latitude, startRecord.longitude, endRecord.latitude, endRecord.longitude);
+      const timeDiffHours = (endRecord.timestamp - startRecord.timestamp) / (1000 * 3600);
+      const spreadSpeed = timeDiffHours > 0 ? distance / timeDiffHours : 0; // in meters per hour
+      const bearing = computeBearing(startRecord.latitude, startRecord.longitude, endRecord.latitude, endRecord.longitude);
+      const avgBrightness = clusterRecords.reduce((sum, r) => sum + (r.brightness || 0), 0) / clusterRecords.length;
+
+      events.push({
+        clusterSize: clusterRecords.length,
+        startTime: startRecord.timestamp,
+        endTime: endRecord.timestamp,
+        startLat: startRecord.latitude,
+        startLon: startRecord.longitude,
+        endLat: endRecord.latitude,
+        endLon: endRecord.longitude,
+        displacementMeters: distance,
+        spreadSpeedMPerHour: spreadSpeed,
+        bearing: bearing,  // Fire spread direction in degrees
+        averageBrightness: avgBrightness,
+        detections: clusterRecords  // Optionally include the raw records within this cluster
+      });
+    });
+
+    console.log("Computed fire events (with spread metrics):", events);
     
     // Basic cluster information for now
     const clusterSummary = clusters.map((cluster, index) => ({
@@ -97,11 +132,8 @@ router.get('/process-historical-fires', async (req, res) => {
     }));
 
     res.json({
-      message: "Fire events clustered using DBSCAN algorithm.",
-      recordCount: records.length,
-      clusterCount: clusters.length,
-      clusteringParams: { epsilon, minPts },
-      clusters: clusterSummary
+      message: "Historical fire events processed successfully.",
+      events: events
     });
 
   } catch (err) {
