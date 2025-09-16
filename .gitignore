@@ -1,4 +1,3 @@
-<<<<<<< Updated upstream
 # --- staged rollout rules (top of file) ---
 # Ignore everything under backend & frontend now…
 backend
@@ -24,8 +23,6 @@ frontend
 !tests/**
 
 # (leave your normal Node/git ignores below)
-=======
->>>>>>> Stashed changes
 node_modules/
 *.log
 npm-debug.log*
