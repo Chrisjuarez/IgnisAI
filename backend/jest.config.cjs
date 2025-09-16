@@ -1,6 +1,6 @@
 module.exports = {
   testEnvironment: 'node',
   collectCoverage: true,
-  collectCoverageFrom: ['app.js'],   // expand later as you add tests
-  coverageReporters: ['text','lcov'],
+  collectCoverageFrom: ['app.js', 'routes/**/*.js', 'models/**/*.js'],
+  coverageReporters: ['text', 'lcov']
 };

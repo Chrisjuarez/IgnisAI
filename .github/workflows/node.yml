@@ -3,13 +3,20 @@ name: Node CI
 on:
   push:
     branches: [ main, develop ]
+    paths:
+      - 'backend/**'
+      - 'frontend/**'
+      - '.github/workflows/node.yml'
   pull_request:
+    paths:
+      - 'backend/**'
+      - 'frontend/**'
+      - '.github/workflows/node.yml'
   schedule:
-    - cron: "0 9 * * 1"
+    - cron: '0 9 * * 1'
 
 jobs:
   backend:
-    if: ${{ hashFiles('backend/package.json') != '' }}
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -23,16 +30,23 @@ jobs:
           cache-dependency-path: 'backend/package-lock.json'
       - run: npm ci
       - run: npm run lint --if-present
-      - run: npm test -- --ci --reporters=default --reporters=jest-junit --if-present
+      # run jest in CI mode; if you configured coverage in jest.config.cjs it will generate ./coverage
+      - run: npm test -- --ci --reporters=default
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: backend-coverage
+          path: backend/coverage
+          if-no-files-found: ignore
       - run: npm run build --if-present
       - uses: actions/upload-artifact@v4
+        if: always()
         with:
           name: backend-build
           path: backend/**/dist/*
           if-no-files-found: ignore
 
   frontend:
-    if: ${{ hashFiles('frontend/package.json') != '' }}
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -46,12 +60,15 @@ jobs:
           cache-dependency-path: 'frontend/package-lock.json'
       - run: npm ci
       - run: npm run lint --if-present
-      - run: npm test -- --watchAll=false --if-present
-      - run: npm run build
+      # CRA/jest needs CI=true to avoid watch prompts
+      - run: CI=true npm test -- --watchAll=false
+      - run: npm run build --if-present
       - uses: actions/upload-artifact@v4
+        if: always()
         with:
           name: frontend-build
           path: frontend/build
+          if-no-files-found: ignore
 
   codeql:
     name: CodeQL
@@ -67,8 +84,3 @@ jobs:
           languages: javascript
       - uses: github/codeql-action/autobuild@v3
       - uses: github/codeql-action/analyze@v3
-      - uses: actions/upload-artifact@v4
-        with:
-          name: backend-coverage
-          path: backend/coverage
-          if-no-files-found: ignore
