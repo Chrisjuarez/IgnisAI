@@ -3,6 +3,7 @@ const express = require('express');
 const axios = require('axios');
 const csv = require('csv-parser');
 const stream = require('stream');
+const clustering = require('density-clustering');
 const router = express.Router();
 
 const MAP_KEY = process.env.NASA_API_KEY; // Your NASA FIRMS MAP_KEY
@@ -76,23 +77,31 @@ router.get('/process-historical-fires', async (req, res) => {
 
     console.log(`Fetched ${records.length} FIRMS records.`);
     
-    // Test geospatial functions with sample data
-    if (records.length >= 2) {
-      const testDistance = haversineDistance(
-        records[0].latitude, records[0].longitude,
-        records[1].latitude, records[1].longitude
-      );
-      const testBearing = computeBearing(
-        records[0].latitude, records[0].longitude,
-        records[1].latitude, records[1].longitude
-      );
-      console.log(`Sample geospatial calculations: Distance=${testDistance.toFixed(2)}m, Bearing=${testBearing.toFixed(2)}°`);
-    }
+    // Use DBSCAN to cluster records spatially (by latitude and longitude).
+    const dbscan = new clustering.DBSCAN();
+    const dataset = records.map(rec => [rec.latitude, rec.longitude]);
     
+    // epsilon: clustering radius (in degrees); minPts: minimum points to form a cluster.
+    const epsilon = req.query.epsilon ? parseFloat(req.query.epsilon) : 0.1;
+    const minPts = req.query.minPts ? parseInt(req.query.minPts, 10) : 3;
+    const clusters = dbscan.run(dataset, epsilon, minPts);
+    
+    console.log(`Found ${clusters.length} clusters (potential fire events).`);
+    
+    // Basic cluster information for now
+    const clusterSummary = clusters.map((cluster, index) => ({
+      clusterId: index,
+      detectionCount: cluster.length,
+      firstDetection: records[cluster[0]],
+      lastDetection: records[cluster[cluster.length - 1]]
+    }));
+
     res.json({
-      message: "Historical fire data fetched successfully.",
+      message: "Fire events clustered using DBSCAN algorithm.",
       recordCount: records.length,
-      geoUtilitiesEnabled: true
+      clusterCount: clusters.length,
+      clusteringParams: { epsilon, minPts },
+      clusters: clusterSummary
     });
 
   } catch (err) {
