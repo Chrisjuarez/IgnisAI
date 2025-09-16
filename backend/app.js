@@ -2,7 +2,11 @@
 const express = require('express');
 const cors = require('cors');
 const dotenv = require('dotenv');
-const connectDB = require('./db'); 
+// const connectDB = require('./db'); // TEMPORARY
+// Temporary until we have db set up
+const connectDB = process.env.NODE_ENV === 'test' 
+  ? () => Promise.resolve() 
+  : require('./db');
 
 dotenv.config();
 
