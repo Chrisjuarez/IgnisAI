@@ -6,12 +6,12 @@ on:
     paths:
       - 'backend/**'
       - 'frontend/**'
-      - '.github/workflows/node.yml'
+      - '.github/workflows/ci.yml'
   pull_request:
     paths:
       - 'backend/**'
       - 'frontend/**'
-      - '.github/workflows/node.yml'
+      - '.github/workflows/ci.yml'
   schedule:
     - cron: '0 9 * * 1' # Weekly schedule at 9:00 UTC on Mondays, could possibly remove if we only want CI running on push/PR
 
