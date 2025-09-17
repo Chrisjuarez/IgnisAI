@@ -13,7 +13,7 @@ on:
       - 'frontend/**'
       - '.github/workflows/node.yml'
   schedule:
-    - cron: '0 9 * * 1'
+    - cron: '0 9 * * 1' # Weekly schedule at 9:00 UTC on Mondays, could possibly remove if we only want CI running on push/PR
 
 jobs:
   backend:
