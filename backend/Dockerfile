@@ -1,21 +1,36 @@
-# Multi-stage build for production
-FROM node:18-alpine AS dependencies
-WORKDIR /app
-COPY backend/package*.json ./
-RUN npm ci --only=production
-
+# Build stage
 FROM node:18-alpine AS build
 WORKDIR /app
-COPY backend/package*.json ./
-RUN npm ci
-COPY backend/ ./
-RUN npm run build --if-present
 
+# Copy package files
+COPY package*.json ./
+
+# Install all dependencies
+RUN npm ci
+
+# Copy source code
+COPY . .
+
+# Run build if it exists
+RUN npm run build --if-present || echo "No build script found"
+
+# Production stage
 FROM node:18-alpine AS production
 WORKDIR /app
+
+# Create non-root user
 RUN addgroup -g 1001 -S nodejs && adduser -S nodejs -u 1001
-COPY --from=dependencies --chown=nodejs:nodejs /app/node_modules ./node_modules
-COPY --from=build --chown=nodejs:nodejs /app ./
+
+# Copy package files and install production dependencies only
+COPY package*.json ./
+RUN npm ci --only=production
+
+# Copy built application from build stage
+COPY --from=build --chown=nodejs:nodejs /app .
+
+# Switch to non-root user
 USER nodejs
+
 EXPOSE 5000
+
 CMD ["node", "app.js"]
