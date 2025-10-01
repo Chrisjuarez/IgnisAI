@@ -128,7 +128,7 @@ router.post('/forgot-password', authLimiter, async (req, res) => {
       return res.status(400).json({ message: 'Invalid email format' });
     }
 
-    const user = await User.findOne({ email });
+    const user = await User.findOne({ email: { $eq: email } });
     if (!user) {
       return res.status(404).json({ message: 'No account found with this email' });
     }
