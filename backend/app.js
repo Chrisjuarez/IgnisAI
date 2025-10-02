@@ -9,6 +9,7 @@ dotenv.config();
 const app = express();
 app.use(cors());
 app.use(express.json());
+app.use('/api/auth', require('./routes/auth'));
 
 // Health for CI/tests
 app.get('/health', (_req, res) => res.status(200).json({ status: 'ok' }));
