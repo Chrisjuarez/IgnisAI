@@ -67,10 +67,11 @@ body::before {
 }
 
 .auth-container {
-  width: 100%;
-  max-width: 420px;
-  position: relative;
-  z-index: 1;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  height: 100vh;
+  background: linear-gradient(135deg, #1a0a00 0%, #2d1810 25%, #4a1f10 50%, #6b2d1a 75%, #8b3a1f 100%);
 }
 
 .auth-card {
@@ -81,6 +82,9 @@ body::before {
   padding: 2.5rem;
   animation: slideUp 0.4s ease-out;
   border: 1px solid rgba(255, 87, 34, 0.2);
+  max-width: 400px;
+  width: 90%;
+  margin: 0 auto;
 }
 
 @keyframes slideUp {
