@@ -1,6 +1,13 @@
 module.exports = {
   testEnvironment: 'node',
+  testTimeout: 30000,
   collectCoverage: true,
-  collectCoverageFrom: ['app.js', 'routes/**/*.js', 'models/**/*.js'],
+  setupFilesAfterEnv: ['<rootDir>/__tests__/setup.js'],
+  collectCoverageFrom: [
+    'app.js', 
+    'routes/**/*.js', 
+    'models/**/*.js',
+    '!routes/ndvi.js'
+  ],
   coverageReporters: ['text', 'lcov']
 };

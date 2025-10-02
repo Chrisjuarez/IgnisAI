@@ -7,7 +7,7 @@ router.get('/tile', (req, res) => {
     ? date
     : new Date().toISOString().slice(0,10);
 
-  const template = https://gibs.earthdata.nasa.gov/wmts/epsg3857/best/MODIS_Terra_NDVI_16Day/default/${yyyy_mm_dd}/GoogleMapsCompatible_Level9/{z}/{y}/{x}.png;
+  const template = `https://gibs.earthdata.nasa.gov/wmts/epsg3857/best/MODIS_Terra_NDVI_16Day/default/${yyyy_mm_dd}/GoogleMapsCompatible_Level9/{z}/{y}/{x}.png`;
 
   res.json({ ok: true, template, attribution: 'NASA GIBS MODIS NDVI (16-day)' });
 });
