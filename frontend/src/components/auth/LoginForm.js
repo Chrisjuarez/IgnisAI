@@ -1,5 +1,5 @@
 // frontend/src/components/auth/LoginForm.js
-import React, { useState, useContext } from 'react';
+import { useState } from 'react';
 import { useAuth } from './AuthContext';
 import { Link, useNavigate } from 'react-router-dom';
 import '../../styles/auth.css';

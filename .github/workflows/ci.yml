@@ -38,7 +38,7 @@ jobs:
       NODE_ENV: test
       JWT_SECRET: test-secret-key-for-ci-cd-very-long-and-secure
       JWT_EXPIRES_IN: 7d
-      MONGODB_TEST_URI: mongodb://root:password@localhost:27017/ignisai_test?authSource=admin
+      MONGODB_TEST_URI: mongodb://localhost:27017/ignisai_test
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -55,7 +55,7 @@ jobs:
           name: backend-coverage
           path: backend/coverage
           if-no-files-found: ignore
-      - run: npm run build --if-present
+      - run: CI=false npm run build --if-present
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -105,7 +105,7 @@ jobs:
       - run: npm run lint --if-present
       # CRA/jest needs CI=true to avoid watch prompts
       - run: CI=true npm test -- --watchAll=false --passWithNoTests
-      - run: npm run build --if-present
+      - run: CI=false npm run build --if-present
       - uses: actions/upload-artifact@v4
         if: always()
         with:
