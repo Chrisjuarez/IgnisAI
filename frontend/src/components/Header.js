@@ -1,7 +1,7 @@
 // frontend/src/components/Header.js
 import React from 'react';
 import { Link } from 'react-router-dom';
-import { useAuth } from './AuthContext';
+import { useAuth } from './auth/AuthContext';
 
 function Header() {
   const { isAuthenticated, logout } = useAuth();
