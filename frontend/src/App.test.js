@@ -1,13 +1,14 @@
 // src/App.test.js
 import React from 'react';
-import { renderWithProviders, screen, within } from './test-utils';
+import { renderWithProviders, screen } from './test-utils';
 import App from './App';
 
 jest.mock('./components/MapComponent', () => () => <div data-testid="map-component" />);
 jest.mock('./components/FireControls', () => () => <div data-testid="fire-controls" />);
 
-test('renders the header logo text', () => {
+test('renders the login page logo text', () => {
   renderWithProviders(<App />);
-  const header = screen.getByRole('banner');
-  expect(within(header).getByText(/IgnisAI/i)).toBeInTheDocument();
+  // The login page has an <h1> with "IgnisAI" text
+  const logo = screen.getByRole('heading', { name: /IgnisAI/i });
+  expect(logo).toBeInTheDocument();
 });
