@@ -1,11 +1,11 @@
 // frontend/src/components/auth/RegisterForm.js
 import React, { useState, useContext } from 'react';
-import { AuthContext } from '../../auth/AuthContext';
+import { useAuth } from './AuthContext';
 import { Link, useNavigate } from 'react-router-dom';
 import '../../styles/auth.css';
 
 const RegisterForm = () => {
-  const { register } = useContext(AuthContext);
+  const { register } = useContext(useAuth);
   const navigate = useNavigate();
   const [formData, setFormData] = useState({
     fullName: '',

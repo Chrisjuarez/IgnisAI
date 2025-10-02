@@ -1,11 +1,11 @@
 // frontend/src/components/auth/ForgotPasswordForm.js
 import React, { useState, useContext } from 'react';
-import { AuthContext } from './AuthContext';
+import { useAuth } from './AuthContext';
 import { Link } from 'react-router-dom';
 import '../../styles/auth.css';
 
 const ForgotPasswordForm = () => {
-  const { forgotPassword } = useContext(AuthContext);
+  const { forgotPassword } = useContext(useAuth);
   const [email, setEmail] = useState('');
   const [error, setError] = useState('');
   const [success, setSuccess] = useState('');
