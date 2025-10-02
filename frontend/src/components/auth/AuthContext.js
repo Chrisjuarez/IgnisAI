@@ -1,5 +1,6 @@
 import React, { createContext, useContext, useReducer, useEffect } from 'react';
 import axios from 'axios';
+axios.defaults.baseURL = process.env.REACT_APP_API_URL || '';
 
 const AuthContext = createContext();
 
