@@ -1,0 +1,257 @@
+:root {
+  /* Dark fire-themed color palette with red/orange gradients */
+  --background: 0 0% 8%;
+  --foreground: 0 0% 98%;
+  --card: 0 0% 12%;
+  --card-foreground: 0 0% 98%;
+  --primary: 14 100% 57%;
+  --primary-foreground: 0 0% 100%;
+  --secondary: 25 95% 53%;
+  --secondary-foreground: 0 0% 100%;
+  --muted: 0 0% 20%;
+  --muted-foreground: 0 0% 70%;
+  --accent: 10 90% 50%;
+  --accent-foreground: 0 0% 98%;
+  --destructive: 0 84.2% 60.2%;
+  --destructive-foreground: 0 0% 98%;
+  --border: 0 0% 25%;
+  --input: 0 0% 18%;
+  --ring: 14 100% 57%;
+  --radius: 0.5rem;
+}
+
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  /* Fire-themed gradient background from dark red to orange */
+  background: linear-gradient(135deg, #1a0a00 0%, #2d1810 25%, #4a1f10 50%, #6b2d1a 75%, #8b3a1f 100%);
+  background-attachment: fixed;
+  min-height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 1rem;
+  color: hsl(var(--foreground));
+  position: relative;
+  overflow: hidden;
+}
+
+/* Add animated fire glow effect */
+body::before {
+  content: "";
+  position: absolute;
+  top: -50%;
+  left: -50%;
+  width: 200%;
+  height: 200%;
+  background: radial-gradient(circle, rgba(255, 87, 34, 0.15) 0%, transparent 70%);
+  animation: fireGlow 8s ease-in-out infinite;
+  pointer-events: none;
+}
+
+@keyframes fireGlow {
+  0%,
+  100% {
+    transform: translate(0, 0) scale(1);
+    opacity: 0.5;
+  }
+  50% {
+    transform: translate(10%, 10%) scale(1.1);
+    opacity: 0.8;
+  }
+}
+
+.auth-container {
+  width: 100%;
+  max-width: 420px;
+  position: relative;
+  z-index: 1;
+}
+
+.auth-card {
+  background: hsl(var(--card));
+  border-radius: var(--radius);
+  /* Enhanced shadow with orange glow */
+  box-shadow: 0 10px 40px rgba(0, 0, 0, 0.5), 0 0 60px rgba(255, 87, 34, 0.2);
+  padding: 2.5rem;
+  animation: slideUp 0.4s ease-out;
+  border: 1px solid rgba(255, 87, 34, 0.2);
+}
+
+@keyframes slideUp {
+  from {
+    opacity: 0;
+    transform: translateY(20px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.auth-header {
+  text-align: center;
+  margin-bottom: 2rem;
+}
+
+.auth-logo {
+  font-size: 2rem;
+  font-weight: 700;
+  /* Fire gradient text effect */
+  background: linear-gradient(135deg, hsl(var(--primary)) 0%, hsl(var(--secondary)) 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+  margin-bottom: 0.5rem;
+  text-shadow: 0 0 30px rgba(255, 87, 34, 0.3);
+}
+
+.auth-subtitle {
+  color: hsl(var(--muted-foreground));
+  font-size: 0.875rem;
+}
+
+.auth-form {
+  display: flex;
+  flex-direction: column;
+  gap: 1.25rem;
+}
+
+.form-group {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.form-group label {
+  font-size: 0.875rem;
+  font-weight: 500;
+  color: hsl(var(--foreground));
+}
+
+.form-group input {
+  padding: 0.625rem 0.875rem;
+  border: 1px solid hsl(var(--border));
+  border-radius: calc(var(--radius) - 2px);
+  background: hsl(var(--input));
+  color: hsl(var(--foreground));
+  font-size: 0.875rem;
+  transition: all 0.2s;
+}
+
+.form-group input:focus {
+  outline: none;
+  /* Orange glow on focus */
+  border-color: hsl(var(--primary));
+  box-shadow: 0 0 0 3px hsla(var(--primary), 0.2);
+}
+
+.form-options {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-size: 0.875rem;
+}
+
+.checkbox-label {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  cursor: pointer;
+  color: hsl(var(--foreground));
+}
+
+.checkbox-label input[type="checkbox"] {
+  width: 1rem;
+  height: 1rem;
+  cursor: pointer;
+  accent-color: hsl(var(--primary));
+}
+
+.forgot-link {
+  color: hsl(var(--primary));
+  text-decoration: none;
+  transition: opacity 0.2s;
+}
+
+.forgot-link:hover {
+  opacity: 0.8;
+  text-shadow: 0 0 10px rgba(255, 87, 34, 0.5);
+}
+
+.error-message {
+  padding: 0.75rem;
+  background: hsl(var(--destructive) / 0.1);
+  border: 1px solid hsl(var(--destructive) / 0.3);
+  border-radius: calc(var(--radius) - 2px);
+  color: hsl(var(--destructive-foreground));
+  font-size: 0.875rem;
+}
+
+.success-message {
+  padding: 0.75rem;
+  background: hsl(142 76% 36% / 0.1);
+  border: 1px solid hsl(142 76% 36% / 0.3);
+  border-radius: calc(var(--radius) - 2px);
+  color: hsl(142 76% 70%);
+  font-size: 0.875rem;
+}
+
+.auth-button {
+  padding: 0.625rem 1rem;
+  /* Fire gradient button */
+  background: linear-gradient(135deg, hsl(var(--primary)) 0%, hsl(var(--secondary)) 100%);
+  color: hsl(var(--primary-foreground));
+  border: none;
+  border-radius: calc(var(--radius) - 2px);
+  font-size: 0.875rem;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.2s;
+  box-shadow: 0 4px 12px rgba(255, 87, 34, 0.3);
+}
+
+.auth-button:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 6px 20px rgba(255, 87, 34, 0.5);
+}
+
+.auth-button:active {
+  transform: translateY(0);
+}
+
+.auth-footer {
+  margin-top: 1.5rem;
+  text-align: center;
+  font-size: 0.875rem;
+  color: hsl(var(--muted-foreground));
+}
+
+.auth-footer a {
+  color: hsl(var(--primary));
+  text-decoration: none;
+  font-weight: 500;
+  transition: all 0.2s;
+}
+
+.auth-footer a:hover {
+  opacity: 0.8;
+  text-shadow: 0 0 10px rgba(255, 87, 34, 0.5);
+}
+
+@media (max-width: 480px) {
+  .auth-card {
+    padding: 1.5rem;
+  }
+
+  .form-options {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 0.75rem;
+  }
+}
