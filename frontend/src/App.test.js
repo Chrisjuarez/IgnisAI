@@ -1,8 +1,12 @@
-import { render, screen } from '@testing-library/react';
+import React from 'react';
+import { render, screen, within } from '@testing-library/react';
 import App from './App';
 
-test('renders learn react link', () => {
+jest.mock('./components/MapComponent', () => () => <div data-testid="map-component" />);
+jest.mock('./components/FireControls', () => () => <div data-testid="fire-controls" />);
+
+test('renders the header logo text', () => {
   render(<App />);
-  const linkElement = screen.getByText(/learn react/i);
-  expect(linkElement).toBeInTheDocument();
+  const header = screen.getByRole('banner');
+  expect(within(header).getByText(/IgnisAI/i)).toBeInTheDocument();
 });
