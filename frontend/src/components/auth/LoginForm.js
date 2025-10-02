@@ -1,11 +1,11 @@
 // frontend/src/components/auth/LoginForm.js
 import React, { useState, useContext } from 'react';
-import { AuthContext } from './AuthContext';
+import { useAuth } from './AuthContext';
 import { Link, useNavigate } from 'react-router-dom';
 import '../../styles/auth.css';
 
 const LoginForm = () => {
-  const { login } = useContext(AuthContext);
+  const { login } = useAuth();
   const navigate = useNavigate();
   const [formData, setFormData] = useState({
     email: '',
