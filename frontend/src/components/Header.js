@@ -1,19 +1,30 @@
-//ignis-ai-frontend/src/components/Header.js
+// frontend/src/components/Header.js
 import React from 'react';
-
+import { Link } from 'react-router-dom';
+import { useAuth } from './auth/AuthContext';
 
 function Header() {
+  const { isAuthenticated, logout } = useAuth();
+
   return (
     <header style={styles.header}>
       <div style={styles.logo}>IgnisAI</div>
       <nav style={styles.nav}>
-        {/* <a href="#features" style={styles.link}>Features</a>
-        <a href="#about" style={styles.link}>About</a> */}
+        {isAuthenticated ? (
+          <>
+            <Link to="/dashboard" style={styles.link}>Dashboard</Link>
+            <button onClick={logout} style={styles.button}>Logout</button>
+          </>
+        ) : (
+          <>
+            <Link to="/login" style={styles.link}>Login</Link>
+            <Link to="/register" style={styles.link}>Register</Link>
+          </>
+        )}
       </nav>
     </header>
   );
 }
-
 
 const styles = {
   header: {
@@ -34,9 +45,16 @@ const styles = {
   },
   link: {
     color: '#fff',
-    textDecoration: 'none'
+    textDecoration: 'none',
+    fontSize: '1rem'
+  },
+  button: {
+    background: 'none',
+    border: 'none',
+    color: '#fff',
+    cursor: 'pointer',
+    fontSize: '1rem'
   }
 };
-
 
 export default Header;

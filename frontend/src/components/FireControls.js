@@ -1,3 +1,4 @@
+/* eslint-disable react-hooks/exhaustive-deps */
 // src/components/FireControls.js
 import React, { useState, useEffect, useRef, useMemo } from 'react';
 

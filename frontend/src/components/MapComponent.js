@@ -1,3 +1,4 @@
+/* eslint-disable react-hooks/exhaustive-deps */
 // src/components/MapComponent.js
 import React, {
   useEffect,
