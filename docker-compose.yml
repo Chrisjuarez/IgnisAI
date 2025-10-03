@@ -7,6 +7,8 @@ services:
       MONGO_INITDB_ROOT_PASSWORD: password
     volumes:
       - mongo_data:/data/db
+    ports:
+      - "27017:27017"
     networks:
       - ignisai-network
 
@@ -18,6 +20,8 @@ services:
       NODE_ENV: production
       MONGODB_URI: mongodb://admin:password@mongodb:27017/ignisai
       PORT: 5000
+    ports:
+      - "5000:5000"
     depends_on:
       - mongodb
     networks:
@@ -27,8 +31,10 @@ services:
     build:
       context: .
       dockerfile: frontend/Dockerfile
+    environment:
+      REACT_APP_API_URL: http://localhost:5000
     ports:
-      - "80:80"
+      - "3000:3000"
     depends_on:
       - backend
     networks:

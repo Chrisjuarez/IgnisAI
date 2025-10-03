@@ -13,7 +13,7 @@ on:
       - 'frontend/**'
       - '.github/workflows/ci.yml'
   schedule:
-    - cron: '0 9 * * 1' # Weekly schedule at 9:00 UTC on Mondays, could possibly remove if we only want CI running on push/PR
+    - cron: '0 9 * * 1'
 
 jobs:
   backend:
@@ -21,6 +21,16 @@ jobs:
     permissions:
       contents: read
       packages: write
+    services:
+      mongodb:
+        image: mongo:6.0
+        ports:
+          - 27017:27017
+        options: >-
+          --health-cmd "mongo --eval 'db.runCommand({ping: 1})'"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
     defaults:
       run:
         working-directory: backend
@@ -38,7 +48,6 @@ jobs:
           cache-dependency-path: 'backend/package-lock.json'
       - run: npm ci
       - run: npm run lint --if-present
-      # run jest in CI mode; if you configured coverage in jest.config.cjs it will generate ./coverage
       - run: npm test -- --ci --reporters=default --passWithNoTests
       - uses: actions/upload-artifact@v4
         if: always()
@@ -46,7 +55,7 @@ jobs:
           name: backend-coverage
           path: backend/coverage
           if-no-files-found: ignore
-      - run: npm run build --if-present
+      - run: CI=false npm run build --if-present
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -54,7 +63,6 @@ jobs:
           path: backend/**/dist/*
           if-no-files-found: ignore
 
-# Add Docker build and push for backend
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
@@ -97,7 +105,7 @@ jobs:
       - run: npm run lint --if-present
       # CRA/jest needs CI=true to avoid watch prompts
       - run: CI=true npm test -- --watchAll=false --passWithNoTests
-      - run: npm run build --if-present
+      - run: CI=false npm run build --if-present
       - uses: actions/upload-artifact@v4
         if: always()
         with:
