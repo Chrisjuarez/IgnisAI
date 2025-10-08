@@ -26,7 +26,7 @@
   box-sizing: border-box;
 }
 
-body {
+.auth-page {
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
   /* Fire-themed gradient background from dark red to orange */
   background: linear-gradient(135deg, #1a0a00 0%, #2d1810 25%, #4a1f10 50%, #6b2d1a 75%, #8b3a1f 100%);
@@ -42,7 +42,7 @@ body {
 }
 
 /* Add animated fire glow effect */
-body::before {
+.auth-page::before {
   content: "";
   position: absolute;
   top: -50%;
@@ -70,7 +70,8 @@ body::before {
   display: flex;
   justify-content: center;
   align-items: center;
-  height: 100vh;
+  width: 100%;
+  min-height: 100vh;
   background: linear-gradient(135deg, #1a0a00 0%, #2d1810 25%, #4a1f10 50%, #6b2d1a 75%, #8b3a1f 100%);
 }
 
