@@ -51,83 +51,93 @@ const RegisterForm = () => {
   };
 
   return (
-    <div className="auth-container">
-      <div className="auth-card">
-        <div className="auth-header">
-          <h1 className="auth-logo">IgnisAI</h1>
-          <p className="auth-subtitle">Create your account</p>
-        </div>
-        <form className="auth-form" onSubmit={handleSubmit}>
-          {error && <div className="error-message">{error}</div>}
-          {success && <div className="success-message">{success}</div>}
-          <div className="form-group">
-            <label htmlFor="fullName">Full Name</label>
-            <input
-              id="fullName"
-              name="fullName"
-              type="text"
-              required
-              placeholder="Enter your full name"
-              value={formData.fullName}
-              onChange={handleChange}
-            />
+    <div className="auth-page">
+      <div className="auth-container">
+        <div className="auth-card">
+          <div className="auth-header">
+            <h1 className="auth-logo">IgnisAI</h1>
+            <p className="auth-subtitle">Create your account</p>
           </div>
-          <div className="form-group">
-            <label htmlFor="email">Email</label>
-            <input
-              id="email"
-              name="email"
-              type="email"
-              required
-              placeholder="Enter your email"
-              value={formData.email}
-              onChange={handleChange}
-            />
+
+          <form className="auth-form" onSubmit={handleSubmit}>
+            {error && <div className="error-message">{error}</div>}
+            {success && <div className="success-message">{success}</div>}
+
+            <div className="form-group">
+              <label htmlFor="fullName">Full Name</label>
+              <input
+                id="fullName"
+                name="fullName"
+                type="text"
+                required
+                placeholder="Enter your full name"
+                value={formData.fullName}
+                onChange={handleChange}
+              />
+            </div>
+
+            <div className="form-group">
+              <label htmlFor="email">Email</label>
+              <input
+                id="email"
+                name="email"
+                type="email"
+                required
+                placeholder="Enter your email"
+                value={formData.email}
+                onChange={handleChange}
+              />
+            </div>
+
+            <div className="form-group">
+              <label htmlFor="phone">Phone Number</label>
+              <input
+                id="phone"
+                name="phone"
+                type="tel"
+                required
+                placeholder="(555) 123-4567"
+                value={formData.phone}
+                onChange={handleChange}
+              />
+            </div>
+
+            <div className="form-group">
+              <label htmlFor="password">Password</label>
+              <input
+                id="password"
+                name="password"
+                type="password"
+                required
+                placeholder="Create a password"
+                minLength="8"
+                value={formData.password}
+                onChange={handleChange}
+              />
+            </div>
+
+            <div className="form-group">
+              <label htmlFor="confirmPassword">Confirm Password</label>
+              <input
+                id="confirmPassword"
+                name="confirmPassword"
+                type="password"
+                required
+                placeholder="Confirm your password"
+                minLength="8"
+                value={formData.confirmPassword}
+                onChange={handleChange}
+              />
+            </div>
+
+            <button type="submit" className="auth-button">
+              Create Account
+            </button>
+          </form>
+
+          <div className="auth-footer">
+            Already have an account? <Link to="/login">Sign in</Link>
           </div>
-          <div className="form-group">
-            <label htmlFor="phone">Phone Number</label>
-            <input
-              id="phone"
-              name="phone"
-              type="tel"
-              required
-              placeholder="(555) 123-4567"
-              value={formData.phone}
-              onChange={handleChange}
-            />
-          </div>
-          <div className="form-group">
-            <label htmlFor="password">Password</label>
-            <input
-              id="password"
-              name="password"
-              type="password"
-              required
-              placeholder="Create a password"
-              minLength="8"
-              value={formData.password}
-              onChange={handleChange}
-            />
-          </div>
-          <div className="form-group">
-            <label htmlFor="confirmPassword">Confirm Password</label>
-            <input
-              id="confirmPassword"
-              name="confirmPassword"
-              type="password"
-              required
-              placeholder="Confirm your password"
-              minLength="8"
-              value={formData.confirmPassword}
-              onChange={handleChange}
-            />
-          </div>
-          <button type="submit" className="auth-button">
-            Create Account
-          </button>
-        </form>
-        <div className="auth-footer">
-          Already have an account? <Link to="/login">Sign in</Link>
         </div>
       </div>
     </div>

@@ -24,33 +24,39 @@ const ForgotPasswordForm = () => {
   };
 
   return (
-    <div className="auth-container">
-      <div className="auth-card">
-        <div className="auth-header">
-          <h1 className="auth-logo">IgnisAI</h1>
-          <p className="auth-subtitle">Reset your password</p>
-        </div>
-        <form className="auth-form" onSubmit={handleSubmit}>
-          {error && <div className="error-message">{error}</div>}
-          {success && <div className="success-message">{success}</div>}
-          <div className="form-group">
-            <label htmlFor="email">Email</label>
-            <input
-              id="email"
-              name="email"
-              type="email"
-              required
-              placeholder="Enter your email"
-              value={email}
-              onChange={e => setEmail(e.target.value)}
-            />
+    <div className="auth-page">
+      <div className="auth-container">
+        <div className="auth-card">
+          <div className="auth-header">
+            <h1 className="auth-logo">IgnisAI</h1>
+            <p className="auth-subtitle">Reset your password</p>
           </div>
-          <button type="submit" className="auth-button">
-            Send Reset Link
-          </button>
-        </form>
-        <div className="auth-footer">
-          Remembered your password? <Link to="/login">Sign in</Link>
+
+          <form className="auth-form" onSubmit={handleSubmit}>
+            {error && <div className="error-message">{error}</div>}
+            {success && <div className="success-message">{success}</div>}
+
+            <div className="form-group">
+              <label htmlFor="email">Email</label>
+              <input
+                id="email"
+                name="email"
+                type="email"
+                required
+                placeholder="Enter your email"
+                value={email}
+                onChange={e => setEmail(e.target.value)}
+              />
+            </div>
+
+            <button type="submit" className="auth-button">
+              Send Reset Link
+            </button>
+          </form>
+
+          <div className="auth-footer">
+            Remembered your password? <Link to="/login">Sign in</Link>
+          </div>
         </div>
       </div>
     </div>
