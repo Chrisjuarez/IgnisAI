@@ -15,30 +15,28 @@ on:
   schedule:
     - cron: '0 9 * * 1'
 
+# .github/workflows/ci.yml  (backend job snippet)
 jobs:
   backend:
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      packages: write
     services:
       mongodb:
         image: mongo:6.0
         ports:
           - 27017:27017
         options: >-
-          --health-cmd "mongo --eval 'db.runCommand({ping: 1})'"
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
+          --health-cmd="mongosh --quiet --eval 'db.adminCommand({ ping: 1 })'"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=10
     defaults:
       run:
         working-directory: backend
     env:
       NODE_ENV: test
+      MONGODB_TEST_URI: mongodb://localhost:27017/ignisai_test
       JWT_SECRET: test-secret-key-for-ci-cd-very-long-and-secure
       JWT_EXPIRES_IN: 7d
-      MONGODB_TEST_URI: mongodb://localhost:27017/ignisai_test
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -46,6 +44,16 @@ jobs:
           node-version: '18'
           cache: 'npm'
           cache-dependency-path: 'backend/package-lock.json'
+
+      # Wait for MongoDB to be reachable (extra safety)
+      - name: Wait for MongoDB
+        run: |
+          for i in {1..30}; do
+            mongosh --quiet --eval "db.adminCommand({ ping: 1 })" && exit 0
+            echo "Mongo not ready yet..."; sleep 2
+          done
+          echo "Mongo never became ready" >&2; exit 1
+
       - run: npm ci
       - run: npm run lint --if-present
       - run: npm test -- --ci --reporters=default --passWithNoTests
