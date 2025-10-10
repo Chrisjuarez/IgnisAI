@@ -46,11 +46,14 @@ jobs:
           cache-dependency-path: 'backend/package-lock.json'
 
       # Wait for MongoDB to be reachable (extra safety)
-      - name: Wait for MongoDB
+      - name: Wait for MongoDB (TCP only)
+        shell: bash
         run: |
-          for i in {1..30}; do
-            mongosh --quiet --eval "db.adminCommand({ ping: 1 })" && exit 0
-            echo "Mongo not ready yet..."; sleep 2
+          for i in {1..60}; do
+            (echo > /dev/tcp/127.0.0.1/27017) >/dev/null 2>&1 && {
+              echo "Mongo is accepting TCP connections"; exit 0;
+            }
+            echo "waiting for mongo..."; sleep 2
           done
           echo "Mongo never became ready" >&2; exit 1
 
