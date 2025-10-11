@@ -1,5 +1,6 @@
+import api from '../../api'; // uses baseURL from REACT_APP_API_URL
 import React, { createContext, useContext, useReducer, useEffect } from 'react';
-import axios from 'axios';
+
 
 const AuthContext = createContext();
 
@@ -51,7 +52,7 @@ export const AuthProvider = ({ children }) => {
         payload: { token, user: JSON.parse(user) }
       });
       // Set default axios header
-      axios.defaults.headers.common['Authorization'] = `Bearer ${token}`;
+      api.defaults.headers.common['Authorization'] = `Bearer ${token}`;
     } else {
       dispatch({ type: 'SET_LOADING', payload: false });
     }
@@ -59,7 +60,7 @@ export const AuthProvider = ({ children }) => {
 
   const login = async (email, password, remember = false) => {
     try {
-      const response = await axios.post('/api/auth/login', { email, password });
+      const response = await api.post('/auth/login', { email, password });
       const { user, token } = response.data;
 
       // Store in appropriate storage
@@ -72,7 +73,7 @@ export const AuthProvider = ({ children }) => {
       }
 
       // Set default axios header
-      axios.defaults.headers.common['Authorization'] = `Bearer ${token}`;
+      api.defaults.headers.common['Authorization'] = `Bearer ${token}`;
 
       dispatch({
         type: 'LOGIN_SUCCESS',
@@ -87,7 +88,7 @@ export const AuthProvider = ({ children }) => {
 
   const register = async (userData) => {
     try {
-      const response = await axios.post('/api/auth/register', userData);
+      const response = await api.post('/auth/register', userData);
       return response.data;
     } catch (error) {
       throw error.response?.data || { message: 'Registration failed' };
@@ -99,14 +100,14 @@ export const AuthProvider = ({ children }) => {
     localStorage.removeItem('ignis_user');
     sessionStorage.removeItem('ignis_token');
     sessionStorage.removeItem('ignis_user');
-    delete axios.defaults.headers.common['Authorization'];
+    delete api.defaults.headers.common['Authorization'];
     dispatch({ type: 'LOGOUT' });
   };
 
   const forgotPassword = async (email) => {
     try {
-      const response = await axios.post('/api/auth/forgot-password', { email });
-      return response.data;
+      const response = await api.post('/auth/forgot-password', { email });
+      return response.data; // (optional) return something to callers
     } catch (error) {
       throw error.response?.data || { message: 'Password reset request failed' };
     }

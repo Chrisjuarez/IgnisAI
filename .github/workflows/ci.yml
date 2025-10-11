@@ -13,49 +13,67 @@ on:
       - 'frontend/**'
       - '.github/workflows/ci.yml'
   schedule:
-    - cron: '0 9 * * 1'
+    - cron: '0 9 * * 1'  # weekly sanity run
 
 jobs:
   backend:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      packages: write
+      packages: write     # safe because push/login steps are gated to main
     services:
       mongodb:
         image: mongo:6.0
         ports:
           - 27017:27017
         options: >-
-          --health-cmd "mongo --eval 'db.runCommand({ping: 1})'"
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
+          --health-cmd="bash -lc 'echo > /dev/tcp/127.0.0.1/27017'"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=10
     defaults:
       run:
         working-directory: backend
     env:
       NODE_ENV: test
+      MONGODB_TEST_URI: mongodb://localhost:27017/ignisai_test
       JWT_SECRET: test-secret-key-for-ci-cd-very-long-and-secure
       JWT_EXPIRES_IN: 7d
-      MONGODB_TEST_URI: mongodb://localhost:27017/ignisai_test
+
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/setup-node@v4
         with:
           node-version: '18'
           cache: 'npm'
           cache-dependency-path: 'backend/package-lock.json'
+
+      # Simple TCP readiness check (no mongosh dependency)
+      - name: Wait for MongoDB (TCP only)
+        shell: bash
+        run: |
+          for i in {1..60}; do
+            (echo > /dev/tcp/127.0.0.1/27017) >/dev/null 2>&1 && {
+              echo "✅ Mongo is accepting TCP connections"; exit 0;
+            }
+            echo "⏳ waiting for mongo..."; sleep 2
+          done
+          echo "❌ Mongo never became ready" >&2; exit 1
+
       - run: npm ci
       - run: npm run lint --if-present
       - run: npm test -- --ci --reporters=default --passWithNoTests
+
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: backend-coverage
           path: backend/coverage
           if-no-files-found: ignore
+
       - run: CI=false npm run build --if-present
+
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -63,10 +81,13 @@ jobs:
           path: backend/**/dist/*
           if-no-files-found: ignore
 
+      # ---------- Docker publish (only on main) ----------
       - name: Set up Docker Buildx
+        if: github.ref == 'refs/heads/main'
         uses: docker/setup-buildx-action@v3
 
       - name: Log in to GitHub Container Registry
+        if: github.ref == 'refs/heads/main'
         uses: docker/login-action@v3
         with:
           registry: ghcr.io
@@ -74,9 +95,11 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Convert repository owner to lowercase
+        if: github.ref == 'refs/heads/main'
         run: echo "REPO_OWNER_LOWER=$(echo ${{ github.repository_owner }} | tr '[:upper:]' '[:lower:]')" >> $GITHUB_ENV
 
       - name: Build and push backend Docker image
+        if: github.ref == 'refs/heads/main'
         uses: docker/build-push-action@v5
         with:
           context: ./backend
@@ -90,22 +113,25 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      packages: write
+      packages: write     # push step is main-only
     defaults:
       run:
         working-directory: frontend
+
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/setup-node@v4
         with:
           node-version: '18'
           cache: 'npm'
           cache-dependency-path: 'frontend/package-lock.json'
+
       - run: npm ci
       - run: npm run lint --if-present
-      # CRA/jest needs CI=true to avoid watch prompts
       - run: CI=true npm test -- --watchAll=false --passWithNoTests
       - run: CI=false npm run build --if-present
+
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -113,11 +139,13 @@ jobs:
           path: frontend/build
           if-no-files-found: ignore
 
-# Add Docker build and push for frontend
+      # ---------- Docker publish (only on main) ----------
       - name: Set up Docker Buildx
+        if: github.ref == 'refs/heads/main'
         uses: docker/setup-buildx-action@v3
 
       - name: Log in to GitHub Container Registry
+        if: github.ref == 'refs/heads/main'
         uses: docker/login-action@v3
         with:
           registry: ghcr.io
@@ -125,9 +153,11 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Convert repository owner to lowercase
+        if: github.ref == 'refs/heads/main'
         run: echo "REPO_OWNER_LOWER=$(echo ${{ github.repository_owner }} | tr '[:upper:]' '[:lower:]')" >> $GITHUB_ENV
 
       - name: Build and push frontend Docker image
+        if: github.ref == 'refs/heads/main'
         uses: docker/build-push-action@v5
         with:
           context: ./frontend
@@ -158,6 +188,7 @@ jobs:
     needs: [backend, frontend]
     steps:
       - uses: actions/checkout@v4
+
       - name: Scan backend directory
         uses: aquasecurity/trivy-action@master
         with:

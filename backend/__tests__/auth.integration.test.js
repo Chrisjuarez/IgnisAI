@@ -9,12 +9,12 @@ describe('Authentication Integration Tests', () => {
   let server;
   
   beforeAll(async () => {
-    server = app.listen(5001);
+    server = app.listen(0);
   });
 
   afterAll(async () => {
     if (server) {
-      await server.close();
+      await new Promise((res) => server.close(res));
     }
   });
 
@@ -47,7 +47,7 @@ describe('Authentication Integration Tests', () => {
         password: 'password123'
       };
 
-      const response = await request(app)
+      const response = await request(server)
         .post('/api/auth/register')
         .send(userData)
         .expect(201);
