@@ -12,6 +12,7 @@ import FireControls from './components/FireControls';
 import LoginForm from './components/auth/LoginForm';
 import RegisterForm from './components/auth/RegisterForm';
 import ForgotPasswordForm from './components/auth/ForgotPasswordForm';
+import AdvancedFireDashboard from './components/AdvancedFireDashboard';
 
 function DashboardLayout() {
   const mapRef = useRef(null);
@@ -84,6 +85,16 @@ function App() {
           {/* Protected dashboard */}
           <Route
             path="/dashboard"
+            element={
+              <ProtectedRoute>
+                <AdvancedFireDashboard />
+              </ProtectedRoute>
+            }
+          />
+
+          {/* Original dashboard preserved at legacy route. */}
+          <Route
+            path="/dashboard/legacy"
             element={
               <ProtectedRoute>
                 <DashboardLayout />
