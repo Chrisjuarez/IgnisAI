@@ -37,7 +37,6 @@ tryMount('/api/weather', './routes/weather');
 tryMount('/api/topography', './routes/topography');
 tryMount('/api/ndvi', './routes/ndvi');
 tryMount('/api/predict-fire-spread', './routes/predictFireSpread');
-tryMount('/api/auth', './routes/auth');
 
 // Export app for tests
 module.exports = app;
