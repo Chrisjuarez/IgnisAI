@@ -21,7 +21,7 @@ const AdvancedFireDashboard = () => {
       name: "Riverside Fire",
       location: "California",
       riskLevel: "High",
-      spreadProbability: 85,
+      spreadProbability: 87,
       coordinates: [34.0522, -118.2437]
     },
     {
@@ -83,11 +83,11 @@ const AdvancedFireDashboard = () => {
           </div>
           <div className="user-section">
             <div className="user-info">
-              <span className="user-name">{user?.name || 'John Doe'}</span>
-              <span className="user-email">{user?.email || 'john.doe@emergency.gov'}</span>
+              <span className="user-name">{user?.fullName || user?.name || 'Travis Nguyen'}</span>
+              <span className="user-email">{user?.email || 'travis@gmail.com'}</span>
             </div>
             <div className="user-avatar">
-              {(user?.name || 'John Doe').split(' ').map(n => n[0]).join('')}
+              {((user?.fullName || user?.name || 'Travis Nguyen').split(' ').map(n => n[0]).join(''))}
             </div>
           </div>
         </div>
@@ -125,7 +125,7 @@ const AdvancedFireDashboard = () => {
                 value={filters.confidence}
                 onChange={(e) => handleFilterChange('confidence', e.target.value)}
               >
-                <option value="all">All</option>
+                <option value="all">All Confidence Levels</option>
                 <option value="high">High &gt;80%</option>
                 <option value="medium">Medium 50-80%</option>
                 <option value="low">Low &lt;50%</option>
@@ -164,7 +164,7 @@ const AdvancedFireDashboard = () => {
               <input 
                 type="text" 
                 className="form-control dark-input" 
-                placeholder="Search location..."
+                placeholder="Search for location..."
               />
             </div>
 
@@ -198,7 +198,7 @@ const AdvancedFireDashboard = () => {
                   <div className="fire-header">
                     <h4 className="fire-name">{fire.name}</h4>
                     <span className={`risk-badge ${getRiskColorClass(fire.riskLevel)}`}>
-                      {fire.riskLevel}
+                      {fire.riskLevel === 'High' ? 'HIGH RISK' : fire.riskLevel.toUpperCase()}
                     </span>
                   </div>
                   <div className="fire-location">{fire.location}</div>
@@ -229,10 +229,11 @@ const AdvancedFireDashboard = () => {
                     key={fire.id}
                     className={`fire-marker ${getRiskColorClass(fire.riskLevel)} ${selectedFireId === fire.id ? 'selected' : ''}`}
                     style={{
-                      left: `${30 + fire.id * 20}%`,
-                      top: `${40 + fire.id * 15}%`
+                      left: `${25 + fire.id * 25}%`,
+                      top: `${35 + fire.id * 20}%`
                     }}
                     onClick={() => setSelectedFireId(fire.id)}
+                    title={fire.name}
                   >
                     🔥
                   </div>
@@ -249,18 +250,18 @@ const AdvancedFireDashboard = () => {
               <div className="fire-details-header">
                 <h3 className="fire-details-name">{selectedFire.name}</h3>
                 <span className={`risk-badge large ${getRiskColorClass(selectedFire.riskLevel)}`}>
-                  {selectedFire.riskLevel}
+                  {selectedFire.riskLevel === 'High' ? 'HIGH RISK' : selectedFire.riskLevel.toUpperCase()}
                 </span>
               </div>
 
               <div className="fire-prediction-section">
                 <h4 className="section-title">Fire Spread Prediction</h4>
                 <div className="prediction-warning">
-                  This fire is <span className="highlight-text">likely</span> to spread significantly.
+                  ⚠️ This fire is <span className="highlight-text">likely</span> to spread significantly.
                 </div>
                 <div className="spread-probability">
                   <span className="probability-large">{selectedFire.spreadProbability}%</span>
-                  <span className="probability-subtitle">Spread probability</span>
+                  <span className="probability-subtitle">Spread Probability</span>
                 </div>
               </div>
 
@@ -269,16 +270,16 @@ const AdvancedFireDashboard = () => {
                 <h4 className="section-title">Current Conditions</h4>
                 <div className="weather-grid">
                   <div className="weather-item">
-                    <div className="weather-label">Wind</div>
-                    <div className="weather-value">{weatherData.wind}</div>
+                    <div className="weather-label">💨 Wind</div>
+                    <div className="weather-value">25<br/>km/h E</div>
                   </div>
                   <div className="weather-item">
-                    <div className="weather-label">Temp</div>
-                    <div className="weather-value">{weatherData.temperature}</div>
+                    <div className="weather-label">🌡️ Temperature</div>
+                    <div className="weather-value">32°C</div>
                   </div>
                   <div className="weather-item">
-                    <div className="weather-label">Humidity</div>
-                    <div className="weather-value">{weatherData.humidity}</div>
+                    <div className="weather-label">💧 Humidity</div>
+                    <div className="weather-value">15%</div>
                   </div>
                 </div>
                 <div className="data-source">Data source: Real-time weather</div>
