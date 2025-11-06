@@ -1,35 +1,26 @@
-# Build stage
+# ---- Build stage ----
 FROM node:18-alpine AS build
 WORKDIR /app
 
-# Copy package files
-COPY package*.json ./
+ARG REACT_APP_API_URL
+ENV REACT_APP_API_URL=${REACT_APP_API_URL}
 
-# Install dependencies
+# Copy only deps first for better caching
+COPY package*.json ./
 RUN npm ci
 
-# Copy source code
-COPY . .
+# Copy the rest of the app
+COPY . ./
 
-# Build the React app
+# Build CRA
 RUN npm run build
 
-# Production stage with Nginx
+# ---- Runtime stage ----
 FROM nginx:alpine
 
-# Copy built assets from build stage
+# Serve the built app with nginx
 COPY --from=build /app/build /usr/share/nginx/html
 
-# Create a basic nginx configuration
-RUN echo 'server { \
-    listen 80; \
-    location / { \
-        root /usr/share/nginx/html; \
-        index index.html index.htm; \
-        try_files $uri $uri/ /index.html; \
-    } \
-}' > /etc/nginx/conf.d/default.conf
-
+# Optional (handy locally)
 EXPOSE 80
-
 CMD ["nginx", "-g", "daemon off;"]

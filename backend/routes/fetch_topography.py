@@ -105,7 +105,7 @@ def main():
                 
             slope = compute_slope(img, cx, cy)
 
-                        veg = fetch_landuse(lat, lon)
+            veg = fetch_landuse(lat, lon)
             
             # Create GeoJSON structure for MongoDB
             geo = {

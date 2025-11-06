@@ -124,7 +124,7 @@ router.get('/historical-wildfires', async (req, res) => {
                             record.source = 'NASA FIRMS';
                         });
 
-                        await HistoricalWildfire.insertMany(records);
+                        await historicalWildfire.insertMany(records);
                         eventRecordsTotal += records.length;
                     }
                 } catch (chunkErr) {
