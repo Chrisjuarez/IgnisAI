@@ -65,6 +65,6 @@ docker-compose up --build
 - **Travis Nguyen**  
 - **Emmanuel Montoya**
 
-## License
+## License 
 
 MIT License - see [LICENSE](LICENSE) for details.
