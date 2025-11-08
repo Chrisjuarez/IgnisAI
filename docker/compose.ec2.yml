@@ -1,0 +1,77 @@
+services:
+  mongodb:
+    image: mongo:7
+    restart: unless-stopped
+    command: ["--wiredTigerCacheSizeGB=0.5"]
+    volumes:
+      - mongo-data:/data/db
+    healthcheck:
+      test: ["CMD-SHELL", "mongosh --quiet --eval 'db.adminCommand({ ping: 1 })' || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  tilesvc:
+    build:
+      context: ..                      # repo root
+      dockerfile: docker/tilesvc.Dockerfile
+    image: ignis-tilesvc:latest
+    restart: unless-stopped
+    env_file:
+      - ./tilesvc.env
+    environment:
+      MODEL_PATH: /models/model.pt
+      PYTHONUNBUFFERED: "1"
+    volumes:
+      - ../models:/models:ro
+    ports: ["8008:8008"]
+    depends_on:
+      mongodb:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8008/healthz"]
+      interval: 20s
+      timeout: 3s
+      retries: 5
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  backend:
+    build:
+      context: ../backend
+      dockerfile: Dockerfile
+    image: ignis-backend:latest
+    restart: unless-stopped
+    env_file:
+      - ../backend/.env
+    environment:
+      - TILE_SVC=http://tilesvc:8008
+    depends_on:
+      tilesvc:
+        condition: service_started
+      mongodb:
+        condition: service_healthy
+    ports: ["5000:5000"]
+    # use wget (present in alpine) unless you add curl to the image
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:5000/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  mongo-data:
