@@ -5,6 +5,10 @@ const axios = require('axios');
 const router = express.Router();
 const TILE_SVC = process.env.TILE_SVC || 'http://localhost:8008';
 
+const SELF_BASE =
+  process.env.INTERNAL_SELF_BASE ||
+  `http://127.0.0.1:${process.env.PORT || 5000}`;
+
 async function getJSON(url, params = {}, timeout = 20000) {
   const r = await axios.get(url, { params, timeout });
   return r.data;
@@ -75,7 +79,8 @@ router.get('/vector', async (req, res) => {
     // 3) Weather (reuse your backend route for consistency)
     let wx = null;
     try {
-      const wr = await getJSON(`${req.protocol}://${req.get('host')}/api/weather/current`, { lat, lon }, 15000);
+      const wr = await getJSON(
+        new URL('/api/weather/current', SELF_BASE).toString(), { lat, lon }, 15000);
       wx = wr?.data?.current || null;
     } catch (_) { /* ignore */ }
 
@@ -110,9 +115,9 @@ router.post('/', async (req, res) => {
   try {
     const { lat, lng: lon, Tseq, thr } = req.body || {};
     if (!lat || !lon) return res.status(400).json({ error: 'lat and lon are required' });
-    const data = await getJSON(`${req.protocol}://${req.get('host')}/api/predict-fire-spread/vector`, {
-      lat, lon, Tseq: Tseq || 3, thr
-    }, 25000);
+    const data = await getJSON(
+      new URL('/api/predict-fire-spread/vector', SELF_BASE).toString(),
+      { lat, lon, Tseq: Tseq || 3, thr }, 25000);
     res.json(data);
   } catch (err) {
     res.status(502).json({ error: 'tilesvc_vector_failed', detail: err.message });
