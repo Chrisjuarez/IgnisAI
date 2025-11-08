@@ -1,0 +1,30 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "ListBucketsUsedByTilesvc",
+      "Effect": "Allow",
+      "Action": ["s3:ListBucket", "s3:GetBucketLocation"],
+      "Resource": [
+        "arn:aws:s3:::ignis-static-013957138138-usw1",
+        "arn:aws:s3:::ignis-dynamic-013957138138-usw1"
+      ]
+    },
+    {
+      "Sid": "ReadWriteObjectsForTilesvc",
+      "Effect": "Allow",
+      "Action": [
+        "s3:GetObject",
+        "s3:PutObject",
+        "s3:DeleteObject",
+        "s3:AbortMultipartUpload",
+        "s3:ListBucketMultipartUploads",
+        "s3:ListMultipartUploadParts"
+      ],
+      "Resource": [
+        "arn:aws:s3:::ignis-static-013957138138-usw1/*",
+        "arn:aws:s3:::ignis-dynamic-013957138138-usw1/*"
+      ]
+    }
+  ]
+}
