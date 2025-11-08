@@ -112,8 +112,13 @@ router.get('/wildfires', async (req, res) => {
       inserted = await Wildfire.insertMany(fires, { ordered: false });
     } catch { /* ignore dup errors */ }
 
-    console.log(`🔥 Parsed ${fires.length} (inserted ${inserted.length})`);
-    res.json({ message: 'Wildfire data fetched', count: fires.length, data: fires });
+    console.log(`🔥 Parsed ${rows.length} (inserted ${insertedCount})`);
+    // CI contract: when we successfully store rows, say "fetched & stored"
+    const message =
+      insertedCount > 0
+        ? 'Wildfire data fetched & stored'
+        : 'Wildfire data fetched';
+    return res.json({ message, count: insertedCount });
 
   } catch (err) {
     console.error('❌ Error fetching wildfire data:', err);
