@@ -65,4 +65,8 @@ html,
   padding: 15px;
   border-radius: 8px;
   box-shadow: 0 3px 14px rgba(0,0,0,0.4);
+  background: #fff;
+  color: #111; 
 }
+.mapboxgl-popup-content a { color: #0b5aa2; }
+.mapboxgl-popup-content strong { color: #333; }
