@@ -1,35 +1,22 @@
-# Build stage
-FROM node:18-alpine AS build
+# backend/Dockerfile
+FROM node:20-alpine
 WORKDIR /app
 
-# Copy package files (relative to backend/ context)
+# install prod deps first for better layer cache
 COPY package*.json ./
+RUN npm install --omit=dev --no-audit --no-fund
 
-# Install all dependencies
-RUN npm install
+# copy source
+COPY . .
 
-# Copy source code (relative to backend/ context)
-COPY . ./
+# runtime env
+ENV NODE_ENV=production
+ENV PORT=5000
+ENV TILE_SVC=http://tilesvc:8008
 
-# Run build if it exists
-RUN npm run build --if-present || echo "No build script found"
-
-# Production stage
-FROM node:18-alpine AS production
-WORKDIR /app
-
-# Create non-root user
-RUN addgroup -g 1001 -S nodejs && adduser -S nodejs -u 1001
-
-# Copy package files and install production deps only
-COPY package*.json ./
-RUN npm install --omit=dev
-
-# Copy built app from build stage
-COPY --from=build --chown=nodejs:nodejs /app ./
-
-# Switch to non-root user
-USER nodejs
+# healthcheck hits /health (Express serves both /health and /api/health)
+HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
+  CMD wget -qO- "http://127.0.0.1:${PORT}/health" || exit 1
 
 EXPOSE 5000
 CMD ["node", "app.js"]

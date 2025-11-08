@@ -1,0 +1,11 @@
+node_modules
+build
+npm-debug.log*
+coverage
+.vscode
+.env*
+.git
+.gitignore
+Dockerfile
+docker-compose*.yml
+*.md
