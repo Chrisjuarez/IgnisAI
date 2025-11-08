@@ -1,0 +1,11 @@
+.git/
+**/__pycache__/
+*.pyc
+.DS_Store
+node_modules/
+models/
+ignis_ml/notebooks/
+ignis_ml/data/raw/
+*.pt
+*.npz
+*.tif
