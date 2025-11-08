@@ -87,3 +87,4 @@ htmlcov/
 # data/
 # **/*.csv
 # **/*.xlsx
+models/*.pt

@@ -1,55 +1,91 @@
-// ignis-ai-backend/routes/fireData.js
+// backend/routes/fireData.js
 const express = require('express');
 const router = express.Router();
 const axios  = require('axios');
 const Wildfire = require('../models/Wildfire');
 require('dotenv').config();
 
-// Parse the 14-col “area” CSV from FIRMS into objects
-function parseCSV(csvText) {
+// Robust confidence parser
+function asConfidencePct(conf) {
+  const s = String(conf ?? '').trim().toLowerCase();
+  if (!s) return 60;                        // neutral default instead of 0
+  const n = Number(s);
+  if (!Number.isNaN(n)) {
+    if (n <= 1) return Math.round(n * 100); // 0..1 → 0..100
+    return Math.max(0, Math.min(100, Math.round(n)));
+  }
+  if (s === 'l' || s === 'low') return 25;
+  if (s === 'n' || s === 'nominal' || s === 'med' || s === 'medium') return 60;
+  if (s === 'h' || s === 'high') return 90;
+  return 60;                                // unknown categorical → neutral
+}
+
+// Simple heuristics for likely gas flares
+function isLikelyFlare({ daynight, frp, brightness, confidencePct }) {
+  return (daynight === 'N') && (confidencePct <= 60) && (Number(frp) < 25) && (Number(brightness) < 330);
+}
+
+// Parse FIRMS area CSV (VIIRS 14 columns)
+function parseCSV(csvText, opts = {}) {
+  const { excludeFlares = true, predictableOnly = false } = opts;
   const lines = csvText.trim().split('\n');
-  const dataLines = lines.slice(1);            // drop header
+  const dataLines = lines.slice(1);
 
-  return dataLines
-    .map(line => {
-      const cols = line.split(',');
-      if (cols.length < 14) return null;       // malformed row
+  const rows = dataLines.map(line => {
+    const cols = line.split(',');
+    if (cols.length < 14) return null;
 
-      // Column ordering: latitude,longitude,bright_ti4,scan,track,
-      //                 acq_date,acq_time,satellite,instrument,
-      //                 confidence,version,bright_ti5,frp,daynight
-      const [
-        lat, lon, brightTi4, scan, track,
-        acq_date, acq_time,
-        satellite, instrument,
-        confidence, version,
-        brightTi5, frp, daynight
-      ] = cols;
+    const [
+      lat, lon, bright_ti4, scan, track,
+      acq_date, acq_time, satellite, instrument,
+      confidence, version, bright_ti5, frp, daynight
+    ] = cols;
 
-      // build ISO timestamp: “YYYY-MM-DDTHH:MM:00Z”
-      const hhmm = acq_time.padStart(4, '0');
-      const iso = `${acq_date}T${hhmm.slice(0,2)}:${hhmm.slice(2)}:00Z`;
+    const hhmm = String(acq_time || '').padStart(4, '0');
+    const iso = `${acq_date}T${hhmm.slice(0,2)}:${hhmm.slice(2)}:00Z`;
 
-      return {
-        latitude:   parseFloat(lat),
-        longitude:  parseFloat(lon),
-        brightness: parseFloat(brightTi4),
-        confidence: cols[3],                  // stored as string (e.g. "0.78")
-        satellite,
-        timestamp:  new Date(iso)
-      };
-    })
-    .filter(f =>
-      f &&
-      !isNaN(f.latitude) &&
-      !isNaN(f.longitude) &&
-      !isNaN(f.brightness) &&
-      f.timestamp.toString() !== 'Invalid Date'
-    );
+    const latitude   = parseFloat(lat);
+    const longitude  = parseFloat(lon);
+    const brightness = parseFloat(bright_ti4);
+    const frpVal     = parseFloat(frp);
+    const confidencePct = asConfidencePct(confidence);
+
+    const brightnessCat =
+      brightness >= 375 ? 'Extreme' :
+      brightness >= 350 ? 'Severe'  :
+      brightness >= 325 ? 'Moderate': 'Small';
+
+    const predictable = (brightness >= 325) && (confidencePct >= 50);
+
+    return {
+      latitude,
+      longitude,
+      brightness,
+      confidence: confidencePct,     // store as 0..100 number
+      satellite,
+      instrument,
+      frp: frpVal,
+      daynight,
+      brightnessCat,
+      predictable,
+      timestamp: new Date(iso)
+    };
+  }).filter(Boolean);
+
+  const filtered = rows.filter(f => {
+    if (excludeFlares && isLikelyFlare(f)) return false;
+    if (predictableOnly && !f.predictable) return false;
+    return true;
+  });
+
+  return filtered;
 }
 
 router.get('/wildfires', async (req, res) => {
   try {
+    const excludeFlares   = (req.query.excludeFlares ?? 'true') !== 'false';
+    const predictableOnly = (req.query.predictableOnly ?? 'false') === 'true';
+
     const url = [
       'https://firms.modaps.eosdis.nasa.gov/api/area/csv',
       process.env.NASA_API_KEY,
@@ -61,24 +97,23 @@ router.get('/wildfires', async (req, res) => {
     console.log(`Fetching FIRMS area data from:\n  ${url}`);
     const { data: csvText } = await axios.get(url, {
       headers: { 'User-Agent': 'ignis-ai (chrisjuarez1596@gmail.com)' },
-      responseType: 'text'
+      responseType: 'text',
+      timeout: 20000
     });
 
-    const fires = parseCSV(csvText);
+    const fires = parseCSV(csvText, { excludeFlares, predictableOnly });
     if (fires.length === 0) {
       console.log('⚠️  No valid wildfire rows parsed.');
       return res.json({ message: 'No valid fire data', count: 0, data: [] });
     }
 
-    // insertMany will bulk‐insert all your clean objects
-    const inserted = await Wildfire.insertMany(fires);
-    console.log(`🔥  Inserted ${inserted.length} wildfires`);
+    let inserted = [];
+    try {
+      inserted = await Wildfire.insertMany(fires, { ordered: false });
+    } catch { /* ignore dup errors */ }
 
-    res.json({
-      message: 'Wildfire data fetched & stored',
-      count: inserted.length,
-      data: inserted
-    });
+    console.log(`🔥 Parsed ${fires.length} (inserted ${inserted.length})`);
+    res.json({ message: 'Wildfire data fetched', count: fires.length, data: fires });
 
   } catch (err) {
     console.error('❌ Error fetching wildfire data:', err);
