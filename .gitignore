@@ -87,3 +87,14 @@ htmlcov/
 # data/
 # **/*.csv
 # **/*.xlsx
+.env
+backend/.env
+
+*.env
+*/.env
+docker/env_backend
+docker/tilesvc.env
+tilesvc.env
+frontend/.env
+*.pem
+.DS_Store

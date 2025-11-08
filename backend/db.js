@@ -6,27 +6,33 @@ const mongoURI = process.env.MONGODB_URI;
 
 async function connectDB() {
   if (process.env.NODE_ENV === 'test') {
-    console.log('🧪 Test mode: Skipping MongoDB connection');
+    console.log('🧪 Test mode: skipping Mongo connection');
     return;
   }
-  
   if (!mongoURI) {
-    throw new Error('❌ MONGODB_URI is not set in environment variables');
+    throw new Error('MONGODB_URI is not set');
   }
-  
-  if (mongoose.connection.readyState >= 1) {
-    console.log('✅ MongoDB already connected');
+  if (mongoose.connection.readyState === 1) {
+    console.log('✅ Mongo already connected');
     return mongoose.connection;
   }
-  
-  try {
-    await mongoose.connect(mongoURI);
-    console.log(`✅ MongoDB Connected: ${mongoose.connection.host}:${mongoose.connection.port}/${mongoose.connection.name}`);
-    return mongoose.connection;
-  } catch (error) {
-    console.error('❌ MongoDB connection failed:', error.message);
-    process.exit(1);
-  }
+
+  // Helpful logs
+  mongoose.connection.on('connected', () => console.log('✅ Mongo connected'));
+  mongoose.connection.on('error', (err) => console.error('❌ Mongo error:', err.message));
+  mongoose.connection.on('disconnected', () => console.warn('⚠️ Mongo disconnected'));
+
+  // Reasonable connect settings; Atlas uses TLS automatically with SRV
+  await mongoose.connect(mongoURI, {
+    serverSelectionTimeoutMS: 5000,  // fail fast if Atlas not reachable/allowed
+    socketTimeoutMS: 20000,
+    maxPoolSize: 10,
+    retryWrites: true,
+    w: 'majority',
+    appName: 'IgnisAI'
+  });
+
+  return mongoose.connection;
 }
 
 module.exports = connectDB;
