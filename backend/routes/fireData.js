@@ -1,44 +1,47 @@
 // backend/routes/fireData.js
 const express = require('express');
 const router = express.Router();
-const axios  = require('axios');
+const axios = require('axios');
 const Wildfire = require('../models/Wildfire');
 require('dotenv').config();
-// --- Minimal, test-safe rate limiting (satisfies CodeQL) ---
-const RATE_WINDOW_MS = Number(process.env.WILDFIRES_RATE_MS || 30000); // 30s default
-const _lastHitByIp = new Map();
-function wildfireRateLimit(req, res, next) {
+
+const rateLimit = require('express-rate-limit');
+
+// Minimal, test-safe rate limiting (satisfies CodeQL)
+const wildfireLimiter = rateLimit({
+  windowMs: Number(process.env.WILDFIRES_WINDOW_MS || 30_000), // 30s
+  max: Number(process.env.WILDFIRES_MAX || 3),                 // 3 reqs/window
+  standardHeaders: true,
+  legacyHeaders: false,
   // keep CI/Jest unaffected
-  if (process.env.NODE_ENV === 'test') return next();
+  skip: () => process.env.NODE_ENV === 'test',
+});
 
-  const ip = req.ip || req.headers['x-forwarded-for'] || 'global';
-  const now = Date.now();
-  const last = _lastHitByIp.get(ip) || 0;
-  if (now - last < RATE_WINDOW_MS) {
-    return res.status(429).json({ error: 'Too Many Requests' });
-  }
-  _lastHitByIp.set(ip, now);
-  next();
-}
+// Apply limiter to this endpoint path
+router.use('/wildfires', wildfireLimiter);
 
-// Robust confidence parser
+// ---------- helpers ----------
 function asConfidencePct(conf) {
   const s = String(conf ?? '').trim().toLowerCase();
-  if (!s) return 60;                        // neutral default instead of 0
+  if (!s) return 60; // neutral default
   const n = Number(s);
   if (!Number.isNaN(n)) {
-    if (n <= 1) return Math.round(n * 100); // 0..1 → 0..100
+    if (n <= 1) return Math.round(n * 100); // 0..1 -> 0..100
     return Math.max(0, Math.min(100, Math.round(n)));
   }
   if (s === 'l' || s === 'low') return 25;
   if (s === 'n' || s === 'nominal' || s === 'med' || s === 'medium') return 60;
   if (s === 'h' || s === 'high') return 90;
-  return 60;                                // unknown categorical → neutral
+  return 60;
 }
 
-// Simple heuristics for likely gas flares
 function isLikelyFlare({ daynight, frp, brightness, confidencePct }) {
-  return (daynight === 'N') && (confidencePct <= 60) && (Number(frp) < 25) && (Number(brightness) < 330);
+  return (
+    daynight === 'N' &&
+    confidencePct <= 60 &&
+    Number(frp) < 25 &&
+    Number(brightness) < 330
+  );
 }
 
 // Parse FIRMS area CSV (VIIRS 14 columns)
@@ -47,48 +50,50 @@ function parseCSV(csvText, opts = {}) {
   const lines = csvText.trim().split('\n');
   const dataLines = lines.slice(1);
 
-  const rows = dataLines.map(line => {
-    const cols = line.split(',');
-    if (cols.length < 14) return null;
+  const rows = dataLines
+    .map((line) => {
+      const cols = line.split(',');
+      if (cols.length < 14) return null;
 
-    const [
-      lat, lon, bright_ti4, scan, track,
-      acq_date, acq_time, satellite, instrument,
-      confidence, version, bright_ti5, frp, daynight
-    ] = cols;
+      const [
+        lat, lon, bright_ti4, scan, track,
+        acq_date, acq_time, satellite, instrument,
+        confidence, version, bright_ti5, frp, daynight,
+      ] = cols;
 
-    const hhmm = String(acq_time || '').padStart(4, '0');
-    const iso = `${acq_date}T${hhmm.slice(0,2)}:${hhmm.slice(2)}:00Z`;
+      const hhmm = String(acq_time || '').padStart(4, '0');
+      const iso = `${acq_date}T${hhmm.slice(0, 2)}:${hhmm.slice(2)}:00Z`;
 
-    const latitude   = parseFloat(lat);
-    const longitude  = parseFloat(lon);
-    const brightness = parseFloat(bright_ti4);
-    const frpVal     = parseFloat(frp);
-    const confidencePct = asConfidencePct(confidence);
+      const latitude = parseFloat(lat);
+      const longitude = parseFloat(lon);
+      const brightness = parseFloat(bright_ti4);
+      const frpVal = parseFloat(frp);
+      const confidencePct = asConfidencePct(confidence);
 
-    const brightnessCat =
-      brightness >= 375 ? 'Extreme' :
-      brightness >= 350 ? 'Severe'  :
-      brightness >= 325 ? 'Moderate': 'Small';
+      const brightnessCat =
+        brightness >= 375 ? 'Extreme' :
+        brightness >= 350 ? 'Severe'  :
+        brightness >= 325 ? 'Moderate': 'Small';
 
-    const predictable = (brightness >= 325) && (confidencePct >= 50);
+      const predictable = brightness >= 325 && confidencePct >= 50;
 
-    return {
-      latitude,
-      longitude,
-      brightness,
-      confidence: confidencePct,     // store as 0..100 number
-      satellite,
-      instrument,
-      frp: frpVal,
-      daynight,
-      brightnessCat,
-      predictable,
-      timestamp: new Date(iso)
-    };
-  }).filter(Boolean);
+      return {
+        latitude,
+        longitude,
+        brightness,
+        confidence: confidencePct, // 0..100
+        satellite,
+        instrument,
+        frp: frpVal,
+        daynight,
+        brightnessCat,
+        predictable,
+        timestamp: new Date(iso),
+      };
+    })
+    .filter(Boolean);
 
-  const filtered = rows.filter(f => {
+  const filtered = rows.filter((f) => {
     if (excludeFlares && isLikelyFlare(f)) return false;
     if (predictableOnly && !f.predictable) return false;
     return true;
@@ -97,7 +102,8 @@ function parseCSV(csvText, opts = {}) {
   return filtered;
 }
 
-router.get('/wildfires', wildfireRateLimit, async (req, res) => {
+// ---------- route ----------
+router.get('/wildfires', async (req, res) => {
   try {
     const excludeFlares   = (req.query.excludeFlares ?? 'true') !== 'false';
     const predictableOnly = (req.query.predictableOnly ?? 'false') === 'true';
@@ -106,34 +112,38 @@ router.get('/wildfires', wildfireRateLimit, async (req, res) => {
     const keyPart  = NASA_KEY ? `${NASA_KEY}/` : '';
     const url = `https://firms.modaps.eosdis.nasa.gov/api/area/csv/${keyPart}VIIRS_NOAA21_NRT/-125.0,24.0,-66.0,49.0/2`;
 
+    // Safe log (redact key)
     const redactedUrl = NASA_KEY ? url.replace(NASA_KEY, '[REDACTED_KEY]') : url;
-    console.log('Fetching FIRMS area CSV from NASA FIRMS (US bbox)');
+    console.log(`Fetching FIRMS area CSV from:\n  ${redactedUrl}`);
+
     const { data: csvText } = await axios.get(url, {
       headers: { 'User-Agent': 'ignis-ai (chrisjuarez1596@gmail.com)' },
       responseType: 'text',
-      timeout: 20000
+      timeout: 20000,
     });
 
     const fires = parseCSV(csvText, { excludeFlares, predictableOnly });
     const parsedCount = fires.length;
 
-    // ✅ EARLY RETURN for header-only / no rows
+    // Header-only / no rows
     if (parsedCount === 0) {
       console.log('⚠️  No valid wildfire rows parsed.');
       return res.status(200).json({ message: 'No valid fire data', count: 0, data: [] });
     }
 
-    // Insert rows; ignore duplicate-key errors
+    // Insert; ignore dup-key errors
     let inserted = [];
     try {
       inserted = await Wildfire.insertMany(fires, { ordered: false });
-    } catch (_) { /* ignore dup errors */ }
+    } catch (_) { /* ignore duplicate errors */ }
 
     const insertedCount = Array.isArray(inserted) ? inserted.length : 0;
     console.log(`🔥 Parsed ${parsedCount} (inserted ${insertedCount})`);
 
-    const message =
-      insertedCount > 0 ? 'Wildfire data fetched & stored' : 'Wildfire data fetched';
+    const message = insertedCount > 0
+      ? 'Wildfire data fetched & stored'
+      : 'Wildfire data fetched';
+
     return res.status(200).json({ message, count: insertedCount });
   } catch (err) {
     console.error('❌ Error fetching wildfire data:', err);
