@@ -4,6 +4,22 @@ const router = express.Router();
 const axios  = require('axios');
 const Wildfire = require('../models/Wildfire');
 require('dotenv').config();
+// --- Minimal, test-safe rate limiting (satisfies CodeQL) ---
+const RATE_WINDOW_MS = Number(process.env.WILDFIRES_RATE_MS || 30000); // 30s default
+const _lastHitByIp = new Map();
+function wildfireRateLimit(req, res, next) {
+  // keep CI/Jest unaffected
+  if (process.env.NODE_ENV === 'test') return next();
+
+  const ip = req.ip || req.headers['x-forwarded-for'] || 'global';
+  const now = Date.now();
+  const last = _lastHitByIp.get(ip) || 0;
+  if (now - last < RATE_WINDOW_MS) {
+    return res.status(429).json({ error: 'Too Many Requests' });
+  }
+  _lastHitByIp.set(ip, now);
+  next();
+}
 
 // Robust confidence parser
 function asConfidencePct(conf) {
@@ -81,7 +97,7 @@ function parseCSV(csvText, opts = {}) {
   return filtered;
 }
 
-router.get('/wildfires', async (req, res) => {
+router.get('/wildfires', wildfireRateLimit, async (req, res) => {
   try {
     const excludeFlares   = (req.query.excludeFlares ?? 'true') !== 'false';
     const predictableOnly = (req.query.predictableOnly ?? 'false') === 'true';
@@ -91,7 +107,7 @@ router.get('/wildfires', async (req, res) => {
     const url = `https://firms.modaps.eosdis.nasa.gov/api/area/csv/${keyPart}VIIRS_NOAA21_NRT/-125.0,24.0,-66.0,49.0/2`;
 
     const redactedUrl = NASA_KEY ? url.replace(NASA_KEY, '[REDACTED_KEY]') : url;
-    console.log(`Fetching FIRMS area data from:\n  ${redactedUrl}`);
+    console.log('Fetching FIRMS area CSV from NASA FIRMS (US bbox)');
     const { data: csvText } = await axios.get(url, {
       headers: { 'User-Agent': 'ignis-ai (chrisjuarez1596@gmail.com)' },
       responseType: 'text',
