@@ -7,26 +7,24 @@ require('dotenv').config();
 
 const rateLimit = require('express-rate-limit');
 
-// Minimal, test-safe rate limiting (satisfies CodeQL)
+// Lightweight, test-safe limiter for this route
 const wildfireLimiter = rateLimit({
   windowMs: Number(process.env.WILDFIRES_WINDOW_MS || 30_000), // 30s
-  max: Number(process.env.WILDFIRES_MAX || 3),                 // 3 reqs/window
+  max: Number(process.env.WILDFIRES_MAX || 3),                 // 3 reqs / window
   standardHeaders: true,
   legacyHeaders: false,
-  // keep CI/Jest unaffected
-  skip: () => process.env.NODE_ENV === 'test',
+  skip: () => process.env.NODE_ENV === 'test',                 // don’t affect Jest
 });
 
-// Apply limiter to this endpoint path
-router.use('/wildfires', wildfireLimiter);
+// --- Helpers ---------------------------------------------------------------
 
-// ---------- helpers ----------
+// Confidence to 0..100
 function asConfidencePct(conf) {
   const s = String(conf ?? '').trim().toLowerCase();
-  if (!s) return 60; // neutral default
+  if (!s) return 60; // neutral default, not 0
   const n = Number(s);
   if (!Number.isNaN(n)) {
-    if (n <= 1) return Math.round(n * 100); // 0..1 -> 0..100
+    if (n <= 1) return Math.round(n * 100); // 0..1 → 0..100
     return Math.max(0, Math.min(100, Math.round(n)));
   }
   if (s === 'l' || s === 'low') return 25;
@@ -35,6 +33,7 @@ function asConfidencePct(conf) {
   return 60;
 }
 
+// Heuristic to drop likely gas flares
 function isLikelyFlare({ daynight, frp, brightness, confidencePct }) {
   return (
     daynight === 'N' &&
@@ -51,14 +50,14 @@ function parseCSV(csvText, opts = {}) {
   const dataLines = lines.slice(1);
 
   const rows = dataLines
-    .map((line) => {
+    .map(line => {
       const cols = line.split(',');
       if (cols.length < 14) return null;
 
       const [
         lat, lon, bright_ti4, scan, track,
         acq_date, acq_time, satellite, instrument,
-        confidence, version, bright_ti5, frp, daynight,
+        confidence, version, bright_ti5, frp, daynight
       ] = cols;
 
       const hhmm = String(acq_time || '').padStart(4, '0');
@@ -73,7 +72,7 @@ function parseCSV(csvText, opts = {}) {
       const brightnessCat =
         brightness >= 375 ? 'Extreme' :
         brightness >= 350 ? 'Severe'  :
-        brightness >= 325 ? 'Moderate': 'Small';
+        brightness >= 325 ? 'Moderate' : 'Small';
 
       const predictable = brightness >= 325 && confidencePct >= 50;
 
@@ -81,7 +80,7 @@ function parseCSV(csvText, opts = {}) {
         latitude,
         longitude,
         brightness,
-        confidence: confidencePct, // 0..100
+        confidence: confidencePct, // store as number 0..100
         satellite,
         instrument,
         frp: frpVal,
@@ -93,17 +92,16 @@ function parseCSV(csvText, opts = {}) {
     })
     .filter(Boolean);
 
-  const filtered = rows.filter((f) => {
+  return rows.filter(f => {
     if (excludeFlares && isLikelyFlare(f)) return false;
     if (predictableOnly && !f.predictable) return false;
     return true;
   });
-
-  return filtered;
 }
 
-// ---------- route ----------
-router.get('/wildfires', async (req, res) => {
+// --- Route ----------------------------------------------------------------
+
+router.get('/wildfires', wildfireLimiter, async (req, res) => {
   try {
     const excludeFlares   = (req.query.excludeFlares ?? 'true') !== 'false';
     const predictableOnly = (req.query.predictableOnly ?? 'false') === 'true';
@@ -112,14 +110,12 @@ router.get('/wildfires', async (req, res) => {
     const keyPart  = NASA_KEY ? `${NASA_KEY}/` : '';
     const url = `https://firms.modaps.eosdis.nasa.gov/api/area/csv/${keyPart}VIIRS_NOAA21_NRT/-125.0,24.0,-66.0,49.0/2`;
 
-    // Safe log (redact key)
-    const redactedUrl = NASA_KEY ? url.replace(NASA_KEY, '[REDACTED_KEY]') : url;
-    console.log(`Fetching FIRMS area CSV from:\n  ${redactedUrl}`);
+    // Do NOT log the URL or key (CodeQL: js/clear-text-logging)
 
     const { data: csvText } = await axios.get(url, {
       headers: { 'User-Agent': 'ignis-ai (chrisjuarez1596@gmail.com)' },
       responseType: 'text',
-      timeout: 20000,
+      timeout: 20_000,
     });
 
     const fires = parseCSV(csvText, { excludeFlares, predictableOnly });
@@ -127,17 +123,17 @@ router.get('/wildfires', async (req, res) => {
 
     // Header-only / no rows
     if (parsedCount === 0) {
-      console.log('⚠️  No valid wildfire rows parsed.');
       return res.status(200).json({ message: 'No valid fire data', count: 0, data: [] });
     }
 
-    // Insert; ignore dup-key errors
+    // Insert rows; ignore duplicate errors
     let inserted = [];
     try {
       inserted = await Wildfire.insertMany(fires, { ordered: false });
-    } catch (_) { /* ignore duplicate errors */ }
+    } catch (_) { /* ignore dup key errors */ }
 
     const insertedCount = Array.isArray(inserted) ? inserted.length : 0;
+    // ok to log counts
     console.log(`🔥 Parsed ${parsedCount} (inserted ${insertedCount})`);
 
     const message = insertedCount > 0
@@ -147,7 +143,7 @@ router.get('/wildfires', async (req, res) => {
     return res.status(200).json({ message, count: insertedCount });
   } catch (err) {
     console.error('❌ Error fetching wildfire data:', err);
-    res.status(500).json({ error: err.message });
+    return res.status(500).json({ error: err.message });
   }
 });
 
