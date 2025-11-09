@@ -101,25 +101,24 @@ router.get('/wildfires', async (req, res) => {
     const fires = parseCSV(csvText, { excludeFlares, predictableOnly });
     const parsedCount = fires.length;
 
+    // ✅ EARLY RETURN for header-only / no rows
     if (parsedCount === 0) {
       console.log('⚠️  No valid wildfire rows parsed.');
+      return res.status(200).json({ message: 'No valid fire data', count: 0, data: [] });
     }
 
-    // insert only if we have rows; ignore duplicate-key errors
+    // Insert rows; ignore duplicate-key errors
     let inserted = [];
     try {
-      if (parsedCount > 0) {
-        inserted = await Wildfire.insertMany(fires, { ordered: false });
-      }
+      inserted = await Wildfire.insertMany(fires, { ordered: false });
     } catch (_) { /* ignore dup errors */ }
 
     const insertedCount = Array.isArray(inserted) ? inserted.length : 0;
     console.log(`🔥 Parsed ${parsedCount} (inserted ${insertedCount})`);
 
-    // Keep the exact message your CI test expects
-    const message = insertedCount > 0 ? 'Wildfire data fetched & stored' : 'Wildfire data fetched';
+    const message =
+      insertedCount > 0 ? 'Wildfire data fetched & stored' : 'Wildfire data fetched';
     return res.status(200).json({ message, count: insertedCount });
-
   } catch (err) {
     console.error('❌ Error fetching wildfire data:', err);
     res.status(500).json({ error: err.message });
