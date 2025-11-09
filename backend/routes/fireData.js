@@ -86,11 +86,12 @@ router.get('/wildfires', async (req, res) => {
     const excludeFlares   = (req.query.excludeFlares ?? 'true') !== 'false';
     const predictableOnly = (req.query.predictableOnly ?? 'false') === 'true';
 
-    const NASA_KEY = process.env.NASA_API_KEY || '';
+    const NASA_KEY = process.env.NASA_API_KEY || process.env.NASA_KEY || '';
     const keyPart  = NASA_KEY ? `${NASA_KEY}/` : '';
     const url = `https://firms.modaps.eosdis.nasa.gov/api/area/csv/${keyPart}VIIRS_NOAA21_NRT/-125.0,24.0,-66.0,49.0/2`;
 
-    console.log(`Fetching FIRMS area data from:\n  ${url}`);
+    const redactedUrl = NASA_KEY ? url.replace(NASA_KEY, '[REDACTED_KEY]') : url;
+    console.log(`Fetching FIRMS area data from:\n  ${redactedUrl}`);
     const { data: csvText } = await axios.get(url, {
       headers: { 'User-Agent': 'ignis-ai (chrisjuarez1596@gmail.com)' },
       responseType: 'text',
@@ -116,7 +117,8 @@ router.get('/wildfires', async (req, res) => {
     console.log(`🔥 Parsed ${parsedCount} (inserted ${insertedCount})`);
 
     // Keep the exact message your CI test expects
-    return res.status(200).json({ message: 'Wildfire data fetched & stored', count: insertedCount });
+    const message = insertedCount > 0 ? 'Wildfire data fetched & stored' : 'Wildfire data fetched';
+    return res.status(200).json({ message, count: insertedCount });
 
   } catch (err) {
     console.error('❌ Error fetching wildfire data:', err);
