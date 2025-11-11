@@ -87,6 +87,7 @@ htmlcov/
 # data/
 # **/*.csv
 # **/*.xlsx
+models/*.pt
 .env
 backend/.env
 
