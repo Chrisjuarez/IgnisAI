@@ -10,21 +10,16 @@ global.TextEncoder = TextEncoder;
 // Mock AuthContext to provide hook and provider
 jest.mock('./components/auth/AuthContext', () => {
   const React = require('react');
-
-  const useAuthMock = jest.fn();
-  useAuthMock.mockImplementation(() => ({
-    user: null,
-    isAuthenticated: false,
-    loading: false,
-    login: jest.fn(),
-    register: jest.fn(),
-    logout: jest.fn(),
-    forgotPassword: jest.fn()
-  }));
-
   return {
-    __esModule: true,
-    useAuth: useAuthMock,
+    useAuth: () => ({
+      user: null,
+      isAuthenticated: false,
+      loading: false,
+      login: jest.fn(),
+      register: jest.fn(),
+      logout: jest.fn(),
+      forgotPassword: jest.fn()
+    }),
     AuthProvider: ({ children }) => <div data-testid="auth-provider">{children}</div>
   };
 });
