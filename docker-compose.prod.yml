@@ -1,0 +1,20 @@
+version: '3.8'
+
+services:
+  backend:
+    image: ghcr.io/${OWNER}/ignisai-backend:${DEPLOY_TAG:-latest}
+    env_file:
+      - ./env_backend
+    depends_on:
+      tilesvc:
+        condition: service_healthy
+      mongodb:
+        condition: service_started
+    restarts: unless-stopped
+  frontend:
+    image: ghcr.io/${OWNER}/ignisai-frontend:${DEPLOY_TAG:-latest}
+    environment:
+      - REACT_APP_API_URL=https://csuf-ignisai.com/
+    depends_on:
+      backend:
+        condition: service_healthy
