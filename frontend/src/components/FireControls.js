@@ -151,12 +151,14 @@ function FireControls({
 
   return (
     <div
+      data-color-scheme="light"
       style={{
         position: 'absolute',
         top: '1rem',
         left: '1rem',
         width: '260px',
         backgroundColor: '#ffffffcc',
+        color: '#111',
         borderRadius: '8px',
         boxShadow: '0 2px 8px rgba(0,0,0,0.3)',
         fontFamily: 'sans-serif',
@@ -363,6 +365,8 @@ const styles = {
     padding: '0.4rem',
     fontSize: '0.9rem',
     marginBottom: '0.5rem',
+    background: '#fff',              // ← light field bg
+    color: '#111', 
     cursor: 'pointer'
   },
   label: {

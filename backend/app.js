@@ -9,6 +9,7 @@ dotenv.config();
 const app = express();
 app.set('trust proxy', 1);
 
+// CORS (frontend can be http://<EC2> because nginx serves it on :80)
 const FRONTEND_ORIGIN = process.env.CORS_ORIGIN || 'http://localhost:3000';
 app.use(cors({
   origin: FRONTEND_ORIGIN,
@@ -16,13 +17,20 @@ app.use(cors({
   allowedHeaders: ['Content-Type','Authorization'],
   credentials: true
 }));
+
 app.use(express.json());
-app.use('/api/auth', require('./routes/auth'));
 
-// Health for CI/tests
-app.get('/health', (_req, res) => res.status(200).json({ status: 'ok' }));
+// Auth route (safe even if DB not ready yet)
+try {
+  app.use('/api/auth', require('./routes/auth'));
+} catch (e) {
+  console.warn(`Skipping /api/auth: ${e.message}`);
+}
 
-// Safely mount routes if they exist (avoids Jest crashing when a file is missing)
+// Health for CI/tests — stays responsive even before DB connects
+app.get(['/health', '/api/health'], (_req, res) => res.status(200).json({ status: 'ok' }));
+
+// Helper to mount optional routes without crashing
 function tryMount(mountPath, modulePath) {
   try {
     app.use(mountPath, require(modulePath));
@@ -32,23 +40,40 @@ function tryMount(mountPath, modulePath) {
 }
 
 // IMPORTANT: match file name casing under backend/routes
-tryMount('/api', './routes/fireData');                // or './routes/firedata' if lowercase
+tryMount('/api', './routes/fireData');        // or './routes/firedata' if you renamed
 tryMount('/api/weather', './routes/weather');
 tryMount('/api/topography', './routes/topography');
 tryMount('/api/ndvi', './routes/ndvi');
+
+// 🔹 proxy to tilesvc
 tryMount('/api/predict-fire-spread', './routes/predictFireSpread');
 
-// Export app for tests
+// Export app for tests (supertest uses this path and won't start the server)
 module.exports = app;
 
-// Only start server when run directly
+// ---- Run server directly (not in tests) ----
 if (require.main === module) {
-  (async () => {
-    await connectDB(); // db.js no-ops in tests
-    const PORT = process.env.PORT || 5000;
-    app.listen(PORT, () => console.log(`🚀 Backend on :${PORT}`));
-  })().catch(err => {
-    console.error('❌ Startup error:', err);
-    process.exit(1);
+  const PORT = process.env.PORT || 5000;
+
+  // 1) Start HTTP server first so health checks pass immediately
+  app.listen(PORT, '0.0.0.0', () => {
+    console.log(`🚀 Backend listening on :${PORT}`);
   });
+
+  // 2) Connect to Mongo in the background with retry
+  const tryConnect = async (delayMs = 3000) => {
+    try {
+      await connectDB(); // use MONGODB_URI from env
+      console.log('✅ Mongo connected');
+    } catch (err) {
+      console.error(`⚠️  Mongo connect failed: ${err.message} — retrying in ${delayMs}ms`);
+      setTimeout(() => tryConnect(delayMs), delayMs);
+    }
+  };
+  tryConnect();
+
+  // Graceful shutdown logs (optional)
+  process.on('SIGINT', () => { console.log('SIGINT received'); process.exit(0); });
+  process.on('SIGTERM', () => { console.log('SIGTERM received'); process.exit(0); });
+  process.on('unhandledRejection', err => console.error('Unhandled rejection:', err));
 }

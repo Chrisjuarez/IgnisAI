@@ -1,26 +1,23 @@
-# ---- Build stage ----
-FROM node:18-alpine AS build
+# ==== Build stage ====
+FROM node:20-alpine AS build
 WORKDIR /app
 
-ARG REACT_APP_API_URL
-ENV REACT_APP_API_URL=${REACT_APP_API_URL}
-
-# Copy only deps first for better caching
 COPY package*.json ./
 RUN npm ci
-
-# Copy the rest of the app
-COPY . ./
-
-# Build CRA
+COPY . .
 RUN npm run build
 
-# ---- Runtime stage ----
-FROM nginx:alpine
+# ==== Runtime (NGINX) ====
+FROM nginx:1.27-alpine
 
-# Serve the built app with nginx
+# Copy built app
 COPY --from=build /app/build /usr/share/nginx/html
+# Copy NGINX proxy config
+COPY nginx.conf /etc/nginx/conf.d/default.conf
+# Copy runtime entrypoint (creates /env.js and injects before main bundle)
+COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
+RUN chmod +x /usr/local/bin/docker-entrypoint.sh
 
-# Optional (handy locally)
 EXPOSE 80
+ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
 CMD ["nginx", "-g", "daemon off;"]

@@ -1,4 +1,5 @@
 version: '3.8'
+
 services:
   mongodb:
     image: mongo:6.0
@@ -8,6 +9,23 @@ services:
       - mongo_data:/data/db
     networks: [ignisai-network]
 
+  # 🔥 FastAPI tile service that runs your .pt model
+  tilesvc:
+    build:
+      context: .
+      dockerfile: docker/tilesvc.Dockerfile
+    env_file:
+      - ./docker/tilesvc.env
+    environment:
+      # the model will be mounted to /models/model.pt
+      - MODEL_PATH=/models/model.pt
+    volumes:
+      - ./models:/models:ro
+    ports:
+      - "8008:8008"
+    networks: [ignisai-network]
+    restart: unless-stopped
+
   backend:
     build:
       context: ./backend
@@ -15,13 +33,17 @@ services:
     env_file:
       - ./backend/.env
     environment:
-      # when running in compose, talk to the compose mongo host
+      # talk to compose mongo host
       MONGODB_URI: mongodb://mongodb:27017/ignisai
       PORT: 5000
       CORS_ORIGIN: http://localhost:3000
+      # let backend proxy requests to tilesvc
+      TILE_SVC: http://tilesvc:8008
     ports:
       - "5000:5000"
-    depends_on: [mongodb]
+    depends_on:
+      - mongodb
+      - tilesvc
     networks: [ignisai-network]
 
   frontend:
