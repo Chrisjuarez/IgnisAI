@@ -1,0 +1,63 @@
+services:
+  tilesvc:
+    image: ${TILE_IMAGE:-013957138138.dkr.ecr.us-west-1.amazonaws.com/ignis-tilesvc:latest}
+    build:
+      context: ..                         # was .  (compose is in docker/)
+      dockerfile: docker/tilesvc.Dockerfile
+    env_file:
+      - ../tilesvc.env                     # was ./docker/tilesvc.env
+    volumes:
+      - ../models:/models:ro  
+      - ../ignis_ml:/app/ignis_ml:ro           # was ./models
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8008/healthz"]
+      interval: 5s
+      timeout: 2s
+      retries: 10
+    ports:
+      - "8008:8008"                       # keep published for debugging (optional)
+
+  backend:
+    image: ignis-backend:latest
+    build:
+      context: ../backend                  # was ./backend
+      dockerfile: Dockerfile
+    env_file:
+      - ./env_backend                      # was ./docker/env_backend
+    depends_on:
+      tilesvc:
+        condition: service_healthy
+      mongodb:
+        condition: service_started
+    restart: unless-stopped
+    expose:
+      - "5000"
+    working_dir: /app
+    command: ["node","app.js"]
+
+  frontend:
+    image: ignis-frontend:latest
+    build:
+      context: ../frontend                 # was ./frontend
+      dockerfile: Dockerfile
+      args:
+        REACT_APP_MAPBOX_TOKEN: ${REACT_APP_MAPBOX_TOKEN:-}
+        REACT_APP_API_URL: /api
+    environment:
+      REACT_APP_MAPBOX_TOKEN: ${REACT_APP_MAPBOX_TOKEN:-}
+      REACT_APP_API_URL: /api
+    depends_on:
+      - backend
+    ports:
+      - "80:80"
+    restart: unless-stopped
+
+  mongodb:
+    image: mongo:7
+    volumes:
+      - mongo:/data/db
+    restart: unless-stopped
+
+volumes:
+  mongo:

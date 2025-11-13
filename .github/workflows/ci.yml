@@ -111,8 +111,7 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Convert repository owner to lowercase
+      - name: Owner lowercase
         if: github.ref == 'refs/heads/main'
         run: echo "OWNER_LC=$(echo $GITHUB_REPOSITORY_OWNER | tr '[:upper:]' '[:lower:]')" >> $GITHUB_ENV
 
@@ -200,8 +199,7 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Convert repository owner to lowercase
+      - name: Owner lowercase
         if: github.ref == 'refs/heads/main'
         run: echo "OWNER_LC=$(echo $GITHUB_REPOSITORY_OWNER | tr '[:upper:]' '[:lower:]')" >> $GITHUB_ENV
 
