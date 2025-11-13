@@ -1,0 +1,39 @@
+name: CD
+
+on:
+  workflow_run:
+      workflows: ["Node CI"]
+      types: [completed]
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+      - name: Write SSH key
+        run: |
+          echo "${{ secrets.PROD_SSH_KEY }}" > key.pem
+          chmod 600 key.pem
+      - name: Deploy over SSH
+        env:
+          HOST: ${{ secrets.PROD_SSH_HOST }}
+          USER: ${{ secrets.PROD_SSH_USER }}
+          GHCR_USER: ${{ secrets.GHCR_USERNAME }}
+          GHCR_PAT: ${{ secrets.GHCR_PAT }}
+          COMPOSE_DIR: ${{ secrets.COMPOSE_DIR }}
+          DEPLOY_TAG: ${{ github.event.workflow_run.head_sha || 'latest' }}
+        run: |
+          ssh -o StrictHostKeyChecking=no -i key.pem "$USER@$HOST" <<'EOF'
+            set -euo pipefail
+            cd $COMPOSE_DIR
+            echo "$GHCR_PAT" | docker login ghcr.io -u "$GHCR_USER" --password-stdin
+            DEPLOY_TAG=${DEPLOY_TAG:-latest} docker compose \
+              -f docker-compose.yml -f docker-compose.prod.yml pull backend frontend
+            DEPLOY_TAG=${DEPLOY_TAG:-latest} docker compose \
+              -f docker-compose.yml -f docker-compose.prod.yml up -d --remove-orphans backend frontend
+            curl --fail http://localhost:5000/health
+            curl --fail http://localhost
+          EOF
