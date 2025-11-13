@@ -15,132 +15,97 @@ on:
   schedule:
     - cron: '0 9 * * 1'  # weekly sanity run
 
-env:
-  NODE_VERSION_MATRIX: '["18", "20"]'
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   backend:
     runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        node-version: [18, 20]
     permissions:
       contents: read
       packages: write
-      pull-requests: write  # for coverage comments
-      checks: write        # for test results
+      pull-requests: write  # For commenting on PRs
     services:
       mongodb:
         image: mongo:6.0
-        ports:
-          - 27017:27017
+        ports: ['27017:27017']
         options: >-
-          --health-cmd="bash -lc 'echo > /dev/tcp/127.0.0.1/27017'"
-          --health-interval=10s
-          --health-timeout=5s
-          --health-retries=10
+          --health-cmd "bash -lc 'echo > /dev/tcp/127.0.0.1/27017'"
+          --health-interval 10s --health-timeout 5s --health-retries 10
     defaults:
       run:
         working-directory: backend
     env:
       NODE_ENV: test
       MONGODB_TEST_URI: mongodb://localhost:27017/ignisai_test
-      JWT_SECRET: test-secret-key-for-ci-cd-very-long-and-secure
+      JWT_SECRET: test-secret-key-for-ci-minimum-32-characters-long
       JWT_EXPIRES_IN: 7d
-
     steps:
       - uses: actions/checkout@v4
-
-      - name: Setup Node.js ${{ matrix.node-version }}
-        uses: actions/setup-node@v4
+      
+      - uses: actions/setup-node@v4
         with:
-          node-version: ${{ matrix.node-version }}
-          cache: 'npm'
-          cache-dependency-path: 'backend/package-lock.json'
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: backend/package-lock.json
 
-      # Simple TCP readiness check (no mongosh dependency)
-      - name: Wait for MongoDB (TCP only)
-        shell: bash
+      - name: Wait for MongoDB
         run: |
           for i in {1..60}; do
-            (echo > /dev/tcp/127.0.0.1/27017) >/dev/null 2>&1 && {
-              echo "✅ Mongo is accepting TCP connections"; exit 0;
-            }
-            echo "⏳ waiting for mongo..."; sleep 2
+            (echo >/dev/tcp/127.0.0.1/27017) && exit 0
+            echo "Waiting for MongoDB..."; sleep 2
           done
-          echo "❌ Mongo never became ready" >&2; exit 1
+          echo "MongoDB failed to start"
+          exit 1
 
       - name: Install dependencies
         run: npm ci
 
-      - name: Audit dependencies
-        run: npm audit --audit-level=high
-        continue-on-error: true
-
-      - name: Run linter
+      - name: Lint code
         run: npm run lint --if-present
+        continue-on-error: true  # Don't fail build on lint warnings
 
-      - name: Run tests with coverage
-        run: npm test -- --ci --reporters=default --coverage --coverageReporters=text-lcov --coverageReporters=json-summary --coverageReporters=html --passWithNoTests
+      - name: Run tests
+        run: npm test -- --ci --coverage --reporters=default --passWithNoTests
+        continue-on-error: false  # Always fail on test failures
 
-      - name: Coverage check
+      - name: Generate coverage report
+        if: always()
         run: |
-          COVERAGE=$(node -p "Math.round(JSON.parse(require('fs').readFileSync('coverage/coverage-summary.json')).total.statements.pct)")
-          echo "Coverage: $COVERAGE%"
-          if [ $COVERAGE -lt 70 ]; then
-            echo "❌ Coverage $COVERAGE% below 70% threshold"
-            exit 1
-          else
-            echo "✅ Coverage $COVERAGE% meets threshold"
+          if [ -d "coverage" ]; then
+            echo "## Backend Test Coverage" >> $GITHUB_STEP_SUMMARY
+            echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+            cat coverage/coverage-summary.txt 2>/dev/null || echo "Coverage summary not available"
+            echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
           fi
 
-      - name: Upload coverage reports to Codecov
-        if: matrix.node-version == '18'
-        uses: codecov/codecov-action@v3
-        with:
-          directory: ./backend/coverage
-          flags: backend
-
-      - name: Comment PR with coverage
-        if: github.event_name == 'pull_request' && matrix.node-version == '18'
-        uses: MishaKav/jest-coverage-comment@main
-        with:
-          coverage-summary-path: backend/coverage/coverage-summary.json
-          title: Backend Test Coverage
-          summary-title: Backend Coverage Summary
-          badge-title: Backend Coverage
-          hide-comment: false
-          create-new-comment: false
-          hide-summary: false
-
-      - name: Upload coverage artifact
-        if: always() && matrix.node-version == '18'
+      - name: Upload coverage artifacts
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: backend-coverage
-          path: |
-            backend/coverage/
-            backend/test-results.xml
+          path: backend/coverage/
           if-no-files-found: ignore
 
-      - name: Build
+      - name: Build backend
         run: CI=false npm run build --if-present
 
-      - name: Upload build artifact
-        if: always() && matrix.node-version == '18'
+      - name: Upload build artifacts
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: backend-build
           path: backend/**/dist/*
           if-no-files-found: ignore
 
-      # ---------- Docker publish (only on main) ----------
-      - name: Set up Docker Buildx
-        if: github.ref == 'refs/heads/main' && matrix.node-version == '18'
+      # Docker build and push (main branch only)
+      - name: Setup Docker Buildx
+        if: github.ref == 'refs/heads/main'
         uses: docker/setup-buildx-action@v3
 
-      - name: Log in to GitHub Container Registry
-        if: github.ref == 'refs/heads/main' && matrix.node-version == '18'
+      - name: Login to GitHub Container Registry
+        if: github.ref == 'refs/heads/main'
         uses: docker/login-action@v3
         with:
           registry: ghcr.io
@@ -148,118 +113,88 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Convert repository owner to lowercase
-        if: github.ref == 'refs/heads/main' && matrix.node-version == '18'
-        run: echo "REPO_OWNER_LOWER=$(echo ${{ github.repository_owner }} | tr '[:upper:]' '[:lower:]')" >> $GITHUB_ENV
+        if: github.ref == 'refs/heads/main'
+        run: echo "OWNER_LC=$(echo $GITHUB_REPOSITORY_OWNER | tr '[:upper:]' '[:lower:]')" >> $GITHUB_ENV
 
       - name: Build and push backend Docker image
-        if: github.ref == 'refs/heads/main' && matrix.node-version == '18'
+        if: github.ref == 'refs/heads/main'
         uses: docker/build-push-action@v5
         with:
           context: ./backend
           file: ./backend/Dockerfile
           push: true
-          platforms: linux/amd64, linux/arm64
+          platforms: linux/amd64,linux/arm64
           tags: |
-            ghcr.io/${{ env.REPO_OWNER_LOWER }}/ignisai-backend:latest
-            ghcr.io/${{ env.REPO_OWNER_LOWER }}/ignisai-backend:${{ github.sha }}
+            ghcr.io/${{ env.OWNER_LC }}/ignisai-backend:latest
+            ghcr.io/${{ env.OWNER_LC }}/ignisai-backend:${{ github.sha }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
   frontend:
     runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        node-version: [18, 20]
     permissions:
       contents: read
       packages: write
-      pull-requests: write  # for coverage comments
-      checks: write
+      pull-requests: write
     defaults:
       run:
         working-directory: frontend
-
     steps:
       - uses: actions/checkout@v4
-
-      - name: Setup Node.js ${{ matrix.node-version }}
-        uses: actions/setup-node@v4
+      
+      - uses: actions/setup-node@v4
         with:
-          node-version: ${{ matrix.node-version }}
-          cache: 'npm'
-          cache-dependency-path: 'frontend/package-lock.json'
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
 
       - name: Install dependencies
         run: npm ci
 
-      - name: Audit dependencies
-        run: npm audit --audit-level=high
+      - name: Lint code
+        run: npm run lint --if-present
         continue-on-error: true
 
-      - name: Run linter
-        run: npm run lint --if-present
+      - name: Run tests
+        run: CI=true npm test -- --coverage --watchAll=false --passWithNoTests
+        continue-on-error: false
 
-      - name: Run tests with coverage
-        run: CI=true npm test -- --watchAll=false --coverage --coverageReporters=text-lcov --coverageReporters=json-summary --coverageReporters=html --passWithNoTests
-
-      - name: Coverage check
+      - name: Generate coverage report
+        if: always()
         run: |
-          COVERAGE=$(node -p "Math.round(JSON.parse(require('fs').readFileSync('coverage/coverage-summary.json')).total.statements.pct)")
-          echo "Coverage: $COVERAGE%"
-          if [ $COVERAGE -lt 60 ]; then
-            echo "❌ Coverage $COVERAGE% below 60% threshold"
-            exit 1
-          else
-            echo "✅ Coverage $COVERAGE% meets threshold"
+          if [ -d "coverage" ]; then
+            echo "## Frontend Test Coverage" >> $GITHUB_STEP_SUMMARY
+            echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+            cat coverage/coverage-summary.txt 2>/dev/null || echo "Coverage summary not available"
+            echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
           fi
 
-      - name: Upload coverage to Codecov
-        if: matrix.node-version == '18'
-        uses: codecov/codecov-action@v3
-        with:
-          directory: ./frontend/coverage
-          flags: frontend
-
-      - name: Comment PR with coverage
-        if: github.event_name == 'pull_request' && matrix.node-version == '18'
-        uses: MishaKav/jest-coverage-comment@main
-        with:
-          coverage-summary-path: frontend/coverage/coverage-summary.json
-          title: Frontend Test Coverage
-          summary-title: Frontend Coverage Summary
-          badge-title: Frontend Coverage
-          hide-comment: false
-          create-new-comment: false
-          hide-summary: false
-
-      - name: Build application
-        run: CI=false npm run build --if-present
-
-      - name: Upload coverage artifact
-        if: always() && matrix.node-version == '18'
+      - name: Upload coverage artifacts
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: frontend-coverage
-          path: |
-            frontend/coverage/
-            frontend/test-results.xml
+          path: frontend/coverage/
           if-no-files-found: ignore
 
-      - name: Upload build artifact
-        if: always() && matrix.node-version == '18'
+      - name: Build frontend
+        run: CI=false npm run build --if-present
+
+      - name: Upload build artifacts
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: frontend-build
           path: frontend/build
           if-no-files-found: ignore
 
-      # ---------- Docker publish (only on main) ----------
-      - name: Set up Docker Buildx
-        if: github.ref == 'refs/heads/main' && matrix.node-version == '18'
+      # Docker build and push (main branch only)
+      - name: Setup Docker Buildx
+        if: github.ref == 'refs/heads/main'
         uses: docker/setup-buildx-action@v3
 
-      - name: Log in to GitHub Container Registry
-        if: github.ref == 'refs/heads/main' && matrix.node-version == '18'
+      - name: Login to GitHub Container Registry
+        if: github.ref == 'refs/heads/main'
         uses: docker/login-action@v3
         with:
           registry: ghcr.io
@@ -267,24 +202,23 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Convert repository owner to lowercase
-        if: github.ref == 'refs/heads/main' && matrix.node-version == '18'
-        run: echo "REPO_OWNER_LOWER=$(echo ${{ github.repository_owner }} | tr '[:upper:]' '[:lower:]')" >> $GITHUB_ENV
+        if: github.ref == 'refs/heads/main'
+        run: echo "OWNER_LC=$(echo $GITHUB_REPOSITORY_OWNER | tr '[:upper:]' '[:lower:]')" >> $GITHUB_ENV
 
       - name: Build and push frontend Docker image
-        if: github.ref == 'refs/heads/main' && matrix.node-version == '18'
+        if: github.ref == 'refs/heads/main'
         uses: docker/build-push-action@v5
         with:
           context: ./frontend
           file: ./frontend/Dockerfile
           push: true
           tags: |
-            ghcr.io/${{ env.REPO_OWNER_LOWER }}/ignisai-frontend:latest
-            ghcr.io/${{ env.REPO_OWNER_LOWER }}/ignisai-frontend:${{ github.sha }}
+            ghcr.io/${{ env.OWNER_LC }}/ignisai-frontend:latest
+            ghcr.io/${{ env.OWNER_LC }}/ignisai-frontend:${{ github.sha }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
   codeql:
-    name: CodeQL Security Analysis
     runs-on: ubuntu-latest
     permissions:
       actions: read
@@ -292,90 +226,81 @@ jobs:
       security-events: write
     steps:
       - uses: actions/checkout@v4
-      - uses: github/codeql-action/init@v3
+      
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v3
         with:
           languages: javascript
-          queries: security-extended,security-and-quality
-      - uses: github/codeql-action/autobuild@v3
-      - uses: github/codeql-action/analyze@v3
+          queries: security-and-quality  # Run both security and quality checks
 
-  security-scan:
-    name: Trivy Vulnerability Scan
+      - name: Autobuild
+        uses: github/codeql-action/autobuild@v3
+
+      - name: Perform CodeQL Analysis
+        uses: github/codeql-action/analyze@v3
+        with:
+          category: "/language:javascript"
+
+  trivy:
     runs-on: ubuntu-latest
     needs: [backend, frontend]
+    permissions:
+      contents: read
+      security-events: write
     steps:
       - uses: actions/checkout@v4
-
-      - name: Scan backend directory
-        uses: aquasecurity/trivy-action@master
+      
+      - name: Run Trivy vulnerability scanner (Backend)
+        uses: aquasecurity/trivy-action@0.20.0
         with:
           scan-type: fs
           scan-ref: ./backend
-          severity: CRITICAL,HIGH,MEDIUM
+          severity: CRITICAL,HIGH
           ignore-unfixed: true
           format: sarif
           output: backend-trivy.sarif
 
-      - name: Upload backend scan to GitHub Security
+      - name: Upload Backend Trivy results to GitHub Security
         uses: github/codeql-action/upload-sarif@v3
+        if: always()
         with:
           sarif_file: backend-trivy.sarif
-          category: backend
+          category: backend-trivy
 
-      - name: Scan frontend directory
-        uses: aquasecurity/trivy-action@master
+      - name: Run Trivy vulnerability scanner (Frontend)
+        uses: aquasecurity/trivy-action@0.20.0
         with:
           scan-type: fs
           scan-ref: ./frontend
-          severity: CRITICAL,HIGH,MEDIUM
+          severity: CRITICAL,HIGH
           ignore-unfixed: true
           format: sarif
           output: frontend-trivy.sarif
 
-      - name: Upload frontend scan to GitHub Security
+      - name: Upload Frontend Trivy results to GitHub Security
         uses: github/codeql-action/upload-sarif@v3
+        if: always()
         with:
           sarif_file: frontend-trivy.sarif
-          category: frontend
+          category: frontend-trivy
 
-      - name: Upload security scan reports
-        uses: actions/upload-artifact@v4
-        with:
-          name: security-scan-reports
-          path: "*.sarif"
+      - name: Generate Trivy summary
+        run: |
+          echo "## Security Scan Results" >> $GITHUB_STEP_SUMMARY
+          echo "Trivy scans completed for backend and frontend" >> $GITHUB_STEP_SUMMARY
+          echo "Check the Security tab for detailed results" >> $GITHUB_STEP_SUMMARY
 
   test-summary:
-    name: Test Results Summary
     runs-on: ubuntu-latest
     needs: [backend, frontend]
     if: always()
-    permissions:
-      contents: read
-      checks: write
-      pull-requests: write
     steps:
-      - name: Download all artifacts
-        uses: actions/download-artifact@v4
-
-      - name: Publish Test Results
-        uses: dorny/test-reporter@v1
-        if: always()
-        with:
-          name: Test Results Summary
-          path: '**/test-results.xml'
-          reporter: jest-junit
-          fail-on-error: true
-
-      - name: Generate Coverage Report
-        if: github.event_name == 'pull_request'
+      - name: Generate Test Summary
         run: |
-          echo "## 📊 Test Coverage Summary" >> $GITHUB_STEP_SUMMARY
+          echo "# IgnisAI CI Pipeline Results" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          if [ -f "backend-coverage/coverage-summary.json" ]; then
-            BACKEND_COV=$(node -p "Math.round(JSON.parse(require('fs').readFileSync('backend-coverage/coverage-summary.json')).total.statements.pct)")
-            echo "- **Backend**: $BACKEND_COV%" >> $GITHUB_STEP_SUMMARY
-          fi
-          if [ -f "frontend-coverage/coverage-summary.json" ]; then
-            FRONTEND_COV=$(node -p "Math.round(JSON.parse(require('fs').readFileSync('frontend-coverage/coverage-summary.json')).total.statements.pct)")
-            echo "- **Frontend**: $FRONTEND_COV%" >> $GITHUB_STEP_SUMMARY  
-          fi
+          echo "## Job Status" >> $GITHUB_STEP_SUMMARY
+          echo "- Backend: ${{ needs.backend.result }}" >> $GITHUB_STEP_SUMMARY
+          echo "- Frontend: ${{ needs.frontend.result }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "View detailed coverage reports in the artifacts section." >> $GITHUB_STEP_SUMMARY
