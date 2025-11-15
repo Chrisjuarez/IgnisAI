@@ -1,10 +1,38 @@
+// backend/__tests__/health.test.js
 const request = require('supertest');
 const app = require('../app');
 
 describe('GET /health', () => {
-  it('returns 200 and {status:"ok"}', async () => {
+  it('returns health status with system metrics', async () => {
     const res = await request(app).get('/health');
-    expect(res.statusCode).toBe(200);
-    expect(res.body).toEqual({ status: 'ok' });
+    
+    // Accept either 200 (DB connected) or 503 (DB disconnected)
+    expect([200, 503]).toContain(res.statusCode);
+    
+    // Verify response structure
+    expect(res.body).toHaveProperty('status');
+    expect(res.body).toHaveProperty('uptime');
+    expect(res.body).toHaveProperty('timestamp');
+    expect(res.body).toHaveProperty('checks');
+    
+    // Verify checks object
+    expect(res.body.checks).toHaveProperty('database');
+    expect(res.body.checks).toHaveProperty('memory');
+    expect(res.body.checks).toHaveProperty('cpu');
+    
+    // Status should be OK or DEGRADED
+    expect(['OK', 'DEGRADED']).toContain(res.body.status);
+    
+    // If DB disconnected, status should be DEGRADED
+    if (res.body.checks.database === 'disconnected') {
+      expect(res.body.status).toBe('DEGRADED');
+      expect(res.statusCode).toBe(503);
+    }
+    
+    // If DB connected, status should be OK
+    if (res.body.checks.database === 'connected') {
+      expect(res.body.status).toBe('OK');
+      expect(res.statusCode).toBe(200);
+    }
   });
 });
