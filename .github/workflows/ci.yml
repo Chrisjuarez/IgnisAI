@@ -25,7 +25,7 @@ jobs:
     permissions:
       contents: read
       packages: write
-      pull-requests: write  # For commenting on PRs
+      pull-requests: write
     services:
       mongodb:
         image: mongo:6.0
@@ -64,11 +64,11 @@ jobs:
 
       - name: Lint code
         run: npm run lint --if-present
-        continue-on-error: true  # Don't fail build on lint warnings
+        continue-on-error: true
 
       - name: Run tests
         run: npm test -- --ci --coverage --reporters=default --passWithNoTests
-        continue-on-error: false  # Always fail on test failures
+        continue-on-error: false
 
       - name: Generate coverage report
         if: always()
@@ -229,7 +229,7 @@ jobs:
         uses: github/codeql-action/init@v3
         with:
           languages: javascript
-          queries: security-and-quality  # Run both security and quality checks
+          config-file: ./.github/codeql/codeql-config.yml
 
       - name: Autobuild
         uses: github/codeql-action/autobuild@v3
