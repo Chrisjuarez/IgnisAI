@@ -1,0 +1,17 @@
+# .github/codeql/codeql-config.yml
+name: "CodeQL Config"
+
+disable-default-queries: false
+
+queries:
+  - uses: security-extended
+  - uses: security-and-quality
+
+paths-ignore:
+  - node_modules
+  - dist
+  - build
+  - coverage
+  - __tests__
+  - '**/*.test.js'
+  - '**/*.spec.js'
