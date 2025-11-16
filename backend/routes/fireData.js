@@ -34,10 +34,12 @@ function asConfidencePct(conf) {
 }
 
 // Heuristic to drop likely gas flares
-function isLikelyFlare({ daynight, frp, brightness, confidencePct }) {
+function isLikelyFlare({ daynight, frp, brightness, confidence, confidencePct }) {
+  const conf = Number(confidence ?? confidencePct ?? NaN);
   return (
     daynight === 'N' &&
-    confidencePct <= 60 &&
+    !Number.isNaN(conf) &&
+    conf <= 60 &&
     Number(frp) < 25 &&
     Number(brightness) < 330
   );
