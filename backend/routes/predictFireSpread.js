@@ -110,17 +110,59 @@ router.get('/vector', async (req, res) => {
   }
 });
 
-// POST /api/predict-fire-spread  (back-compat: return vector-style payload)
+// POST /api/predict-fire-spread  (vector-style payload; no self HTTP calls)
 router.post('/', async (req, res) => {
   try {
-    const { lat, lng: lon, Tseq, thr } = req.body || {};
-    if (!lat || !lon) return res.status(400).json({ error: 'lat and lon are required' });
-    const data = await getJSON(
-      new URL('/api/predict-fire-spread/vector', SELF_BASE).toString(),
-      { lat, lon, Tseq: Tseq || 3, thr }, 25000);
-    res.json(data);
+    const b = req.body || {};
+
+    // Accept many common shapes:
+    // { lat, lon } | { lat, lng } | { latitude, longitude }
+    // { location: { lat, lon|lng|latitude|longitude } }
+    const lat =
+      b.lat ??
+      b.latitude ??
+      b.location?.lat ??
+      b.location?.latitude;
+
+    const lon =
+      b.lon ??
+      b.lng ??
+      b.longitude ??
+      b.location?.lon ??
+      b.location?.lng ??
+      b.location?.longitude;
+
+    const Tseq = b.Tseq ?? 3;
+    const thr  = b.thr;
+
+    if (lat == null || lon == null) {
+      return res.status(400).json({ error: 'lat and lon are required' });
+    }
+
+    // 1) GeoJSON polygons from tilesvc
+    const geojson = await getJSON(`${TILE_SVC}/predict_geojson`, { lat, lon, Tseq, thr }, 20000);
+
+    // 2) Meta (area_fraction/threshold) from tilesvc (png=false)
+    let meta = {};
+    try {
+      meta = await getJSON(`${TILE_SVC}/predict`, { lat, lon, Tseq, png: false }, 15000);
+    } catch (_) { meta = {}; }
+
+    const area_fraction = typeof meta?.area_fraction === 'number' ? meta.area_fraction : 0.0;
+    const best_thr = typeof meta?.threshold === 'number' ? meta.threshold : (thr ? Number(thr) : 0.5);
+
+    // Friendly derived field
+    const spread_distance_km = Math.max(0, 64 * Math.sqrt(Math.max(0, area_fraction))); // 64km tile
+
+    return res.json({
+      ok: true,
+      geojson,
+      spread_probability: area_fraction,
+      spread_distance_km,
+      threshold: best_thr
+    });
   } catch (err) {
-    res.status(502).json({ error: 'tilesvc_vector_failed', detail: err.message });
+    return res.status(502).json({ error: 'tilesvc_vector_failed', detail: err.message });
   }
 });
 

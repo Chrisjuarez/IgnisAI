@@ -42,7 +42,16 @@ app.use('/health', require('./routes/health')); // Advanced health with DB check
 // Helper to mount optional routes
 function tryMount(mountPath, modulePath) {
   try {
-    app.use(mountPath, require(modulePath));
+    const mod = require(modulePath);
+    const handler =
+      typeof mod === 'function'
+        ? mod
+        : (mod && typeof mod.default === 'function' ? mod.default : null);
+
+    if (!handler) {
+      throw new Error('argument handler must be a function');
+    }
+    app.use(mountPath, handler);
   } catch (e) {
     console.warn(`Skipping ${modulePath}: ${e.message}`);
   }
