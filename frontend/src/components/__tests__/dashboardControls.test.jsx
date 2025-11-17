@@ -1,5 +1,5 @@
 import React from 'react';
-import { render, screen, fireEvent } from '@testing-library/react';
+import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import mapboxgl from 'mapbox-gl';
 import FireControls from '../FireControls';
 
@@ -99,6 +99,65 @@ describe('Dashboard controls', () => {
       });
     } else {
       delete window.navigator.geolocation;
+    }
+  });
+
+  test('falls back to approximate IP location when geolocation fails', async () => {
+    const onSelectLocation = jest.fn();
+    const originalGeo = navigator.geolocation;
+    const originalFetch = global.fetch;
+
+    const geolocationMock = {
+      getCurrentPosition: jest.fn((_, error) => error(new Error('blocked')))
+    };
+    Object.defineProperty(window.navigator, 'geolocation', {
+      value: geolocationMock,
+      configurable: true
+    });
+
+    global.fetch = jest.fn(() =>
+      Promise.resolve({
+        ok: true,
+        json: () =>
+          Promise.resolve({
+            latitude: 37.7749,
+            longitude: -122.4194,
+            city: 'San Francisco',
+            region: 'California'
+          })
+      })
+    );
+
+    render(
+      <FireControls
+        {...baseProps}
+        onSelectLocation={onSelectLocation}
+      />
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: /use my location/i }));
+
+    await waitFor(() =>
+      expect(onSelectLocation).toHaveBeenCalledWith({
+        lat: 37.7749,
+        lng: -122.4194
+      })
+    );
+    expect(global.fetch).toHaveBeenCalledWith('https://ipapi.co/json/');
+
+    if (originalGeo) {
+      Object.defineProperty(window.navigator, 'geolocation', {
+        value: originalGeo,
+        configurable: true
+      });
+    } else {
+      delete window.navigator.geolocation;
+    }
+
+    if (originalFetch) {
+      global.fetch = originalFetch;
+    } else {
+      delete global.fetch;
     }
   });
 
