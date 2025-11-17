@@ -75,23 +75,56 @@ function FireControls({
     setSuggestions([]);
   }
 
+  function applyLocation(lat, lng, label = 'My Current Location') {
+    skipNextFetch.current = true;
+    onSelectLocation?.({ lat, lng });
+    setQuery(label);
+    setShowSuggestions(false);
+    setSuggestions([]);
+  }
+
+  async function fallbackToApproximateLocation() {
+    try {
+      const resp = await fetch('https://ipapi.co/json/');
+      if (!resp.ok) throw new Error(`Bad status ${resp.status}`);
+      const data = await resp.json();
+      const latRaw = data.latitude ?? data.lat;
+      const lngRaw = data.longitude ?? data.lon;
+      const lat = latRaw == null ? Number.NaN : Number(latRaw);
+      const lng = lngRaw == null ? Number.NaN : Number(lngRaw);
+      if (!Number.isFinite(lat) || !Number.isFinite(lng)) {
+        throw new Error('Invalid coordinates from IP lookup');
+      }
+      const region = data.region || data.regionName;
+      const country = data.country_name || data.country;
+      const labelParts = [data.city, region, country]
+        .filter(part => typeof part === 'string' && part.trim())
+        .slice(0, 2);
+      const label =
+        labelParts.length > 0
+          ? labelParts.join(', ')
+          : 'Approximate Location';
+      applyLocation(lat, lng, label);
+      return true;
+    } catch (err) {
+      console.warn('IP-based location lookup failed', err);
+    }
+    alert('Unable to retrieve location.');
+    return false;
+  }
+
   function handleUseMyLocation() {
     if (!navigator.geolocation) {
-      alert('Geolocation not supported.');
+      fallbackToApproximateLocation();
       return;
     }
     navigator.geolocation.getCurrentPosition(
       pos => {
-        skipNextFetch.current = true;
-        onSelectLocation?.({
-          lat: pos.coords.latitude,
-          lng: pos.coords.longitude
-        });
-        setQuery('My Current Location');
-        setShowSuggestions(false);
-        setSuggestions([]);
+        applyLocation(pos.coords.latitude, pos.coords.longitude);
       },
-      () => alert('Unable to retrieve location.')
+      () => {
+        fallbackToApproximateLocation();
+      }
     );
   }
 
