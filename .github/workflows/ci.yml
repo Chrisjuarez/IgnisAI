@@ -38,6 +38,7 @@ jobs:
         working-directory: backend
     env:
       NODE_ENV: test
+      MONGODB_URI: mongodb://localhost:27017/ignisai_test
       MONGODB_TEST_URI: mongodb://localhost:27017/ignisai_test
       JWT_SECRET: test-secret-key-for-ci-minimum-32-characters-long
       JWT_EXPIRES_IN: 7d

@@ -11,11 +11,35 @@ jest.mock('../models/Weather', () => ({
 const request = require('supertest');
 const axios = require('axios');
 const Weather = require('../models/Weather');
+const mongoose = require('mongoose');
 const app = require('../app');
 
 describe('GET /api/weather/current', () => {
+  let originalReadyState;
+
+  beforeAll(() => {
+    // Save original readyState so we can restore it
+    originalReadyState = mongoose.connection.readyState;
+  });
+
   beforeEach(() => {
     jest.clearAllMocks();
+
+    // 🔑 Force MongoDB to appear "connected"
+    Object.defineProperty(mongoose.connection, 'readyState', {
+      value: 1,
+      writable: true,
+      configurable: true,
+    });
+  });
+
+  afterEach(() => {
+    // Restore original readyState after each test
+    Object.defineProperty(mongoose.connection, 'readyState', {
+      value: originalReadyState,
+      writable: true,
+      configurable: true,
+    });
   });
 
   test('returns weather snapshot when provider succeeds', async () => {
@@ -27,10 +51,14 @@ describe('GET /api/weather/current', () => {
       precipitation: 0,
     };
 
-    const buildSeries = (offset = 0) => Array.from({ length: 30 }, (_, idx) => idx + offset);
+    const buildSeries = (offset = 0) =>
+      Array.from({ length: 30 }, (_, idx) => idx + offset);
 
     const hourlyData = {
-      time: Array.from({ length: 30 }, (_, idx) => `2024-01-01T${String(idx).padStart(2, '0')}:00:00Z`),
+      time: Array.from(
+        { length: 30 },
+        (_, idx) => `2024-01-01T${String(idx).padStart(2, '0')}:00:00Z`
+      ),
       temperature_2m: buildSeries(10),
       relative_humidity_2m: buildSeries(50),
       wind_speed_10m: buildSeries(3),
@@ -45,9 +73,14 @@ describe('GET /api/weather/current', () => {
       },
     });
 
-    Weather.create.mockImplementation(async (doc) => ({ _id: 'weather-doc', ...doc }));
+    Weather.create.mockImplementation(async (doc) => ({
+      _id: 'weather-doc',
+      ...doc,
+    }));
 
-    const res = await request(app).get('/api/weather/current?lat=34&lon=-118');
+    const res = await request(app).get(
+      '/api/weather/current?lat=34&lon=-118'
+    );
 
     expect(res.status).toBe(200);
     expect(res.body).toHaveProperty('ok', true);
@@ -61,20 +94,26 @@ describe('GET /api/weather/current', () => {
       precipitation: hourlyData.precipitation.slice(0, 24),
     };
 
-    expect(axios.get).toHaveBeenCalledWith('https://api.open-meteo.com/v1/forecast', {
-      params: expect.objectContaining({
+    expect(axios.get).toHaveBeenCalledWith(
+      'https://api.open-meteo.com/v1/forecast',
+      {
+        params: expect.objectContaining({
+          latitude: 34,
+          longitude: -118,
+        }),
+      }
+    );
+
+    // ✅ Now this will pass again
+    expect(Weather.create).toHaveBeenCalledWith(
+      expect.objectContaining({
         latitude: 34,
         longitude: -118,
-      }),
-    });
-
-    expect(Weather.create).toHaveBeenCalledWith(expect.objectContaining({
-      latitude: 34,
-      longitude: -118,
-      fetchedAt: expect.any(Date),
-      current: sampleCurrent,
-      hourly: expectedHourly,
-    }));
+        fetchedAt: expect.any(Date),
+        current: sampleCurrent,
+        hourly: expectedHourly,
+      })
+    );
 
     expect(res.body.data).toMatchObject({
       _id: 'weather-doc',
@@ -83,7 +122,10 @@ describe('GET /api/weather/current', () => {
       current: sampleCurrent,
       hourly: expectedHourly,
     });
-    expect(new Date(res.body.data.fetchedAt).toString()).not.toBe('Invalid Date');
+
+    expect(new Date(res.body.data.fetchedAt).toString()).not.toBe(
+      'Invalid Date'
+    );
   });
 
   test('400 when lat or lon missing', async () => {
