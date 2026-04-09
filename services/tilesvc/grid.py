@@ -10,8 +10,9 @@ CRS_ALBERS = "EPSG:5070"  # US Albers Equal Area (meters)
 
 # Tile/grid spec
 PIX = 500          # meters per pixel
-TILE_M = 64_000    # tile length in meters
-SIZE = TILE_M // PIX  # pixels per side -> 128
+# Match training config: 32 km tiles at 500 m -> 64x64
+TILE_M = 32_000    # tile length in meters
+SIZE = TILE_M // PIX  # pixels per side -> 64
 
 # Transformers
 _to_albers = Transformer.from_crs(CRS_WGS84, CRS_ALBERS, always_xy=True)
@@ -60,3 +61,52 @@ def tile_bounds_lonlat(tile: TileID):
     (w, s) = _to_wgs84.transform(minx, miny)
     (e, n) = _to_wgs84.transform(maxx, maxy)
     return float(w), float(s), float(e), float(n)
+
+
+# -------------------------------------------------------------------
+# Compatibility helpers expected by services/tilesvc/app.py
+# (Your app imports: build_grid, raster_to_png_bytes, and sometimes tile_bounds)
+# -------------------------------------------------------------------
+
+def tile_bounds(lat: float, lon: float):
+    """
+    API helper: given lat/lon, return the containing tile bounds in lon/lat.
+    """
+    tile = lonlat_to_tile(lon, lat)
+    return tile_bounds_lonlat(tile)
+
+
+def build_grid(lat: float, lon: float):
+    """
+    API helper: build basic grid metadata for a query point.
+    Returns: (tile_id, affine, bounds_lonlat)
+    """
+    tile = lonlat_to_tile(lon, lat)
+    aff = tile_affine(tile)
+    bounds = tile_bounds_lonlat(tile)
+    return tile, aff, bounds
+
+
+def raster_to_png_bytes(arr: np.ndarray):
+    """
+    Convert a 2D float/bool mask to PNG bytes (grayscale).
+    - bool -> 0/255
+    - float -> clipped [0,1] then scaled to [0,255]
+    """
+    from PIL import Image  # Pillow
+    import io
+
+    a = np.asarray(arr)
+
+    if a.dtype == np.bool_:
+        img = (a.astype(np.uint8) * 255)
+    else:
+        a = a.astype(np.float32)
+        a = np.nan_to_num(a, nan=0.0, posinf=0.0, neginf=0.0)
+        a = np.clip(a, 0.0, 1.0)
+        img = (a * 255.0).astype(np.uint8)
+
+    im = Image.fromarray(img, mode="L")
+    buf = io.BytesIO()
+    im.save(buf, format="PNG")
+    return buf.getvalue()

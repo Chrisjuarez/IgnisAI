@@ -2,6 +2,7 @@
 import os
 import io
 import csv
+import math
 import datetime as dt
 import numpy as np
 import requests
@@ -11,31 +12,80 @@ from rasterio.features import rasterize
 from .grid import SIZE, lonlat_to_tile, tile_affine, tile_bounds_lonlat, lonlat_to_xy_m
 from ignis_ml.src.data.transforms import wind_to_uv, rh_to_q, fire_boost
 
-NASA_KEY   = os.getenv("NASA_API_KEY")  # FIRMS “area” API key
+NASA_KEY   = (os.getenv("NASA_API_KEY") or "").strip()  # FIRMS “area” API key
 OPEN_METEO = "https://api.open-meteo.com/v1/forecast"
+
+# Products to merge for better coverage (NRT = near‑real‑time)
+FIRMS_PRODUCTS = [
+    "VIIRS_NOAA21_NRT",
+    "VIIRS_NOAA20_NRT",
+    "MODIS_NRT",  # Terra + Aqua combined
+]
+
+# FIRMS “area” API accepts days=1..5 (not hours). Default to 2 days (~48h) to catch late posts.
+FIRMS_DAYS_DEFAULT = int(os.getenv("FIRMS_DAYS", "2"))  # clamp to 1..5 later
+FIRMS_PAD_DEG = float(os.getenv("FIRMS_PAD_DEG", "0.25"))  # expand bbox to catch edge detections
 
 
 # ---------------- FIRMS helpers ----------------
-def _fetch_firms_csv(bbox, hours=24) -> str:
+def _rasterize_ignition_point(lat: float, lon: float, affine):
+    pix_m = float(abs(affine.a))
+    buf_m = max(0.8 * pix_m, 300.0)
+    x, y = lonlat_to_xy_m(lon, lat)
+    geom = Point(x, y).buffer(buf_m)
+    return rasterize(
+        [(geom, 1.0)],
+        out_shape=(SIZE, SIZE),
+        transform=affine,
+        all_touched=True,
+        dtype="float32",
+    )
+
+def _fetch_firms_csv(bbox, days=None) -> str:
     """
-    bbox=(W,S,E,N). Uses VIIRS NOAA-21 NRT.
-    Returns CSV text (header if key missing).
+    bbox=(W,S,E,N). Merge multiple FIRMS NRT products. Returns CSV text.
+    FIRMS “area” API expects days in [1..5]; we clamp to that range.
     """
     if not NASA_KEY:
-        return "latitude,longitude,acq_date,acq_time\n"
+        return ""
+
+    days = days or FIRMS_DAYS_DEFAULT
+    days = max(1, min(int(days), 5))
+
     w, s, e, n = bbox
-    url = (
-        f"https://firms.modaps.eosdis.nasa.gov/api/area/csv/{NASA_KEY}/"
-        f"VIIRS_NOAA21_NRT/{w},{s},{e},{n}/{int(hours)}"
-    )
-    r = requests.get(url, headers={"User-Agent": "ignis-ai"}, timeout=20)
-    r.raise_for_status()
-    return r.text
+    w -= FIRMS_PAD_DEG
+    s -= FIRMS_PAD_DEG
+    e += FIRMS_PAD_DEG
+    n += FIRMS_PAD_DEG
+    header_line = None
+    bodies = []
+    for prod in FIRMS_PRODUCTS:
+        url = (
+            f"https://firms.modaps.eosdis.nasa.gov/api/area/csv/{NASA_KEY}/"
+            f"{prod}/{w},{s},{e},{n}/{days}"
+        )
+        try:
+            r = requests.get(url, headers={"User-Agent": "ignis-ai"}, timeout=20)
+            r.raise_for_status()
+            lines = r.text.splitlines()
+            if len(lines) > 1:
+                if header_line is None:
+                    header_line = lines[0]
+                bodies.append("\n".join(lines[1:]))  # drop header for merge
+        except Exception as e:
+            print(f"⚠️  FIRMS fetch failed for {prod}: {e}")
+
+    if not bodies:
+        return ""
+    header_line = header_line or "latitude,longitude,acq_date,acq_time"
+    return header_line + "\n" + "\n".join(bodies)
 
 
 def _parse_firms_points(csv_text: str):
     """Return list of (lon, lat, timestamp_utc)."""
     pts = []
+    if not csv_text.strip():
+        return pts
     reader = csv.DictReader(io.StringIO(csv_text))
     for row in reader:
         try:
@@ -47,7 +97,13 @@ def _parse_firms_points(csv_text: str):
             pts.append((lon, lat, ts))
         except Exception:
             continue
-    return pts
+    # Deduplicate across products
+    uniq = {}
+    for lon, lat, ts in pts:
+        key = (round(lon, 5), round(lat, 5), ts)
+        if key not in uniq:
+            uniq[key] = (lon, lat, ts)
+    return list(uniq.values())
 
 
 def _rasterize_fire(points, t_start, t_end, affine):
@@ -115,7 +171,8 @@ def _fetch_weather(lat: float, lon: float):
 
     # Convert to model inputs
     u, v = wind_to_uv(np.array(WS, np.float32), np.array(WD, np.float32))
-    q    = rh_to_q(np.array(T,  np.float32),    np.array(RH, np.float32))
+    q = rh_to_q(np.array(RH, np.float32), np.array(T, np.float32))
+
 
     H = W = SIZE
     return {
@@ -129,7 +186,7 @@ def _fetch_weather(lat: float, lon: float):
 
 
 # ---------------- Public API ----------------
-def build_dynamic_for_tile(lat: float, lon: float, T_seq: int = 3, hours_step: int = 24):
+def build_dynamic_for_tile(lat: float, lon: float, T_seq: int = 1, hours_step: int = 24, ignition: bool = False):
     """
     Build dynamic tensor for the tile containing (lat,lon).
 
@@ -141,8 +198,11 @@ def build_dynamic_for_tile(lat: float, lon: float, T_seq: int = 3, hours_step: i
     bbox = tile_bounds_lonlat(tile)
 
     # FIRMS points over the full [T_seq * hours_step] window
-    csv_text = _fetch_firms_csv(bbox, hours=T_seq * hours_step)
+    window_hours = T_seq * hours_step
+    days = math.ceil(window_hours / 24.0)
+    csv_text = _fetch_firms_csv(bbox, days=days)
     points   = _parse_firms_points(csv_text)
+    print(f"[tilesvc] FIRMS points for tile {tile}: {len(points)} over {days}d window")
 
     # Build T slices: newest last
     now = dt.datetime.now(dt.timezone.utc).replace(minute=0, second=0, microsecond=0)
@@ -152,9 +212,14 @@ def build_dynamic_for_tile(lat: float, lon: float, T_seq: int = 3, hours_step: i
         t_sta = t_end - dt.timedelta(hours=hours_step)
         m = _rasterize_fire(points, t_sta, t_end, A)
         # match train-time boost so sparse points carry signal
-        fire_stack.append(fire_boost(m, factor=5.0))
+        fire_stack.append(fire_boost(m, scale=5.0))
     fire_stack = np.stack(fire_stack, axis=0).astype(np.float32)  # [T,H,W]
-
+    
+    if ignition:
+        ign = _rasterize_ignition_point(lat, lon, A)      # [H,W] in 5070 meters
+        ign = fire_boost(ign, scale=5.0)                  # match train-time boost
+        # Inject into the most recent timestep (last index)
+        fire_stack[-1] = np.maximum(fire_stack[-1], ign).astype(np.float32)
     # Weather (constant over the tile for now)
     wx = _fetch_weather(lat, lon)
 
