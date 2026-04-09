@@ -1,0 +1,69 @@
+# render.yaml — IgnisAI Render Blueprint
+# https://render.com/docs/blueprint-spec
+#
+# After first deploy, update these env vars in the Render dashboard:
+#   1. ignisai-backend:  TILE_SVC    → https://ignisai-tilesvc.onrender.com
+#   2. ignisai-backend:  CORS_ORIGIN → https://ignisai-frontend.onrender.com
+#   3. ignisai-frontend: REACT_APP_API_URL → https://ignisai-backend.onrender.com/api
+# Then trigger a manual deploy on the frontend to rebuild with the new API URL.
+
+services:
+  # ---- React Frontend (Free Static Site) ----
+  - type: web
+    name: ignisai-frontend
+    env: static
+    rootDir: frontend
+    buildCommand: npm ci && npm run build
+    staticPublishPath: build
+    envVars:
+      - key: REACT_APP_API_URL
+        sync: false # Set to https://ignisai-backend.onrender.com/api after backend deploys
+      - key: REACT_APP_MAPBOX_TOKEN
+        sync: false # Your Mapbox access token
+      - key: NODE_VERSION
+        value: "20"
+
+  # ---- Node/Express Backend (Free Web Service) ----
+  - type: web
+    name: ignisai-backend
+    env: node
+    plan: free
+    rootDir: backend
+    buildCommand: npm ci --omit=dev
+    startCommand: node app.js
+    healthCheckPath: /health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: PORT
+        value: "5000"
+      - key: MONGODB_URI
+        sync: false # MongoDB Atlas connection string
+      - key: JWT_SECRET
+        generateValue: true
+      - key: FIRMS_API_KEY
+        sync: false # NASA FIRMS API key
+      - key: TILE_SVC
+        sync: false # Set to https://ignisai-tilesvc.onrender.com after tilesvc deploys
+      - key: CORS_ORIGIN
+        sync: false # Set to https://ignisai-frontend.onrender.com after frontend deploys
+
+  # ---- Python/FastAPI Tile Service (Starter $7/mo) ----
+  - type: web
+    name: ignisai-tilesvc
+    env: docker
+    plan: starter
+    dockerfilePath: docker/tilesvc.Dockerfile
+    dockerContext: .
+    healthCheckPath: /healthz
+    envVars:
+      - key: MODEL_PATH
+        value: /app/models/convlstm_unet_Cd7_Cs15_H96_T6_nautilus.pt
+      - key: NASA_API_KEY
+        sync: false # NASA FIRMS API key (same key as FIRMS_API_KEY above)
+      - key: MODEL_URL
+        sync: false # URL to download model .pt file (if not baked into Docker image)
+      - key: TORCH_DEVICE
+        value: cpu
+      - key: CORS_ORIGIN
+        sync: false # Set to https://ignisai-frontend.onrender.com
