@@ -1,168 +1,145 @@
 // backend/routes/predictFireSpread.js
-const express = require('express');
-const axios = require('axios');
+const express = require("express");
+const axios = require("axios");
 
 const router = express.Router();
-const TILE_SVC = process.env.TILE_SVC || 'http://localhost:8008';
+
+// tilesvc inside docker network should be http://tilesvc:8008 if you set it,
+// but keep default for local dev.
+const TILE_SVC = process.env.TILE_SVC || "http://localhost:8008";
 
 const SELF_BASE =
   process.env.INTERNAL_SELF_BASE ||
   `http://127.0.0.1:${process.env.PORT || 5000}`;
 
-async function getJSON(url, params = {}, timeout = 20000) {
+async function getJSON(url, params = {}, timeout = 80000) {
   const r = await axios.get(url, { params, timeout });
   return r.data;
 }
 
-// PNG+bounds helper (kept for raster overlay)
-async function rasterViaPng(lat, lon, Tseq = 3) {
-  const [pngResp, bndResp] = await Promise.all([
-    axios.get(`${TILE_SVC}/predict`, {
-      params: { lat, lon, Tseq },
-      responseType: 'arraybuffer',
-      timeout: 20000
-    }),
-    axios.get(`${TILE_SVC}/tile-bounds`, {
-      params: { lat, lon },
-      timeout: 10000
-    })
-  ]);
-  const image_base64 = Buffer.from(pngResp.data, 'binary').toString('base64');
-  const bounds = bndResp.data?.bounds;
-  if (!Array.isArray(bounds) || bounds.length !== 4) {
-    throw new Error('bad tile-bounds response');
-  }
-  return { bounds, image_base64 };
-}
-
-// GET /api/predict-fire-spread/raster?lat=&lon=&Tseq=
-router.get('/raster', async (req, res) => {
+// GET /api/predict-fire-spread/raster?lat=&lon=&Tseq=&thr=
+router.get("/raster", async (req, res) => {
   try {
-    const { lat, lon, Tseq } = req.query;
-    if (!lat || !lon) return res.status(400).json({ error: 'lat and lon are required' });
-
-    try {
-      // tilesvc native JSON (bounds + b64 PNG)
-      const data = await getJSON(`${TILE_SVC}/predict_raster`, {
-        lat, lon, Tseq: Tseq || 3
-      }, 20000);
-      return res.json(data);
-    } catch {
-      // fallback to image endpoint + bounds
-      const payload = await rasterViaPng(lat, lon, Tseq);
-      return res.json(payload);
+    const { lat, lon, Tseq, thr, crop_frac } = req.query;
+    if (lat == null || lon == null) {
+      return res.status(400).json({ error: "lat and lon are required" });
     }
+
+    const params = {
+      lat,
+      lon,
+      Tseq: Tseq || 3,
+      ...(thr ? { thr } : {}),
+      crop_frac: crop_frac != null ? crop_frac : 1.5,
+    };
+
+    // tilesvc returns base64 PNG + bounds; crop centers the output on the fire point
+    const raster = await getJSON(`${TILE_SVC}/predict_raster_json`, params, 80000);
+
+    const bounds = raster?.bounds;
+    const image_base64 = raster?.image_base64;
+    if (!Array.isArray(bounds) || bounds.length !== 4 || !image_base64) {
+      throw new Error(`tilesvc raster missing bounds/image: ${JSON.stringify(raster)?.slice(0, 200)}`);
+    }
+
+    return res.json({
+      bounds,
+      image_base64,
+      threshold: raster?.threshold,
+      prob_min: raster?.prob_min,
+      prob_max: raster?.prob_max,
+      prob_mean: raster?.prob_mean,
+      area_fraction: raster?.area_fraction,
+    });
   } catch (err) {
-    console.error('raster error:', err.message);
-    res.status(502).json({ error: 'tilesvc_raster_failed', detail: err.message });
+    console.error("raster error:", err?.response?.data || err.message);
+    return res.status(502).json({ error: "tilesvc_raster_failed", detail: err.message });
   }
 });
 
-// GET /api/predict-fire-spread/vector?lat=&lon=&thr=
-router.get('/vector', async (req, res) => {
+// GET /api/predict-fire-spread/vector?lat=&lon=&Tseq=&thr=
+router.get("/vector", async (req, res) => {
   try {
-    const { lat, lon, Tseq, thr } = req.query;
-    if (!lat || !lon) return res.status(400).json({ error: 'lat and lon are required' });
+    const { lat, lon, Tseq, thr, crop_frac } = req.query;
+    if (lat == null || lon == null) {
+      return res.status(400).json({ error: "lat and lon are required" });
+    }
 
-    // 1) GeoJSON polygons from tilesvc
-    const geojson = await getJSON(`${TILE_SVC}/predict_geojson`, {
-      lat, lon, Tseq: Tseq || 3, thr
-    }, 20000);
+    const crop = crop_frac != null ? crop_frac : 0.5;
 
-    // 2) Area fraction & threshold (png=false returns meta)
-    const meta = await getJSON(`${TILE_SVC}/predict`, {
-      lat, lon, Tseq: Tseq || 3, png: false
-    }, 20000);
-    const area_fraction = typeof meta?.area_fraction === 'number' ? meta.area_fraction : 0.0;
-    const best_thr = typeof meta?.threshold === 'number' ? meta.threshold : (thr ? Number(thr) : 0.5);
+    // 1) GeoJSON polygons from tilesvc (honor thr!)
+    const geojson = await getJSON(
+      `${TILE_SVC}/predict_geojson`,
+      { lat, lon, Tseq: Tseq || 3, ...(thr ? { thr } : {}), crop_frac: crop },
+      20000
+    );
 
-    // 3) Weather (reuse your backend route for consistency)
+    // 2) Meta (area_fraction + threshold + bounds) from tilesvc
+    const meta = await getJSON(
+      `${TILE_SVC}/predict`,
+      { lat, lon, Tseq: Tseq || 3, png: false, ...(thr ? { thr } : {}), crop_frac: crop },
+      80000
+    );
+
+    const area_fraction =
+      typeof meta?.area_fraction === "number" ? meta.area_fraction : 0.0;
+
+    const best_thr =
+      typeof meta?.threshold === "number"
+        ? meta.threshold
+        : (thr ? Number(thr) : 0.1);
+
+    // 3) Weather (reuse backend route for consistency)
     let wx = null;
     try {
       const wr = await getJSON(
-        new URL('/api/weather/current', SELF_BASE).toString(), { lat, lon }, 15000);
+        new URL("/api/weather/current", SELF_BASE).toString(),
+        { lat, lon },
+        15000
+      );
       wx = wr?.data?.current || null;
-    } catch (_) { /* ignore */ }
+    } catch (_) {
+      wx = null;
+    }
 
     const wind_kmh = wx?.wind_speed_10m != null ? wx.wind_speed_10m * 3.6 : null; // m/s -> km/h
+
     const env = {
       wind_speed: wind_kmh,
       wind_direction: wx?.wind_direction_10m ?? null,
       temperature: wx?.temperature_2m ?? null,
       humidity: wx?.relative_humidity_2m ?? null,
-      data_source: wx ? 'weather_api' : 'unknown'
+      data_source: wx ? "weather_api" : "unknown",
     };
 
-    // rough, human-friendly “distance” proxy based on area fraction
-    const spread_distance_km = Math.max(0, 64 * Math.sqrt(Math.max(0, area_fraction))); // 64km tile
+    // simple distance proxy based on area_fraction
+    const spread_distance_km = Math.max(0, 64 * Math.sqrt(Math.max(0, area_fraction)));
+
+    // Enrich features with direction so frontend can render it easily
+    if (geojson?.features?.length) {
+      geojson.features = geojson.features.map((f) => {
+        const props = { ...(f.properties || {}) };
+        props.direction = env.wind_direction; // simple proxy; replace with model-derived direction if available
+        props.spread_probability = area_fraction;
+        return { ...f, properties: props };
+      });
+    }
 
     return res.json({
       geojson,
-      spread_probability: area_fraction,   // 0..1
+      spread_probability: area_fraction, // 0..1
       spread_direction: env.wind_direction,
       spread_distance_km,
       environmental_data: env,
-      threshold: best_thr
+      threshold: best_thr,
+      bounds: meta?.bounds ?? null,
+      prob_min: meta?.prob_min,
+      prob_max: meta?.prob_max,
+      prob_mean: meta?.prob_mean,
     });
   } catch (err) {
-    console.error('vector error:', err?.response?.data || err.message);
-    res.status(501).json({ error: 'vector_not_available', detail: 'tilesvc/predict_geojson missing' });
-  }
-});
-
-// POST /api/predict-fire-spread  (vector-style payload; no self HTTP calls)
-router.post('/', async (req, res) => {
-  try {
-    const b = req.body || {};
-
-    // Accept many common shapes:
-    // { lat, lon } | { lat, lng } | { latitude, longitude }
-    // { location: { lat, lon|lng|latitude|longitude } }
-    const lat =
-      b.lat ??
-      b.latitude ??
-      b.location?.lat ??
-      b.location?.latitude;
-
-    const lon =
-      b.lon ??
-      b.lng ??
-      b.longitude ??
-      b.location?.lon ??
-      b.location?.lng ??
-      b.location?.longitude;
-
-    const Tseq = b.Tseq ?? 3;
-    const thr  = b.thr;
-
-    if (lat == null || lon == null) {
-      return res.status(400).json({ error: 'lat and lon are required' });
-    }
-
-    // 1) GeoJSON polygons from tilesvc
-    const geojson = await getJSON(`${TILE_SVC}/predict_geojson`, { lat, lon, Tseq, thr }, 20000);
-
-    // 2) Meta (area_fraction/threshold) from tilesvc (png=false)
-    let meta = {};
-    try {
-      meta = await getJSON(`${TILE_SVC}/predict`, { lat, lon, Tseq, png: false }, 15000);
-    } catch (_) { meta = {}; }
-
-    const area_fraction = typeof meta?.area_fraction === 'number' ? meta.area_fraction : 0.0;
-    const best_thr = typeof meta?.threshold === 'number' ? meta.threshold : (thr ? Number(thr) : 0.5);
-
-    // Friendly derived field
-    const spread_distance_km = Math.max(0, 64 * Math.sqrt(Math.max(0, area_fraction))); // 64km tile
-
-    return res.json({
-      ok: true,
-      geojson,
-      spread_probability: area_fraction,
-      spread_distance_km,
-      threshold: best_thr
-    });
-  } catch (err) {
-    return res.status(502).json({ error: 'tilesvc_vector_failed', detail: err.message });
+    console.error("vector error:", err?.response?.data || err.message);
+    return res.status(502).json({ error: "tilesvc_vector_failed", detail: err.message });
   }
 });
 
