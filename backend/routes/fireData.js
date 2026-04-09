@@ -16,7 +16,28 @@ const wildfireLimiter = rateLimit({
   skip: () => process.env.NODE_ENV === 'test',                 // don’t affect Jest
 });
 
+// --- FIRMS config -----------------------------------------------------------
+const FIRMS_PRODUCTS = [
+  'VIIRS_NOAA21_NRT',
+  'VIIRS_NOAA20_NRT',
+  'MODIS_NRT',          // Terra + Aqua combined
+];
+const FIRMS_DAYS = Math.max(1, Math.min(Number(process.env.FIRMS_DAYS || 2), 5)); // clamp 1..5
+const FIRMS_BBOX = process.env.FIRMS_BBOX || '-125.0,24.0,-66.0,49.0';           // CONUS default
+
 // --- Helpers ---------------------------------------------------------------
+
+async function fetchFirmsProduct(product) {
+const NASA_KEY = (process.env.NASA_API_KEY || process.env.NASA_KEY || '').trim();
+const keyPart = NASA_KEY ? `${NASA_KEY}/` : '';
+  const url = `https://firms.modaps.eosdis.nasa.gov/api/area/csv/${keyPart}${product}/${FIRMS_BBOX}/${FIRMS_DAYS}`;
+  const { data } = await axios.get(url, {
+    headers: { 'User-Agent': 'ignis-ai (chrisjuarez1596@gmail.com)' },
+    responseType: 'text',
+    timeout: 20_000,
+  });
+  return data;
+}
 
 // Confidence to 0..100
 function asConfidencePct(conf) {
@@ -45,7 +66,7 @@ function isLikelyFlare({ daynight, frp, brightness, confidence, confidencePct })
   );
 }
 
-// Parse FIRMS area CSV (VIIRS 14 columns)
+// Parse FIRMS area CSV (VIIRS/MODIS area endpoint)
 function parseCSV(csvText, opts = {}) {
   const { excludeFlares = true, predictableOnly = false } = opts;
   const lines = csvText.trim().split('\n');
@@ -108,19 +129,19 @@ router.get('/wildfires', wildfireLimiter, async (req, res) => {
     const excludeFlares   = (req.query.excludeFlares ?? 'true') !== 'false';
     const predictableOnly = (req.query.predictableOnly ?? 'false') === 'true';
 
-    const NASA_KEY = process.env.NASA_API_KEY || process.env.NASA_KEY || '';
-    const keyPart  = NASA_KEY ? `${NASA_KEY}/` : '';
-    const url = `https://firms.modaps.eosdis.nasa.gov/api/area/csv/${keyPart}VIIRS_NOAA21_NRT/-125.0,24.0,-66.0,49.0/2`;
+    // Fetch multiple FIRMS products, merge, drop headers
+    const results = await Promise.allSettled(FIRMS_PRODUCTS.map(fetchFirmsProduct));
+    const bodies = results
+      .filter(r => r.status === 'fulfilled')
+      .map(r => r.value.split('\n').slice(1).join('\n')) // strip header
+      .filter(Boolean);
 
-    // Do NOT log the URL or key (CodeQL: js/clear-text-logging)
+    if (!bodies.length) {
+      return res.status(502).json({ message: 'FIRMS fetch failed', count: 0, data: [] });
+    }
 
-    const { data: csvText } = await axios.get(url, {
-      headers: { 'User-Agent': 'ignis-ai (chrisjuarez1596@gmail.com)' },
-      responseType: 'text',
-      timeout: 20_000,
-    });
-
-    const fires = parseCSV(csvText, { excludeFlares, predictableOnly });
+    const mergedCsv = 'latitude,longitude,acq_date,acq_time\n' + bodies.join('\n');
+    const fires = parseCSV(mergedCsv, { excludeFlares, predictableOnly });
     const parsedCount = fires.length;
 
     // Header-only / no rows
@@ -142,7 +163,12 @@ router.get('/wildfires', wildfireLimiter, async (req, res) => {
       ? 'Wildfire data fetched & stored'
       : 'Wildfire data fetched';
 
-    return res.status(200).json({ message, count: insertedCount });
+    return res.status(200).json({
+      message,
+      count: fires.length,
+      inserted: insertedCount,
+      data: fires,              // ✅ what the frontend expects
+    });
   } catch (err) {
     console.error('❌ Error fetching wildfire data:', err);
     return res.status(500).json({ error: err.message });
