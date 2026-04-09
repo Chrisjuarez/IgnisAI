@@ -261,13 +261,38 @@ const MapComponent = forwardRef(({
       // predictFireSpread (frontend/api.js) should call GET /api/predict-fire-spread/vector
       const prediction = await predictFireSpread({
         lat: fireProps.latitude,
-        lng: fireProps.longitude
+        lng: fireProps.longitude,
+        thr: 0.1,
+        Tseq: 1,
       });
 
-      if (prediction?.geojson) {
-        displayFirePrediction({ geojson: prediction.geojson });
+      // 1) Show a clean raster heatmap overlay (recommended)
+      const thr = 0.1; // lower threshold so mask isn't empty
+      const result = await addPredictionOverlay(mapRef.current, {
+        apiBase: API_BASE,
+        lat: fireProps.latitude,
+        lon: fireProps.longitude,
+        mode: 'raster',
+        thr,
+        floor: 0.15,           // hide tiny probabilities to avoid spotted look
+        Tseq: 1,
+        gamma: 0.85,
+        opacity: 0.60,
+        smooth: true,
+        alphaThreshold: 0.15,
+      });
+
+      // Fit to overlay bounds (makes it look “accurate” instead of offset)
+      if (result?.bounds) {
+        const [w, s, e, n] = result.bounds;
+        mapRef.current.fitBounds([[w, s], [e, n]], { padding: 40, duration: 800 });
       }
+
+      // 2) Keep popup + stats
       showPredictionPopup(fireProps, prediction);
+
+      // OPTIONAL: If you still want vector polygons sometimes, keep this behind a toggle.
+      // if (prediction?.geojson) displayFirePrediction({ geojson: prediction.geojson });
     } catch (error) {
       console.error('Failed to predict fire spread:', error);
       const map = mapRef.current;
@@ -389,9 +414,32 @@ const MapComponent = forwardRef(({
 
   const addIgnisOverlayAt = async ({ latitude, longitude }, mode = 'raster') => {
     try {
-      const map = mapRef.current;
+        const map = mapRef.current;
       if (!map) return;
-      await addPredictionOverlay(map, { lat: latitude, lon: longitude, mode });
+
+      // Use a default thr that matches your model’s scale (prob_max ~ 0.22)
+      const thr = 0.35;
+
+      const result = await addPredictionOverlay(map, {
+        apiBase: API_BASE,
+        lat: latitude,
+        lon: longitude,
+        mode,
+        thr,
+        Tseq: 3,
+
+        // Heatmap tuning knobs (optional, but makes it look nicer)
+        gamma: 0.9,
+        floor: 0.2,
+        opacity: 0.6,
+        smooth: true
+      });
+
+      // Fit to tile bounds so overlay doesn’t look “random”
+      if (result?.bounds) {
+        const [w, s, e, n] = result.bounds;
+        map.fitBounds([[w, s], [e, n]], { padding: 40, duration: 800 });
+      }
     } catch (e) {
       console.error('Ignis overlay error:', e);
     }
