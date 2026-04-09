@@ -19,16 +19,28 @@ services:
     build:
       context: .
       dockerfile: docker/tilesvc.Dockerfile
+      args:
+        INSTALL_TORCH: "1"   # <-- IMPORTANT
     env_file:
-      - ./docker/tilesvc.env
-    environment:
-      - MODEL_PATH=/models/model.pt
-    volumes:
-      - ./models:/models:ro
+      - docker/tilesvc.env
     ports:
       - "8008:8008"
-    networks: [ignisai-network]
+    environment:
+      # point to YOUR model filename
+      MODEL_PATH: /models/convlstm_unet_Cd7_Cs15_H96_T6_nautilus.pt
+      TORCH_DEVICE: cpu
+       # optional but recommended: make config explicit
+      MODEL_CD: "7"
+      MODEL_CS: "15"
+      MODEL_HIDDEN: "96"
+      MODEL_LSTM_LAYERS: "1"
+      MODEL_THRESHOLD: "0.07"     # tune later (0.25–0.6)
+    volumes:
+      - ./models:/models
     restart: unless-stopped
+    networks:
+      - ignisai-network
+
 
   backend:
     build:
@@ -51,10 +63,11 @@ services:
     networks: [ignisai-network]
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:5000/health"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:5000/health >/dev/null || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+      start_period: 20s
 
   frontend:
     build:
@@ -62,6 +75,9 @@ services:
       dockerfile: Dockerfile
       args:
         REACT_APP_API_URL: http://localhost:5000/api
+        REACT_APP_MAPBOX_TOKEN: ${REACT_APP_MAPBOX_TOKEN}
+    environment:
+      - REACT_APP_MAPBOX_TOKEN=${REACT_APP_MAPBOX_TOKEN}
     ports:
       - "3000:80"
     depends_on:
