@@ -1,6 +1,6 @@
 services:
   tilesvc:
-    image: ${TILE_IMAGE:-013957138138.dkr.ecr.us-west-1.amazonaws.com/ignis-tilesvc:latest}
+    image: ${TILE_IMAGE:-ignis-tilesvc:latest}
     build:
       context: ..                         # was .  (compose is in docker/)
       dockerfile: docker/tilesvc.Dockerfile
