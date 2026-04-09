@@ -1,146 +1,206 @@
 # services/tilesvc/static_builder.py
-# Per-tile elevation via OpenTopography → reproject to EPSG:5070 → slope/aspect → cache to S3
+from __future__ import annotations
 
 import os
-import time
 import tempfile
+from pathlib import Path
+from typing import Any, Dict, Tuple, Union
+
 import numpy as np
-import rasterio as rio
-from rasterio.warp import reproject, Resampling
+import rasterio
 import requests
+from rasterio.warp import reproject, Resampling
 
-from .grid import SIZE, CRS_ALBERS, tile_affine, tile_bounds_lonlat
-from .cache import save_npz_s3, s3_key_static, BUCKET_STATIC
+from .grid import TileID, SIZE, tile_bounds_lonlat, tile_affine
+
+# Where we store per-tile static npz files inside the container
+DEFAULT_CACHE_DIR = os.environ.get("TILESVC_CACHE_DIR", "/app/services/tilesvc/cache")
+
+# DEM source (OpenTopography Global DEM endpoint — free with API key)
+OPENTOPO_API_KEY = os.environ.get("OPENTOPO_API_KEY")
+# safer default DEM; can override via OT_DEM
+OPENTOPO_DEM = os.environ.get("OT_DEM", "SRTMGL1")
+OPENTOPO_TIMEOUT = int(os.environ.get("OT_TIMEOUT", "120"))
+OPENTOPO_BUFFER_DEG = float(os.environ.get("OT_BUFFER_DEG", "0.2"))
+
+# Expected static channel order for the model (length must equal MODEL_CS)
+# Match training static_order:
+# [elev, slope, aspect_cos, aspect_sin, ndvi, bli, erc, pdsi, chili, impervious, water, population, fuel1, fuel2, fuel3]
+CHANNEL_ORDER = [
+    "elev",
+    "slope",
+    "aspect_cos",
+    "aspect_sin",
+    "ndvi",
+    "bli",
+    "erc",
+    "pdsi",
+    "chili",
+    "impervious",
+    "water",
+    "population",
+    "fuel1",
+    "fuel2",
+    "fuel3",
+]
 
 
-# ---------------- Env / Tunables ----------------
-OT_DEM        = os.getenv("OT_DEM", "NASADEM")
-OT_KEY        = os.getenv("OPENTOPO_API_KEY", "")
-OT_TIMEOUT    = float(os.getenv("OT_TIMEOUT", "180"))
-OT_BUFFER_DEG = float(os.getenv("OT_BUFFER_DEG", "0.20"))
-ELEVATION_SOURCE = os.getenv("ELEVATION_COG_URL", "opentopo:")
+def _coerce_tile(tile: Union[TileID, Tuple[int, int], Dict[str, Any]]) -> TileID:
+    """
+    Accept a TileID, (ix, iy) tuple, or dict-like {'ix':..,'iy':..}
+    and return a TileID.
+    """
+    if isinstance(tile, TileID):
+        return tile
+    if isinstance(tile, tuple) and len(tile) == 2:
+        return TileID(int(tile[0]), int(tile[1]))
+    if isinstance(tile, dict) and "ix" in tile and "iy" in tile:
+        return TileID(int(tile["ix"]), int(tile["iy"]))
+    raise TypeError(f"Unsupported tile type: {type(tile)}")
 
 
-# ---------------- Helpers ----------------
-def _download_ot_dem_for_tile(ix: int, iy: int) -> str:
-    """Fetch a DEM GeoTIFF for the tile bbox via OpenTopography Global DEM API."""
-    tile = type("T", (), {"ix": ix, "iy": iy})()
+def _static_npz_path(tile: TileID, cache_dir: str) -> Path:
+    d = Path(cache_dir)
+    d.mkdir(parents=True, exist_ok=True)
+    return d / f"static_ix{tile.ix}_iy{tile.iy}.npz"
+
+
+def _fetch_dem_tile(tile: TileID) -> np.ndarray:
+    """Download DEM for this tile via OpenTopography and resample to SIZE x SIZE in EPSG:5070."""
     w, s, e, n = tile_bounds_lonlat(tile)
+    # Add small buffer to avoid edge gaps
+    w -= OPENTOPO_BUFFER_DEG
+    s -= OPENTOPO_BUFFER_DEG
+    e += OPENTOPO_BUFFER_DEG
+    n += OPENTOPO_BUFFER_DEG
 
-    # add small buffer for resampling support at edges
-    w -= OT_BUFFER_DEG
-    s -= OT_BUFFER_DEG
-    e += OT_BUFFER_DEG
-    n += OT_BUFFER_DEG
+    def _download(demtype: str) -> bytes:
+        params = {
+            "demtype": demtype,
+            "south": s, "north": n, "west": w, "east": e,
+            "outputFormat": "GTiff",
+        }
+        if OPENTOPO_API_KEY:
+            params["API_Key"] = OPENTOPO_API_KEY
+        url = "https://portal.opentopography.org/API/globaldem"
+        r = requests.get(url, params=params, timeout=OPENTOPO_TIMEOUT)
+        r.raise_for_status()
+        return r.content
 
-    params = {
-        "demtype": OT_DEM,
-        "south": s, "north": n, "west": w, "east": e,
-        "outputFormat": "GTiff",
-    }
-    if OT_KEY:
-        params["API_Key"] = OT_KEY
+    content = None
+    try:
+        content = _download(OPENTOPO_DEM)
+    except Exception as first_err:
+        # Fallback to SRTMGL1 if custom DEM fails
+        if OPENTOPO_DEM != "SRTMGL1":
+            try:
+                content = _download("SRTMGL1")
+            except Exception:
+                raise first_err
+        else:
+            raise first_err
 
-    url = "https://portal.opentopography.org/API/globaldem"
-
-    last_err = None
-    for attempt in range(3):
-        try:
-            r = requests.get(url, params=params, timeout=OT_TIMEOUT)
-            if r.status_code == 200 and r.content:
-                fd, tmp_path = tempfile.mkstemp(suffix=".tif", prefix=f"ot_dem_{ix}_{iy}_")
-                os.close(fd)
-                with open(tmp_path, "wb") as f:
-                    f.write(r.content)
-                return tmp_path
-            last_err = RuntimeError(f"OpenTopography HTTP {r.status_code}: {r.text[:200]}")
-        except Exception as e:
-            last_err = e
-        time.sleep(1.5 * (attempt + 1))
-
-    raise last_err or RuntimeError("Failed to fetch DEM from OpenTopography")
-
-
-def _reproject_to_tile(src_path: str, dst_affine) -> np.ndarray:
-    """Reproject/resample src raster to the tile grid in EPSG:5070; returns [H,W] float32."""
-    with rio.open(src_path) as src:
-        dst = np.zeros((SIZE, SIZE), np.float32)
-        reproject(
-            source=rio.band(src, 1),
-            destination=dst,
-            src_transform=src.transform,
-            src_crs=src.crs,
-            dst_transform=dst_affine,
-            dst_crs=CRS_ALBERS,
-            resampling=Resampling.bilinear,
-            num_threads=2,
-        )
-
-    # Replace non-finite values with median to avoid NaNs in slope/aspect
-    med = np.nanmedian(dst)
-    if not np.isfinite(med):
-        med = 0.0
-    dst = np.where(np.isfinite(dst), dst, med).astype(np.float32)
+    with tempfile.NamedTemporaryFile(suffix=".tif", delete=True) as tmp:
+        tmp.write(content)
+        tmp.flush()
+        with rasterio.open(tmp.name) as src:
+            dst = np.zeros((SIZE, SIZE), dtype=np.float32)
+            reproject(
+                source=src.read(1),
+                destination=dst,
+                src_transform=src.transform,
+                src_crs=src.crs,
+                dst_transform=tile_affine(tile),
+                dst_crs="EPSG:5070",
+                resampling=Resampling.bilinear,
+            )
     return dst
 
 
-def _slope_aspect(elev_m: np.ndarray, pix_m: float):
-    """
-    Compute slope (deg) and aspect unit vectors from elevation (meters).
-    Pixel size is passed in **meters** from the tile affine (robust if SIZE/PIX changes).
-    """
-    gy, gx = np.gradient(elev_m, pix_m, pix_m)
-    slope = np.rad2deg(np.arctan(np.hypot(gx, gy))).astype(np.float32)
+def _compute_slope_aspect(dem_m: np.ndarray, pix_size_m: float = 500.0):
+    """Approximate slope (rad) and aspect (cos/sin) from DEM using central differences."""
+    # Pad edges to avoid NaNs at border
+    dem = np.pad(dem_m, 1, mode="edge")
+    gy, gx = np.gradient(dem, pix_size_m, pix_size_m)
+    gy = gy[1:-1, 1:-1]
+    gx = gx[1:-1, 1:-1]
 
-    # Downslope azimuth: 0° = north, clockwise positive
-    aspect_deg = (np.rad2deg(np.arctan2(-gx, gy)) + 360.0) % 360.0
-    asp_cos = np.cos(np.deg2rad(aspect_deg)).astype(np.float32)
-    asp_sin = np.sin(np.deg2rad(aspect_deg)).astype(np.float32)
-    return slope, asp_cos, asp_sin
-
-
-def _src_path_for_tile(ix: int, iy: int) -> str:
-    """
-    If ELEVATION_SOURCE is http(s) (single COG), use it; otherwise fetch per-tile from OT.
-    """
-    src = (ELEVATION_SOURCE or "").strip()
-    if src.lower().startswith("http://") or src.lower().startswith("https://"):
-        return src
-    return _download_ot_dem_for_tile(ix, iy)
+    slope = np.arctan(np.hypot(gx, gy))  # radians
+    aspect = np.arctan2(-gy, gx)  # GIS-style aspect
+    aspect_cos = np.cos(aspect)
+    aspect_sin = np.sin(aspect)
+    roughness = np.hypot(gx, gy).astype(np.float32)
+    return slope.astype(np.float32), aspect_cos.astype(np.float32), aspect_sin.astype(np.float32), roughness
 
 
-# ---------------- Public API ----------------
-def build_static(ix: int, iy: int) -> np.ndarray:
+def _build_static_arrays(tile: TileID) -> Dict[str, np.ndarray]:
     """
-    Build static bands for this tile:
-      [elevation, slope_deg, aspect_cos, aspect_sin] with shape [4, SIZE, SIZE]
-    Uploads a compressed NPZ to S3 and returns the array.
+    Build per-tile static rasters with real elevation/slope/aspect from OpenTopography.
+    Remaining channels are filled with reasonable placeholders so we reach 15 channels.
     """
-    A = tile_affine(type("T", (), {"ix": ix, "iy": iy})())
-    pix_m = float(abs(A.a))  # pixel size in meters from affine (e.g., 500)
+    h = int(SIZE)
+    w = int(SIZE)
 
-    src_path = _src_path_for_tile(ix, iy)
-    tmp_path = None
     try:
-        # Remember to unlink if we downloaded an OT temp file
-        if not (src_path.lower().startswith("http://") or src_path.lower().startswith("https://")):
-            tmp_path = src_path
+        elev = _fetch_dem_tile(tile)
+    except Exception as e:
+        print(f"⚠️  DEM fetch failed for tile {tile}: {e}. Falling back to zeros.")
+        elev = np.zeros((h, w), dtype=np.float32)
 
-        elev = _reproject_to_tile(src_path, A)            # [H,W] float32 in 5070
-        slope, asp_cos, asp_sin = _slope_aspect(elev, pix_m)
-        x_static = np.stack([elev, slope, asp_cos, asp_sin], axis=0)  # [4,H,W]
+    slope, aspect_cos, aspect_sin, _ = _compute_slope_aspect(elev)
 
-        # Best-effort S3 write
-        try:
-            save_npz_s3(BUCKET_STATIC, s3_key_static(ix, iy), x=x_static)
-        except Exception as e:
-            print(f"[static_builder] S3 save warning: {e}")
+    # Placeholders for missing static layers; keep 0..1
+    zero = np.zeros((h, w), dtype=np.float32)
 
-        return x_static
+    return {
+        "elev": elev.astype(np.float32),
+        "slope": slope.astype(np.float32),
+        "aspect_cos": aspect_cos.astype(np.float32),
+        "aspect_sin": aspect_sin.astype(np.float32),
+        "ndvi": zero,
+        "bli": zero,
+        "erc": zero,
+        "pdsi": zero,
+        "chili": zero,
+        "impervious": zero,
+        "water": zero,
+        "population": zero,
+        "fuel1": zero,
+        "fuel2": zero,
+        "fuel3": zero,
+    }
 
-    finally:
-        if tmp_path and os.path.exists(tmp_path):
-            try:
-                os.remove(tmp_path)
-            except Exception:
-                pass
+
+def build_static_for_tile(
+    tile: Union[TileID, Tuple[int, int], Dict[str, Any]],
+    cache_dir: str = DEFAULT_CACHE_DIR,
+    force: bool = False,
+) -> str:
+    """
+    Build (or load) cached static rasters for a tile.
+
+    Returns:
+        str path to the cached .npz file (this is a common pattern in tilesvc apps)
+    """
+    t = _coerce_tile(tile)
+    out = _static_npz_path(t, cache_dir)
+
+    if out.exists() and not force:
+        return str(out)
+
+    arrays = _build_static_arrays(t)
+    np.savez_compressed(out, **arrays)
+    return str(out)
+
+
+def load_static_for_tile(
+    tile: Union[TileID, Tuple[int, int], Dict[str, Any]],
+    cache_dir: str = DEFAULT_CACHE_DIR,
+) -> Dict[str, np.ndarray]:
+    """
+    Convenience loader: returns dict of arrays.
+    """
+    t = _coerce_tile(tile)
+    p = Path(build_static_for_tile(t, cache_dir=cache_dir, force=False))
+    with np.load(p) as z:
+        return {k: z[k] for k in z.files}
