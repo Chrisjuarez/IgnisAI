@@ -28,7 +28,7 @@ router.get("/raster", async (req, res) => {
     const params = {
       lat,
       lon,
-      Tseq: Tseq || 3,
+      Tseq: Tseq || 1,
       ...(thr ? { thr } : {}),
       crop_frac: crop_frac != null ? crop_frac : 1.5,
     };
@@ -70,14 +70,14 @@ router.get("/vector", async (req, res) => {
     // 1) GeoJSON polygons from tilesvc (honor thr!)
     const geojson = await getJSON(
       `${TILE_SVC}/predict_geojson`,
-      { lat, lon, Tseq: Tseq || 3, ...(thr ? { thr } : {}), crop_frac: crop },
+      { lat, lon, Tseq: Tseq || 1, ...(thr ? { thr } : {}), crop_frac: crop },
       20000
     );
 
     // 2) Meta (area_fraction + threshold + bounds) from tilesvc
     const meta = await getJSON(
       `${TILE_SVC}/predict`,
-      { lat, lon, Tseq: Tseq || 3, png: false, ...(thr ? { thr } : {}), crop_frac: crop },
+      { lat, lon, Tseq: Tseq || 1, png: false, ...(thr ? { thr } : {}), crop_frac: crop },
       80000
     );
 
