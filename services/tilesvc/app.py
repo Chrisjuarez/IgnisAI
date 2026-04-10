@@ -192,6 +192,9 @@ def _predict_probability(lat: float, lon: float, Tseq: int, ignition: bool = Fal
             pass
     prob = np.clip(prob, 0.0, 1.0)
 
+    print(f"🔮 Prediction: min={prob.min():.6f}, max={prob.max():.6f}, "
+          f"mean={prob.mean():.6f}, shape={prob.shape}, Tseq={Tseq}")
+
     return prob, bounds
 
 
