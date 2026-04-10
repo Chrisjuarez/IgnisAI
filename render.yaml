@@ -58,7 +58,7 @@ services:
     healthCheckPath: /healthz
     envVars:
       - key: MODEL_PATH
-        value: /app/models/convlstm_unet_Cd7_Cs15_H96_T6_nautilus.pt
+        value: /app/models/Fire_Spread_convlstm_unet_Cd7_Cs15_H128_T1_nautilus.pt
       - key: NASA_API_KEY
         sync: false # NASA FIRMS API key (same key as FIRMS_API_KEY above)
       - key: MODEL_URL
