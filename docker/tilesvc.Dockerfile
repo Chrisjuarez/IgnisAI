@@ -3,9 +3,10 @@ FROM python:3.11-slim
 
 ENV PYTHONUNBUFFERED=1 PORT=8008 PYTHONPATH=/app
 
-# Minimal runtime deps
+# Runtime deps — libexpat1, libgeos, libproj needed by rasterio/shapely/pyproj at runtime
 RUN apt-get update && apt-get install -y --no-install-recommends \
       curl ca-certificates \
+      libexpat1 libgeos-dev libproj-dev libgdal-dev \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
