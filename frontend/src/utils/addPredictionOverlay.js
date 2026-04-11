@@ -194,7 +194,30 @@ export async function addRasterOverlay(map, apiBase, lat, lon, opts = {}) {
   });
 
   const url = `${apiBase}/predict-fire-spread/raster?${qs.toString()}`;
-  const resp = await fetch(url);
+
+  // Retry up to 3 times for cold-start timeouts (Render spins down idle services)
+  let resp = null;
+  let lastErr = null;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      resp = await fetch(url);
+      if (resp.ok) break;
+      // 502/504 often means tilesvc is still waking up — retry
+      if (resp.status === 502 || resp.status === 504) {
+        console.warn(`Raster attempt ${attempt + 1} got ${resp.status}, retrying...`);
+        resp = null;
+        continue;
+      }
+      break; // other errors, don't retry
+    } catch (err) {
+      lastErr = err;
+      console.warn(`Raster attempt ${attempt + 1} failed:`, err.message);
+    }
+  }
+  if (!resp) {
+    throw lastErr || new Error('Raster endpoint unreachable after retries');
+  }
+
   const ct = sniffContentType(resp);
 
   if (ct.includes('text/html')) {
