@@ -12,9 +12,24 @@ const SELF_BASE =
   process.env.INTERNAL_SELF_BASE ||
   `http://127.0.0.1:${process.env.PORT || 5000}`;
 
-async function getJSON(url, params = {}, timeout = 80000) {
-  const r = await axios.get(url, { params, timeout });
-  return r.data;
+async function getJSON(url, params = {}, timeout = 80000, retries = 2) {
+  let lastErr;
+  for (let i = 0; i <= retries; i++) {
+    try {
+      const r = await axios.get(url, { params, timeout });
+      return r.data;
+    } catch (err) {
+      lastErr = err;
+      const status = err?.response?.status;
+      // Retry on connection errors or 502/504 (tilesvc cold start)
+      if (i < retries && (!status || status === 502 || status === 504)) {
+        console.warn(`getJSON attempt ${i + 1} failed (${status || err.code}), retrying...`);
+        continue;
+      }
+      throw err;
+    }
+  }
+  throw lastErr;
 }
 
 // GET /api/predict-fire-spread/raster?lat=&lon=&Tseq=&thr=&date=
