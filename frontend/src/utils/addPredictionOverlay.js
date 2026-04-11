@@ -88,10 +88,10 @@ function clamp01(x) {
 async function colorizeGrayscalePngToHeatmapDataUrl(base64Png, opts = {}) {
   const {
     gamma = 0.7,
-    floor = 0.18,          // hide low values
-    opacity = 0.60,        // slightly stronger after backend smoothing
+    floor = 0.01,
+    opacity = 0.75,
     smooth = true,
-    alphaThreshold = 0.18, // cut speckle
+    alphaThreshold = 0.01,
   } = opts;
 
   const img = new Image();
@@ -189,7 +189,8 @@ export async function addRasterOverlay(map, apiBase, lat, lon, opts = {}) {
     lat: String(lat),
     lon: String(lon),
     ...(opts.Tseq != null ? { Tseq: String(opts.Tseq) } : { Tseq: "1" }),
-    ...(opts.thr != null ? { thr: String(opts.thr) } : { thr: "0.1" }),
+    ...(opts.thr != null ? { thr: String(opts.thr) } : { thr: "0.01" }),
+    ...(opts.date ? { date: opts.date } : {}),
   });
 
   const url = `${apiBase}/predict-fire-spread/raster?${qs.toString()}`;
@@ -306,7 +307,8 @@ export async function addVectorOverlay(map, apiBase, lat, lon, opts = {}) {
     lat: String(lat),
     lon: String(lon),
     ...(opts.Tseq != null ? { Tseq: String(opts.Tseq) } : { Tseq: "1" }),
-    ...(opts.thr != null ? { thr: String(opts.thr) } : { thr: "0.1" }),
+    ...(opts.thr != null ? { thr: String(opts.thr) } : { thr: "0.01" }),
+    ...(opts.date ? { date: opts.date } : {}),
   });
 
   const url = `${apiBase}/predict-fire-spread/vector?${qs.toString()}`;

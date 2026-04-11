@@ -89,6 +89,15 @@ const pctStr = v => (v == null || Number.isNaN(+v) ? '—' : `${Math.round(+v)}%
 
 const getDirectionName = deg => toCompass(deg);
 
+// ---- Historical fire presets for model testing ----
+const HISTORICAL_FIRES = [
+  { name: 'Camp/Paradise Fire',  date: '2018-11-08', lat: 39.80, lon: -121.44, zoom: 10 },
+  { name: 'Eaton Fire',          date: '2025-01-07', lat: 34.19, lon: -118.06, zoom: 11 },
+  { name: 'Palisades Fire',     date: '2025-01-07', lat: 34.05, lon: -118.55, zoom: 11 },
+  { name: 'Dixie Fire',         date: '2021-07-14', lat: 40.05, lon: -121.38, zoom: 10 },
+  { name: 'Caldor Fire',        date: '2021-08-14', lat: 38.75, lon: -120.30, zoom: 10 },
+];
+
 // ---- Component --------------------------------------------------------------
 const MapComponent = forwardRef(({
   brightnessFilter,
@@ -107,6 +116,11 @@ const MapComponent = forwardRef(({
   const [wildfires, setWildfires]       = useState([]);
   const [isPredicting, setIsPredicting] = useState(false);
   const [activePopup, setActivePopup]   = useState(null);
+
+  // Historical fire testing state
+  const [showHistPanel, setShowHistPanel] = useState(false);
+  const [histDate, setHistDate]           = useState('');
+  const [histRunning, setHistRunning]     = useState(false);
 
   // NDVI overlay state
   const [ndviOn, setNdviOn] = useState(false);
@@ -262,24 +276,24 @@ const MapComponent = forwardRef(({
       const prediction = await predictFireSpread({
         lat: fireProps.latitude,
         lng: fireProps.longitude,
-        thr: 0.1,
+        thr: 0.01,
         Tseq: 1,
       });
 
       // 1) Show a clean raster heatmap overlay (recommended)
-      const thr = 0.1; // lower threshold so mask isn't empty
+      const thr = 0.01;
       const result = await addPredictionOverlay(mapRef.current, {
         apiBase: API_BASE,
         lat: fireProps.latitude,
         lon: fireProps.longitude,
         mode: 'raster',
         thr,
-        floor: 0.15,           // hide tiny probabilities to avoid spotted look
+        floor: 0.01,
         Tseq: 1,
-        gamma: 0.85,
-        opacity: 0.60,
+        gamma: 0.7,
+        opacity: 0.75,
         smooth: true,
-        alphaThreshold: 0.15,
+        alphaThreshold: 0.01,
       });
 
       // Fit to overlay bounds (makes it look “accurate” instead of offset)
@@ -417,8 +431,7 @@ const MapComponent = forwardRef(({
         const map = mapRef.current;
       if (!map) return;
 
-      // Use a default thr that matches your model’s scale (prob_max ~ 0.22)
-      const thr = 0.35;
+      const thr = 0.01;
 
       const result = await addPredictionOverlay(map, {
         apiBase: API_BASE,
@@ -426,13 +439,12 @@ const MapComponent = forwardRef(({
         lon: longitude,
         mode,
         thr,
-        Tseq: 3,
-
-        // Heatmap tuning knobs (optional, but makes it look nicer)
-        gamma: 0.9,
-        floor: 0.2,
-        opacity: 0.6,
-        smooth: true
+        Tseq: 1,
+        gamma: 0.7,
+        floor: 0.01,
+        opacity: 0.75,
+        smooth: true,
+        alphaThreshold: 0.01,
       });
 
       // Fit to tile bounds so overlay doesn’t look “random”
@@ -443,6 +455,77 @@ const MapComponent = forwardRef(({
     } catch (e) {
       console.error('Ignis overlay error:', e);
     }
+  };
+
+  // ---------- Historical fire test ----------
+  const runHistoricalPrediction = async (preset) => {
+    const map = mapRef.current;
+    if (!map || histRunning) return;
+    setHistRunning(true);
+    try {
+      const { lat, lon, date, zoom, name } = preset;
+
+      map.flyTo({ center: [lon, lat], zoom: zoom || 10, duration: 1200 });
+
+      const result = await addPredictionOverlay(map, {
+        apiBase: API_BASE,
+        lat,
+        lon,
+        mode: 'raster',
+        thr: 0.01,
+        Tseq: 1,
+        date,
+        gamma: 0.7,
+        floor: 0.01,
+        opacity: 0.75,
+        smooth: true,
+        alphaThreshold: 0.01,
+      });
+
+      if (result?.bounds) {
+        const [w, s, e, n] = result.bounds;
+        map.fitBounds([[w, s], [e, n]], { padding: 40, duration: 800 });
+      }
+
+      // Show info popup
+      const probMax = result?.meta?.prob_max;
+      const probMean = result?.meta?.prob_mean;
+      const popup = new mapboxgl.Popup()
+        .setLngLat([lon, lat])
+        .setHTML(`
+          <div class="wildfire-popup">
+            <h4>${name}</h4>
+            <div class="prediction-results">
+              <h5>Historical Prediction (${date})</h5>
+              <p><strong>Max probability:</strong> ${probMax != null ? (probMax * 100).toFixed(1) + '%' : '--'}</p>
+              <p><strong>Mean probability:</strong> ${probMean != null ? (probMean * 100).toFixed(2) + '%' : '--'}</p>
+              <p style="margin-top:8px;font-size:0.85em;color:#888;">
+                Uses archived weather data. FIRMS fire detections only available for recent dates;
+                older fires use ignition-point mode.
+              </p>
+            </div>
+          </div>
+        `)
+        .addTo(map);
+      setActivePopup(popup);
+    } catch (e) {
+      console.error('Historical prediction error:', e);
+    } finally {
+      setHistRunning(false);
+    }
+  };
+
+  const runCustomHistorical = async () => {
+    const map = mapRef.current;
+    if (!map || !histDate) return;
+    const center = map.getCenter();
+    await runHistoricalPrediction({
+      name: `Custom (${histDate})`,
+      date: histDate,
+      lat: center.lat,
+      lon: center.lng,
+      zoom: map.getZoom(),
+    });
   };
 
   // ---------- Layers setup ----------
@@ -459,10 +542,38 @@ const MapComponent = forwardRef(({
       type: 'circle',
       source: 'wildfires-source',
       paint: {
-        'circle-radius':       4,
-        'circle-color':        '#FF4500',
-        'circle-stroke-width': 1,
-        'circle-stroke-color': '#fff'
+        'circle-radius': [
+          'match', ['get', 'brightnessCat'],
+          'Extreme', 12,
+          'Severe', 8,
+          'Moderate', 6,
+          4
+        ],
+        'circle-color': [
+          'match', ['get', 'brightnessCat'],
+          'Extreme', '#CC0000',
+          'Severe',  '#FF2200',
+          'Moderate', '#FF6600',
+          '#FFA500'
+        ],
+        'circle-opacity': [
+          'interpolate', ['linear'], ['get', 'confidencePct'],
+          0, 0.4,
+          50, 0.7,
+          100, 1.0
+        ],
+        'circle-stroke-width': [
+          'match', ['get', 'brightnessCat'],
+          'Extreme', 2,
+          'Severe', 1.5,
+          1
+        ],
+        'circle-stroke-color': '#fff',
+        'circle-blur': [
+          'match', ['get', 'brightnessCat'],
+          'Extreme', 0.4,
+          0
+        ]
       }
     });
 
@@ -640,17 +751,79 @@ const MapComponent = forwardRef(({
       .env-data { margin-top: 8px; padding: 8px; background-color: #f8f8f8; border-radius: 4px; font-size: 0.9em; }
       .env-data h6 { margin: 0 0 5px 0; color: #666; }
       .env-data p { margin: 3px 0; }
+      .hist-panel {
+        position: absolute; top: 10px; right: 50px; z-index: 10;
+        background: rgba(30,30,30,0.92); color: #eee;
+        border-radius: 8px; padding: 12px 14px; min-width: 220px;
+        font-size: 13px; box-shadow: 0 2px 12px rgba(0,0,0,0.4);
+      }
+      .hist-panel h4 { margin: 0 0 8px; font-size: 14px; color: #FF6600; }
+      .hist-btn {
+        display: block; width: 100%; padding: 6px 8px; margin: 4px 0;
+        border: none; border-radius: 4px; cursor: pointer;
+        font-size: 12px; font-weight: 600; text-align: left;
+        background: #444; color: #fff;
+      }
+      .hist-btn:hover { background: #666; }
+      .hist-btn:disabled { opacity: 0.5; cursor: wait; }
+      .hist-toggle {
+        position: absolute; top: 10px; right: 10px; z-index: 10;
+        background: #FF6600; color: #fff; border: none; border-radius: 6px;
+        padding: 6px 10px; cursor: pointer; font-size: 13px; font-weight: 700;
+      }
+      .hist-toggle:hover { background: #FF8800; }
     `;
     document.head.appendChild(style);
     return () => { document.head.removeChild(style); };
   }, []);
 
   return (
-    <div
-      ref={mapContainerRef}
-      style={{ width: '100%', height: '100%', position: 'relative' }}
-      title="Press 'N' to toggle NDVI overlay"
-    />
+    <div style={{ width: '100%', height: '100%', position: 'relative' }}>
+      <div
+        ref={mapContainerRef}
+        style={{ width: '100%', height: '100%' }}
+        title="Press 'N' to toggle NDVI overlay"
+      />
+      <button className="hist-toggle" onClick={() => setShowHistPanel(v => !v)}>
+        {showHistPanel ? 'X' : 'History'}
+      </button>
+      {showHistPanel && (
+        <div className="hist-panel">
+          <h4>Historical Fire Testing</h4>
+          <p style={{fontSize:'11px',margin:'0 0 8px',color:'#aaa'}}>
+            Run the model on known historical fires using archived weather.
+          </p>
+          {HISTORICAL_FIRES.map((fire, i) => (
+            <button
+              key={i}
+              className="hist-btn"
+              disabled={histRunning}
+              onClick={() => runHistoricalPrediction(fire)}
+            >
+              {fire.name} ({fire.date})
+            </button>
+          ))}
+          <hr style={{border:'none',borderTop:'1px solid #555',margin:'10px 0'}} />
+          <p style={{fontSize:'11px',margin:'0 0 4px',color:'#aaa'}}>
+            Or pick a custom date (runs prediction at current map center):
+          </p>
+          <input
+            type="date"
+            value={histDate}
+            onChange={e => setHistDate(e.target.value)}
+            style={{width:'100%',padding:'4px',borderRadius:'4px',border:'1px solid #555',background:'#333',color:'#eee',fontSize:'12px'}}
+          />
+          <button
+            className="hist-btn"
+            style={{marginTop:'6px',background:'#FF6600'}}
+            disabled={histRunning || !histDate}
+            onClick={runCustomHistorical}
+          >
+            {histRunning ? 'Running...' : 'Run Custom Date'}
+          </button>
+        </div>
+      )}
+    </div>
   );
 });
 
