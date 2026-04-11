@@ -272,22 +272,32 @@ const MapComponent = forwardRef(({
     try {
       if (activePopup) activePopup.remove();
 
-      // predictFireSpread (frontend/api.js) should call GET /api/predict-fire-spread/vector
-      const prediction = await predictFireSpread({
-        lat: fireProps.latitude,
-        lng: fireProps.longitude,
-        thr: 0.01,
-        Tseq: 1,
-      });
+      // Retry logic for cold-start timeouts (Render spins down idle services)
+      let prediction = null;
+      let lastErr = null;
+      for (let attempt = 0; attempt < 3; attempt++) {
+        try {
+          prediction = await predictFireSpread({
+            lat: fireProps.latitude,
+            lng: fireProps.longitude,
+            thr: 0.01,
+            Tseq: 1,
+          });
+          break;
+        } catch (err) {
+          lastErr = err;
+          console.warn(`Prediction attempt ${attempt + 1} failed, retrying...`, err.message);
+        }
+      }
+      if (!prediction) throw lastErr;
 
-      // 1) Show a clean raster heatmap overlay (recommended)
-      const thr = 0.01;
+      // Show raster heatmap overlay (with same retry tolerance via fetch)
       const result = await addPredictionOverlay(mapRef.current, {
         apiBase: API_BASE,
         lat: fireProps.latitude,
         lon: fireProps.longitude,
         mode: 'raster',
-        thr,
+        thr: 0.01,
         floor: 0.01,
         Tseq: 1,
         gamma: 0.7,
@@ -356,8 +366,14 @@ const MapComponent = forwardRef(({
     if (!map) return;
 
     const env = prediction?.environmental_data || {};
-    const probPct = Math.round((prediction?.spread_probability ?? 0) * 100);
-    const willSpread = probPct >= 20 ? 'Yes' : probPct >= 10 ? 'Possibly' : 'Unlikely';
+    // Use prob_max for the headline "will it spread" assessment (max probability in the tile)
+    const probMax = prediction?.prob_max ?? prediction?.spread_probability ?? 0;
+    const probMean = prediction?.prob_mean ?? 0;
+    const maxPct = Math.round(probMax * 100);
+    const meanPct = (probMean * 100).toFixed(1);
+    const willSpread = maxPct >= 15 ? 'Yes' : maxPct >= 5 ? 'Possibly' : 'Unlikely';
+    // Spread distance based on prob_max rather than area_fraction
+    const spreadKm = prediction?.spread_distance_km ?? (64 * Math.sqrt(Math.max(0, probMax)));
 
     const popup = new mapboxgl.Popup()
       .setLngLat([fireProps.longitude, fireProps.latitude])
@@ -367,8 +383,9 @@ const MapComponent = forwardRef(({
           <div class="prediction-results">
             <h5>Ignis Prediction</h5>
             <p><strong>Will spread:</strong> ${willSpread}</p>
-            <p><strong>Spread probability:</strong> ${pctStr(probPct)}</p>
-            <p><strong>Spread distance:</strong> ${fmt(prediction?.spread_distance_km, 2)} km</p>
+            <p><strong>Peak probability:</strong> ${pctStr(maxPct)}</p>
+            <p><strong>Mean probability:</strong> ${meanPct}%</p>
+            <p><strong>Est. spread distance:</strong> ${fmt(spreadKm, 1)} km</p>
             <div class="env-data">
               <h6>Environmental Factors</h6>
               <p>Wind: ${fmt(env.wind_speed, 1)} km/h ${getDirectionName(env.wind_direction)}</p>
