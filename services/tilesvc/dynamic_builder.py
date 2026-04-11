@@ -136,30 +136,74 @@ def _rasterize_fire(points, t_start, t_end, affine):
 
 
 # ---------------- Weather (Open-Meteo) ----------------
-def _fetch_weather(lat: float, lon: float):
-    """
-    Fetch current weather and expand to per-pixel constant grids.
+OPEN_METEO_ARCHIVE = "https://archive-api.open-meteo.com/v1/archive"
 
-    We request **m/s** winds and °C so they match training-time transforms.
-    """
-    params = {
-        "latitude": lat,
-        "longitude": lon,
-        "timezone": "UTC",
-        "current": (
-            "temperature_2m,relative_humidity_2m,"
-            "wind_speed_10m,wind_direction_10m,wind_gusts_10m,precipitation"
-        ),
-        "windspeed_unit": "ms",
-        "precipitation_unit": "mm",
-        "temperature_unit": "celsius",
-    }
 
-    try:
-        j = requests.get(OPEN_METEO, params=params, timeout=12).json()
-        cur = j.get("current", {}) or {}
-    except Exception:
-        cur = {}
+def _fetch_weather(lat: float, lon: float, ref_time: dt.datetime = None):
+    """
+    Fetch weather and expand to per-pixel constant grids.
+    If ref_time is provided and in the past (>24h ago), use the Open-Meteo Archive API.
+    Otherwise use the current/forecast API.
+    """
+    now = dt.datetime.now(dt.timezone.utc)
+    use_archive = (ref_time is not None and (now - ref_time).total_seconds() > 86400)
+
+    cur = {}
+
+    if use_archive:
+        date_str = ref_time.strftime("%Y-%m-%d")
+        target_hour = ref_time.hour
+        params = {
+            "latitude": lat,
+            "longitude": lon,
+            "start_date": date_str,
+            "end_date": date_str,
+            "hourly": (
+                "temperature_2m,relative_humidity_2m,"
+                "wind_speed_10m,wind_direction_10m,wind_gusts_10m,precipitation"
+            ),
+            "windspeed_unit": "ms",
+            "precipitation_unit": "mm",
+            "temperature_unit": "celsius",
+            "timezone": "UTC",
+        }
+        try:
+            j = requests.get(OPEN_METEO_ARCHIVE, params=params, timeout=20).json()
+            hourly = j.get("hourly", {}) or {}
+            times = hourly.get("time", [])
+            # Find the closest hour index
+            idx = min(target_hour, len(times) - 1) if times else 0
+            cur = {
+                "temperature_2m": hourly.get("temperature_2m", [15.0])[idx],
+                "relative_humidity_2m": hourly.get("relative_humidity_2m", [50.0])[idx],
+                "wind_speed_10m": hourly.get("wind_speed_10m", [3.0])[idx],
+                "wind_direction_10m": hourly.get("wind_direction_10m", [0.0])[idx],
+                "wind_gusts_10m": hourly.get("wind_gusts_10m", [3.0])[idx],
+                "precipitation": hourly.get("precipitation", [0.0])[idx],
+            }
+            print(f"[tilesvc] Archive weather for {date_str} hour {target_hour}: T={cur.get('temperature_2m')}, "
+                  f"RH={cur.get('relative_humidity_2m')}, WS={cur.get('wind_speed_10m')}")
+        except Exception as e:
+            print(f"⚠️  Archive weather fetch failed: {e}")
+            cur = {}
+    else:
+        params = {
+            "latitude": lat,
+            "longitude": lon,
+            "timezone": "UTC",
+            "current": (
+                "temperature_2m,relative_humidity_2m,"
+                "wind_speed_10m,wind_direction_10m,wind_gusts_10m,precipitation"
+            ),
+            "windspeed_unit": "ms",
+            "precipitation_unit": "mm",
+            "temperature_unit": "celsius",
+        }
+        try:
+            j = requests.get(OPEN_METEO, params=params, timeout=12).json()
+            cur = j.get("current", {}) or {}
+        except Exception:
+            cur = {}
 
     # Fallbacks if anything missing
     T  = float(cur.get("temperature_2m",       15.0))  # °C
@@ -173,7 +217,6 @@ def _fetch_weather(lat: float, lon: float):
     u, v = wind_to_uv(np.array(WS, np.float32), np.array(WD, np.float32))
     q = rh_to_q(np.array(RH, np.float32), np.array(T, np.float32))
 
-
     H = W = SIZE
     return {
         "u":      np.full((H, W), u, np.float32),
@@ -186,12 +229,16 @@ def _fetch_weather(lat: float, lon: float):
 
 
 # ---------------- Public API ----------------
-def build_dynamic_for_tile(lat: float, lon: float, T_seq: int = 1, hours_step: int = 24, ignition: bool = False):
+def build_dynamic_for_tile(lat: float, lon: float, T_seq: int = 1, hours_step: int = 24, ignition: bool = False, ref_time: dt.datetime = None):
     """
     Build dynamic tensor for the tile containing (lat,lon).
 
     Returns `x_dyn` with shape [T, 7, SIZE, SIZE]
     channels = [fire_t, u, v, gust, tempC, q, precip]
+
+    If ref_time is provided, uses historical weather from that date.
+    FIRMS data is only available for recent dates (1-5 days); for older dates
+    the fire channel will be empty unless ignition=True.
     """
     tile = lonlat_to_tile(lon, lat)
     A    = tile_affine(tile)
@@ -205,7 +252,9 @@ def build_dynamic_for_tile(lat: float, lon: float, T_seq: int = 1, hours_step: i
     print(f"[tilesvc] FIRMS points for tile {tile}: {len(points)} over {days}d window")
 
     # Build T slices: newest last
-    now = dt.datetime.now(dt.timezone.utc).replace(minute=0, second=0, microsecond=0)
+    now = ref_time or dt.datetime.now(dt.timezone.utc).replace(minute=0, second=0, microsecond=0)
+    if ref_time:
+        print(f"[tilesvc] Using historical ref_time: {ref_time.isoformat()}")
     fire_stack = []
     for k in range(T_seq, 0, -1):
         t_end = now - dt.timedelta(hours=(k - 1) * hours_step)
@@ -214,14 +263,14 @@ def build_dynamic_for_tile(lat: float, lon: float, T_seq: int = 1, hours_step: i
         # match train-time boost so sparse points carry signal
         fire_stack.append(fire_boost(m, scale=5.0))
     fire_stack = np.stack(fire_stack, axis=0).astype(np.float32)  # [T,H,W]
-    
+
     if ignition:
         ign = _rasterize_ignition_point(lat, lon, A)      # [H,W] in 5070 meters
         ign = fire_boost(ign, scale=5.0)                  # match train-time boost
         # Inject into the most recent timestep (last index)
         fire_stack[-1] = np.maximum(fire_stack[-1], ign).astype(np.float32)
-    # Weather (constant over the tile for now)
-    wx = _fetch_weather(lat, lon)
+    # Weather (constant over the tile for now; uses archive for historical dates)
+    wx = _fetch_weather(lat, lon, ref_time=ref_time)
 
     # Assemble dynamic tensor
     dyn = []
