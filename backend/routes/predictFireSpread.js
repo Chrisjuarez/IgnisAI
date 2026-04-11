@@ -17,10 +17,10 @@ async function getJSON(url, params = {}, timeout = 80000) {
   return r.data;
 }
 
-// GET /api/predict-fire-spread/raster?lat=&lon=&Tseq=&thr=
+// GET /api/predict-fire-spread/raster?lat=&lon=&Tseq=&thr=&date=
 router.get("/raster", async (req, res) => {
   try {
-    const { lat, lon, Tseq, thr, crop_frac } = req.query;
+    const { lat, lon, Tseq, thr, crop_frac, date } = req.query;
     if (lat == null || lon == null) {
       return res.status(400).json({ error: "lat and lon are required" });
     }
@@ -31,6 +31,7 @@ router.get("/raster", async (req, res) => {
       Tseq: Tseq || 1,
       ...(thr ? { thr } : {}),
       crop_frac: crop_frac != null ? crop_frac : 1.5,
+      ...(date ? { date, ignition: true } : {}),
     };
 
     // tilesvc returns base64 PNG + bounds; crop centers the output on the fire point
@@ -57,27 +58,28 @@ router.get("/raster", async (req, res) => {
   }
 });
 
-// GET /api/predict-fire-spread/vector?lat=&lon=&Tseq=&thr=
+// GET /api/predict-fire-spread/vector?lat=&lon=&Tseq=&thr=&date=
 router.get("/vector", async (req, res) => {
   try {
-    const { lat, lon, Tseq, thr, crop_frac } = req.query;
+    const { lat, lon, Tseq, thr, crop_frac, date } = req.query;
     if (lat == null || lon == null) {
       return res.status(400).json({ error: "lat and lon are required" });
     }
 
     const crop = crop_frac != null ? crop_frac : 0.5;
+    const dateParams = date ? { date, ignition: true } : {};
 
     // 1) GeoJSON polygons from tilesvc (honor thr!)
     const geojson = await getJSON(
       `${TILE_SVC}/predict_geojson`,
-      { lat, lon, Tseq: Tseq || 1, ...(thr ? { thr } : {}), crop_frac: crop },
+      { lat, lon, Tseq: Tseq || 1, ...(thr ? { thr } : {}), crop_frac: crop, ...dateParams },
       20000
     );
 
     // 2) Meta (area_fraction + threshold + bounds) from tilesvc
     const meta = await getJSON(
       `${TILE_SVC}/predict`,
-      { lat, lon, Tseq: Tseq || 1, png: false, ...(thr ? { thr } : {}), crop_frac: crop },
+      { lat, lon, Tseq: Tseq || 1, png: false, ...(thr ? { thr } : {}), crop_frac: crop, ...dateParams },
       80000
     );
 

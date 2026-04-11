@@ -2,6 +2,7 @@ import os
 import io
 import re
 import base64
+import datetime as dt
 from typing import Optional, Tuple, Dict, Any
 
 import numpy as np
@@ -44,7 +45,7 @@ def _get_torch_device() -> torch.device:
 
 DEVICE = _get_torch_device()
 MODEL_PATH = os.getenv("MODEL_PATH", "/models/model.pt")
-MODEL_THRESHOLD = float(os.getenv("MODEL_THRESHOLD", "0.1"))
+MODEL_THRESHOLD = float(os.getenv("MODEL_THRESHOLD", "0.01"))
 
 MODEL_CD = int(os.getenv("MODEL_CD", "7"))
 MODEL_CS = int(os.getenv("MODEL_CS", "15"))
@@ -147,7 +148,24 @@ def _load_model_once():
     return _model
 
 
-def _predict_probability(lat: float, lon: float, Tseq: int, ignition: bool = False) -> Tuple[np.ndarray, Tuple[float, float, float, float]]:
+def _parse_date_param(date_str: Optional[str]) -> Optional[dt.datetime]:
+    if not date_str:
+        return None
+    try:
+        d = dt.datetime.fromisoformat(date_str.replace("Z", "+00:00"))
+        if d.tzinfo is None:
+            d = d.replace(tzinfo=dt.timezone.utc)
+        return d
+    except Exception:
+        # Try simple date format YYYY-MM-DD, default to noon UTC
+        try:
+            d = dt.datetime.strptime(date_str, "%Y-%m-%d")
+            return d.replace(hour=12, tzinfo=dt.timezone.utc)
+        except Exception:
+            return None
+
+
+def _predict_probability(lat: float, lon: float, Tseq: int, ignition: bool = False, ref_time: Optional[dt.datetime] = None) -> Tuple[np.ndarray, Tuple[float, float, float, float]]:
     """
     Returns:
       prob (H,W) in [0,1]
@@ -158,7 +176,7 @@ def _predict_probability(lat: float, lon: float, Tseq: int, ignition: bool = Fal
     # build_grid returns (tile, affine, bounds)
     tile, _, bounds = build_grid(lat, lon)
 
-    dyn = build_dynamic_for_tile(lat, lon, T_seq=Tseq, ignition=ignition)
+    dyn = build_dynamic_for_tile(lat, lon, T_seq=Tseq, ignition=ignition, ref_time=ref_time)
 
     # Load per-tile static rasters and stack into channel-first array.
     stat_dict = load_static_for_tile(tile)
@@ -340,8 +358,10 @@ def predict_png(
     thr: float = Query(None),
     crop_frac: float = Query(1.0),
     ignition: bool = Query(False),
+    date: str = Query(None),
 ):
-    prob, bounds = _predict_probability(lat, lon, Tseq=Tseq, ignition=ignition)
+    ref_time = _parse_date_param(date)
+    prob, bounds = _predict_probability(lat, lon, Tseq=Tseq, ignition=ignition, ref_time=ref_time)
     prob, bounds = _crop_prob_around_point(prob, bounds, lat, lon, crop_frac)
     # Optional threshold override for meta only
     threshold = float(thr) if thr is not None else MODEL_THRESHOLD
@@ -363,8 +383,9 @@ def predict_png(
 
 
 @app.get("/predict_raster")
-def predict_raster_png(lat: float = Query(...), lon: float = Query(...), Tseq: int = Query(1)):
-    prob, bounds = _predict_probability(lat, lon, Tseq=Tseq)
+def predict_raster_png(lat: float = Query(...), lon: float = Query(...), Tseq: int = Query(1), date: str = Query(None)):
+    ref_time = _parse_date_param(date)
+    prob, bounds = _predict_probability(lat, lon, Tseq=Tseq, ref_time=ref_time)
     png = _prob_to_png(prob)
     headers = {"X-Bounds": ",".join(map(str, bounds))}
     return Response(content=png, media_type="image/png", headers=headers)
@@ -378,8 +399,10 @@ def predict_raster_json(
     thr: float = Query(None),
     crop_frac: float = Query(0.5),
     ignition: bool = Query(False),
+    date: str = Query(None),
 ):
-    prob, bounds = _predict_probability(lat, lon, Tseq=Tseq, ignition=ignition)
+    ref_time = _parse_date_param(date)
+    prob, bounds = _predict_probability(lat, lon, Tseq=Tseq, ignition=ignition, ref_time=ref_time)
     prob, bounds = _crop_prob_around_point(prob, bounds, lat, lon, crop_frac)
     threshold = float(thr) if thr is not None else MODEL_THRESHOLD
     png = _prob_to_png(prob, threshold=threshold)
@@ -402,16 +425,19 @@ def predict_geojson(
     thr: float = Query(None),
     crop_frac: float = Query(0.5),
     ignition: bool = Query(False),
+    date: str = Query(None),
 ):
-    prob, bounds = _predict_probability(lat, lon, Tseq=Tseq,  ignition=ignition)
+    ref_time = _parse_date_param(date)
+    prob, bounds = _predict_probability(lat, lon, Tseq=Tseq, ignition=ignition, ref_time=ref_time)
     prob, bounds = _crop_prob_around_point(prob, bounds, lat, lon, crop_frac)
     threshold = float(thr) if thr is not None else MODEL_THRESHOLD
     gj = _prob_to_geojson(prob, bounds, threshold=threshold)
     return JSONResponse(content=gj)
 
 @app.get("/predict_raster_json_raw")
-def predict_raster_json_raw(lat: float = Query(...), lon: float = Query(...), Tseq: int = Query(1), ignition: bool = Query(True)):
-    prob, bounds = _predict_probability(lat, lon, Tseq=Tseq, ignition=ignition)
+def predict_raster_json_raw(lat: float = Query(...), lon: float = Query(...), Tseq: int = Query(1), ignition: bool = Query(True), date: str = Query(None)):
+    ref_time = _parse_date_param(date)
+    prob, bounds = _predict_probability(lat, lon, Tseq=Tseq, ignition=ignition, ref_time=ref_time)
 
     # IMPORTANT: no threshold here
     png = _prob_to_png(prob, threshold=None)

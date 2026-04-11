@@ -18,7 +18,7 @@ const DEFAULT_THR =
   (typeof window !== "undefined" &&
     window._env_?.REACT_APP_MODEL_THR &&
     Number(window._env_?.REACT_APP_MODEL_THR)) ||
-  (process.env.REACT_APP_MODEL_THR ? Number(process.env.REACT_APP_MODEL_THR) : 0.10);
+  (process.env.REACT_APP_MODEL_THR ? Number(process.env.REACT_APP_MODEL_THR) : 0.01);
 
 // -----------------------------
 // Existing calls
@@ -33,7 +33,7 @@ export const getWildfireData = (opts = {}) => api.get("/wildfires", { params: op
  * Vector prediction (GeoJSON + spread_probability + environmental_data)
  * Backend expects: /predict-fire-spread/vector?lat=&lon=&thr=
  */
-export const predictFireSpreadVector = async ({ lat, lng, lon, thr, Tseq } = {}) => {
+export const predictFireSpreadVector = async ({ lat, lng, lon, thr, Tseq, date } = {}) => {
   const latitude = lat != null ? Number(lat) : null;
 
   // accept either lng or lon
@@ -52,6 +52,7 @@ export const predictFireSpreadVector = async ({ lat, lng, lon, thr, Tseq } = {})
       lon: longitude,
       thr: threshold,
       ...(Tseq ? { Tseq } : {}),
+      ...(date ? { date } : {}),
     },
   });
 
@@ -62,7 +63,7 @@ export const predictFireSpreadVector = async ({ lat, lng, lon, thr, Tseq } = {})
  * Raster overlay (bounds + image_base64)
  * Backend expects: /predict-fire-spread/raster?lat=&lon=
  */
-export const predictFireSpreadRaster = async ({ lat, lng, lon, thr, Tseq } = {}) => {
+export const predictFireSpreadRaster = async ({ lat, lng, lon, thr, Tseq, date } = {}) => {
   const latitude = lat != null ? Number(lat) : null;
   const longitude =
     lon != null ? Number(lon) : (lng != null ? Number(lng) : null);
@@ -79,6 +80,7 @@ export const predictFireSpreadRaster = async ({ lat, lng, lon, thr, Tseq } = {})
       lon: longitude,
       ...(Tseq ? { Tseq } : {}),
       ...(threshold != null ? { thr: threshold } : {}),
+      ...(date ? { date } : {}),
     },
   });
 
@@ -86,7 +88,7 @@ export const predictFireSpreadRaster = async ({ lat, lng, lon, thr, Tseq } = {})
 };
 
 // Keep your old name if the UI calls it:
-export const predictFireSpread = async ({ lat, lng, thr } = {}) =>
-  predictFireSpreadVector({ lat, lng, thr });
+export const predictFireSpread = async ({ lat, lng, thr, date } = {}) =>
+  predictFireSpreadVector({ lat, lng, thr, date });
 
 export default api;
