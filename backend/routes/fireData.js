@@ -152,6 +152,41 @@ function dedupeFires(fires = []) {
   return Array.from(unique.values());
 }
 
+function decorateFire(fire = {}) {
+  const brightness = Number(fire.brightness ?? 0);
+  const confidence = asConfidencePct(fire.confidence);
+  return {
+    ...fire,
+    brightness,
+    confidence,
+    brightnessCat:
+      brightness >= 375 ? 'Extreme' :
+      brightness >= 350 ? 'Severe'  :
+      brightness >= 325 ? 'Moderate' : 'Small',
+    predictable: fire.predictable === true || (brightness >= 325 && confidence >= 50),
+  };
+}
+
+async function loadCachedFires({ predictableOnly = false } = {}) {
+  if (typeof Wildfire.find !== 'function') {
+    return [];
+  }
+
+  try {
+    let query = Wildfire.find({});
+    if (query && typeof query.sort === 'function') query = query.sort({ timestamp: -1 });
+    if (query && typeof query.limit === 'function') query = query.limit(5000);
+    if (query && typeof query.lean === 'function') query = query.lean();
+
+    const docs = await query;
+    const normalized = Array.isArray(docs) ? docs.map(decorateFire) : [];
+    return predictableOnly ? normalized.filter(f => f.predictable) : normalized;
+  } catch (err) {
+    console.warn('⚠️  Failed to load cached wildfire data:', err.message);
+    return [];
+  }
+}
+
 // --- Route ----------------------------------------------------------------
 
 router.get('/wildfires', wildfireLimiter, async (req, res) => {
@@ -166,8 +201,15 @@ router.get('/wildfires', wildfireLimiter, async (req, res) => {
       .map(r => r.value);
 
     if (!successfulBodies.length) {
-      const firstError = results.find(r => r.status === 'rejected')?.reason;
-      return res.status(500).json({ error: firstError?.message || 'NASA API unavailable' });
+      const cached = await loadCachedFires({ predictableOnly });
+      return res.status(200).json({
+        message: cached.length
+          ? 'FIRMS fetch failed; returning cached wildfire data'
+          : 'FIRMS fetch failed; no cached wildfire data',
+        count: cached.length,
+        data: cached,
+        stale: true,
+      });
     }
 
     const mergedRows = successfulBodies.flatMap(stripCsvRows);
