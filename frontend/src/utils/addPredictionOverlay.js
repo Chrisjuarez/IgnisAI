@@ -80,18 +80,20 @@ function clamp01(x) {
 
 /**
  * Colorize a grayscale PNG (base64) into a heatmap PNG data URL.
- * - floor: values below floor become transparent
- * - gamma: contrast curve
+ *
+ * The backend now normalizes the probability map per-tile (min-max stretch)
+ * so grayscale values span 0-255 even when absolute probabilities are low.
+ * Pixels at exactly 0 are below-threshold and should be transparent.
+ *
+ * - gamma: contrast curve (< 1 brightens, > 1 darkens)
  * - opacity: global opacity multiplier
  * - smooth: softens the "grid" feeling
  */
 async function colorizeGrayscalePngToHeatmapDataUrl(base64Png, opts = {}) {
   const {
-    gamma = 0.7,
-    floor = 0.01,
-    opacity = 0.75,
+    gamma = 0.65,
+    opacity = 0.80,
     smooth = true,
-    alphaThreshold = 0.01,
   } = opts;
 
   const img = new Image();
@@ -128,47 +130,53 @@ async function colorizeGrayscalePngToHeatmapDataUrl(base64Png, opts = {}) {
   const data = imageData.data;
 
   // Grayscale PNG comes in as R=G=B, A=255
+  // Backend normalizes per-tile: 0 = transparent (below threshold), 1-255 = probability range
   for (let i = 0; i < data.length; i += 4) {
-    const g = data[i] / 255; // 0..1
-    // Hard cut: hide anything below threshold (prevents "red tile at 0%")
-    if (alphaThreshold != null && g < alphaThreshold) {
+    const raw = data[i]; // 0..255
+
+    // Pixel value 0 means below threshold — fully transparent
+    if (raw === 0) {
       data[i + 3] = 0;
       continue;
     }
 
-    let v = (g - floor) / (1 - floor);
-    v = clamp01(v);
+    // Normalized intensity (backend already stretched min-max to 0-255)
+    let v = raw / 255;
     v = Math.pow(v, gamma);
 
-    // Alpha by intensity
-    const a = clamp01(v * opacity);
+    // Alpha ramps up with intensity
+    const a = clamp01(0.3 + v * 0.7) * opacity;
 
-    // Heatmap ramp (simple, effective)
-    let r, gg, b;
-    if (v <= 0) {
-      r = 0; gg = 0; b = 0;
-    } else if (v < 0.33) {
-      // dark -> yellow
-      const t = v / 0.33;
+    // Inferno-inspired color ramp (matches notebook's matplotlib look)
+    let r, g, b;
+    if (v < 0.2) {
+      // dark purple to deep red
+      const t = v / 0.2;
+      r = Math.round(40 + 160 * t);
+      g = Math.round(10 + 10 * t);
+      b = Math.round(80 - 60 * t);
+    } else if (v < 0.45) {
+      // deep red to orange
+      const t = (v - 0.2) / 0.25;
+      r = Math.round(200 + 55 * t);
+      g = Math.round(20 + 100 * t);
+      b = Math.round(20 - 20 * t);
+    } else if (v < 0.7) {
+      // orange to yellow
+      const t = (v - 0.45) / 0.25;
       r = 255;
-      gg = Math.round(255 * t);
-      b = 0;
-    } else if (v < 0.66) {
-      // yellow -> orange
-      const t = (v - 0.33) / 0.33;
-      r = 255;
-      gg = Math.round(255 - 90 * t);
-      b = 0;
+      g = Math.round(120 + 120 * t);
+      b = Math.round(0 + 20 * t);
     } else {
-      // orange -> red
-      const t = (v - 0.66) / 0.34;
+      // yellow to bright white-yellow (hottest)
+      const t = (v - 0.7) / 0.3;
       r = 255;
-      gg = Math.round(165 - 165 * t);
-      b = 0;
+      g = Math.round(240 + 15 * t);
+      b = Math.round(20 + 180 * t);
     }
 
     data[i] = r;
-    data[i + 1] = gg;
+    data[i + 1] = g;
     data[i + 2] = b;
     data[i + 3] = Math.round(a * 255);
   }

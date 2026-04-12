@@ -220,10 +220,18 @@ def _prob_to_png(prob: np.ndarray, threshold: float = None) -> bytes:
     p = np.clip(prob, 0.0, 1.0)
 
     if threshold is not None:
-        # Hard mask: anything below threshold becomes 0 (transparent-ish in your frontend)
         p = np.where(p >= float(threshold), p, 0.0)
 
-    img = (p * 255.0).astype(np.uint8)
+    # Normalize within the tile's own range so spatial patterns are visible
+    # even when absolute probabilities are low (e.g. 3-5%).
+    # Without this, a 5% max maps to pixel value 13/255 — invisible.
+    pmin = float(p[p > 0].min()) if (p > 0).any() else 0.0
+    pmax = float(p.max())
+    if pmax > pmin:
+        normalized = np.where(p > 0, (p - pmin) / (pmax - pmin), 0.0)
+        img = (normalized * 255.0).astype(np.uint8)
+    else:
+        img = (p * 255.0).astype(np.uint8)
 
     # Upscale to soften grid artifacts; keep factor moderate to avoid memory spikes
     try:
