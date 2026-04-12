@@ -1,6 +1,7 @@
 import os
 import io
 import re
+import math
 import base64
 import datetime as dt
 from typing import Optional, Tuple, Dict, Any
@@ -20,8 +21,8 @@ from .grid import (
     lonlat_to_xy_m,
     PIX,
 )
-from .dynamic_builder import build_dynamic_for_tile
-from .static_builder import build_static_for_tile, load_static_for_tile, CHANNEL_ORDER
+from .dynamic_builder import build_dynamic_for_tile, fetch_weather_grids
+from .static_builder import load_static_for_tile, CHANNEL_ORDER
 
 import rasterio
 from rasterio.features import shapes as rio_shapes
@@ -165,85 +166,137 @@ def _parse_date_param(date_str: Optional[str]) -> Optional[dt.datetime]:
             return None
 
 
-def _predict_probability(lat: float, lon: float, Tseq: int, ignition: bool = False, ref_time: Optional[dt.datetime] = None) -> Tuple[np.ndarray, Tuple[float, float, float, float]]:
-    """
-    Returns:
-      prob (H,W) in [0,1]
-      bounds (W,S,E,N) in lon/lat
-    """
-    model = _load_model_once()
+def _resolve_prediction_time(ref_time: Optional[dt.datetime]) -> dt.datetime:
+    if ref_time is not None:
+        return ref_time
+    return dt.datetime.now(dt.timezone.utc).replace(minute=0, second=0, microsecond=0)
 
-    # build_grid returns (tile, affine, bounds)
-    tile, _, bounds = build_grid(lat, lon)
 
-    dyn = build_dynamic_for_tile(lat, lon, T_seq=Tseq, ignition=ignition, ref_time=ref_time)
-
-    # Load per-tile static rasters and stack into channel-first array.
+def _load_static_tensor(tile: Any) -> np.ndarray:
     stat_dict = load_static_for_tile(tile)
     try:
-        stat = np.stack([np.asarray(stat_dict[k], np.float32) for k in CHANNEL_ORDER], axis=0)
+        return np.stack([np.asarray(stat_dict[k], np.float32) for k in CHANNEL_ORDER], axis=0)
     except KeyError as e:
         missing = str(e)
         raise RuntimeError(f"Static channel missing: {missing}; have keys={list(stat_dict.keys())}")
 
-    if model is None:
-        H, W = dyn.shape[-2], dyn.shape[-1]
-        return np.zeros((H, W), dtype=np.float32), bounds
+
+def _postprocess_probability(prob: np.ndarray) -> np.ndarray:
+    if PRED_SMOOTH_SIGMA > 0:
+        try:
+            prob = gaussian_filter(prob, sigma=PRED_SMOOTH_SIGMA)
+        except Exception:
+            pass
+    return np.clip(prob, 0.0, 1.0)
+
+
+def _predict_probability_from_inputs(dyn: np.ndarray, stat: np.ndarray, *, log_label: str = "Prediction") -> np.ndarray:
+    model = _load_model_once()
 
     if dyn.shape[1] != MODEL_CD:
         raise RuntimeError(f"Dynamic channels mismatch: got {dyn.shape[1]} expected {MODEL_CD}")
     if stat.shape[0] != MODEL_CS:
         raise RuntimeError(f"Static channels mismatch: got {stat.shape[0]} expected {MODEL_CS}")
 
-    x_dyn = torch.from_numpy(dyn).unsqueeze(0).to(DEVICE)    # (1, T, Cd, H, W)
-    x_stat = torch.from_numpy(stat).unsqueeze(0).to(DEVICE)  # (1, Cs, H, W)
+    if model is None:
+        H, W = dyn.shape[-2], dyn.shape[-1]
+        prob = np.zeros((H, W), dtype=np.float32)
+    else:
+        x_dyn = torch.from_numpy(dyn).unsqueeze(0).to(DEVICE)    # (1, T, Cd, H, W)
+        x_stat = torch.from_numpy(stat).unsqueeze(0).to(DEVICE)  # (1, Cs, H, W)
+        with torch.no_grad():
+            logits = model(x_dyn, x_stat)  # (1,1,H,W)
+            prob = torch.sigmoid(logits)[0, 0].detach().cpu().numpy().astype(np.float32)
 
-    with torch.no_grad():
-        logits = model(x_dyn, x_stat)  # (1,1,H,W)
-        prob = torch.sigmoid(logits)[0, 0].detach().cpu().numpy().astype(np.float32)
-
-    # Smooth to reduce checkerboard artifacts in overlays
-    if PRED_SMOOTH_SIGMA > 0:
-        try:
-            prob = gaussian_filter(prob, sigma=PRED_SMOOTH_SIGMA)
-        except Exception:
-            pass
-    prob = np.clip(prob, 0.0, 1.0)
-
-    print(f"🔮 Prediction: min={prob.min():.6f}, max={prob.max():.6f}, "
-          f"mean={prob.mean():.6f}, shape={prob.shape}, Tseq={Tseq}")
-
-    return prob, bounds
+    prob = _postprocess_probability(prob)
+    print(
+        f"🔮 {log_label}: min={prob.min():.6f}, max={prob.max():.6f}, "
+        f"mean={prob.mean():.6f}, shape={prob.shape}, Tseq={dyn.shape[0]}"
+    )
+    return prob
 
 
-def _prob_to_png(prob: np.ndarray, threshold: float = None) -> bytes:
+def _prepare_prediction_inputs(
+    lat: float,
+    lon: float,
+    Tseq: int,
+    *,
+    ignition: bool = False,
+    ref_time: Optional[dt.datetime] = None,
+    hours_step: int = 24,
+) -> Tuple[np.ndarray, np.ndarray, Tuple[float, float, float, float], dt.datetime]:
+    tile, _, bounds = build_grid(lat, lon)
+    dyn = build_dynamic_for_tile(
+        lat,
+        lon,
+        T_seq=Tseq,
+        hours_step=hours_step,
+        ignition=ignition,
+        ref_time=ref_time,
+    )
+    stat = _load_static_tensor(tile)
+    return dyn, stat, bounds, _resolve_prediction_time(ref_time)
+
+
+def _predict_probability(
+    lat: float,
+    lon: float,
+    Tseq: int,
+    ignition: bool = False,
+    ref_time: Optional[dt.datetime] = None,
+    *,
+    hours_step: int = 24,
+) -> Tuple[np.ndarray, Tuple[float, float, float, float]]:
+    """
+    Returns:
+      prob (H,W) in [0,1]
+      bounds (W,S,E,N) in lon/lat
+    """
+    dyn, stat, bounds, _ = _prepare_prediction_inputs(
+        lat,
+        lon,
+        Tseq,
+        ignition=ignition,
+        ref_time=ref_time,
+        hours_step=hours_step,
+    )
+    return _predict_probability_from_inputs(dyn, stat), bounds
+
+
+def _prob_to_grayscale(prob: np.ndarray, threshold: float = None) -> np.ndarray:
     p = np.clip(prob, 0.0, 1.0)
 
     if threshold is not None:
         p = np.where(p >= float(threshold), p, 0.0)
 
-    # Normalize within the tile's own range so spatial patterns are visible
-    # even when absolute probabilities are low (e.g. 3-5%).
-    # Without this, a 5% max maps to pixel value 13/255 — invisible.
     pmin = float(p[p > 0].min()) if (p > 0).any() else 0.0
     pmax = float(p.max())
     if pmax > pmin:
         normalized = np.where(p > 0, (p - pmin) / (pmax - pmin), 0.0)
-        img = (normalized * 255.0).astype(np.uint8)
-    else:
-        img = (p * 255.0).astype(np.uint8)
+        return (normalized * 255.0).astype(np.uint8)
+    return (p * 255.0).astype(np.uint8)
 
-    # Upscale to soften grid artifacts; keep factor moderate to avoid memory spikes
+
+def _encode_png_from_channels(gray: np.ndarray, alpha: Optional[np.ndarray] = None) -> bytes:
     try:
         from PIL import Image
-        im = Image.fromarray(img, mode="L")
+
         scale = max(1, int(PRED_UPSCALE))
-        im = im.resize((img.shape[1] * scale, img.shape[0] * scale), resample=Image.BILINEAR)
+        if alpha is None:
+            im = Image.fromarray(gray, mode="L")
+        else:
+            rgba = np.stack([gray, gray, gray, alpha], axis=-1)
+            im = Image.fromarray(rgba, mode="RGBA")
+        im = im.resize((gray.shape[1] * scale, gray.shape[0] * scale), resample=Image.BILINEAR)
         buf = io.BytesIO()
         im.save(buf, format="PNG")
         return buf.getvalue()
     except Exception:
-        return raster_to_png_bytes(img)
+        return raster_to_png_bytes(gray)
+
+
+def _prob_to_png(prob: np.ndarray, threshold: float = None) -> bytes:
+    return _encode_png_from_channels(_prob_to_grayscale(prob, threshold=threshold))
 
 
 def _prob_to_geojson(prob: np.ndarray, bounds: Tuple[float, float, float, float], threshold: float) -> dict:
@@ -267,37 +320,51 @@ def _prob_to_geojson(prob: np.ndarray, bounds: Tuple[float, float, float, float]
     return {"type": "FeatureCollection", "features": feats}
 
 
-def _crop_prob_around_point(
-    prob: np.ndarray,
+def _point_pixel_for_raster(
+    shape: Tuple[int, int],
+    bounds: Tuple[float, float, float, float],
+    lat: float,
+    lon: float,
+) -> Tuple[int, int]:
+    H, W = shape
+    try:
+        tile = lonlat_to_tile(lon, lat)
+        minx, miny, maxx, maxy = tile_bounds_albers(tile)
+        x_m, y_m = lonlat_to_xy_m(lon, lat)
+        x = int(round((x_m - minx) / float(PIX)))
+        y = int(round((maxy - y_m) / float(PIX)))
+    except Exception:
+        w, s, e, n = bounds
+        dx = (e - w) / float(W)
+        dy = (n - s) / float(H)
+        x = int(round((lon - w) / dx))
+        y = int(round((n - lat) / dy))
+    return max(0, min(W - 1, x)), max(0, min(H - 1, y))
+
+
+def _build_crop_window(
+    shape: Tuple[int, int],
     bounds: Tuple[float, float, float, float],
     lat: float,
     lon: float,
     crop_frac: float,
-) -> Tuple[np.ndarray, Tuple[float, float, float, float]]:
+) -> Dict[str, Any]:
     """
-    Crop the prob raster to a smaller box centered on (lat, lon).
-    crop_frac is the fraction of tile width/height to keep (0..1].
+    Build a reusable crop window centered on the clicked point.
+    Returns crop indices, cropped bounds, and the fire point in crop-local pixels.
     """
+    H, W = shape
+    x, y = _point_pixel_for_raster(shape, bounds, lat, lon)
+
     if crop_frac is None or crop_frac >= 1.0 or crop_frac <= 0:
-        return prob, bounds
-
-    H, W = prob.shape
-    try:
-        # Use the same projection as the tile grid to locate the pixel precisely.
-        tile = lonlat_to_tile(lon, lat)
-        minx, miny, maxx, maxy = tile_bounds_albers(tile)
-        x_m, y_m = lonlat_to_xy_m(lon, lat)
-
-        # Pixel coords of the point (origin at top-left).
-        x = int((x_m - minx) / float(PIX))
-        y = int((maxy - y_m) / float(PIX))
-    except Exception:
-        # Fallback to linear lon/lat interpolation if projection fails.
-        w, s, e, n = bounds
-        dx = (e - w) / float(W)
-        dy = (n - s) / float(H)
-        x = int((lon - w) / dx)
-        y = int((n - lat) / dy)
+        return {
+            "x0": 0,
+            "y0": 0,
+            "x1": W,
+            "y1": H,
+            "bounds": bounds,
+            "anchor_px": (x, y),
+        }
 
     crop_w = max(1, int(W * crop_frac))
     crop_h = max(1, int(H * crop_frac))
@@ -313,9 +380,7 @@ def _crop_prob_around_point(
     x1 = min(W, x1)
     y1 = min(H, y1)
 
-    cropped = prob[y0:y1, x0:x1]
-
-    # Recompute bounds for the crop in the tile's projection, then convert to lon/lat.
+    cropped_bounds = bounds
     try:
         minx, miny, maxx, maxy = tile_bounds_albers(lonlat_to_tile(lon, lat))
         w_m = minx + x0 * PIX
@@ -324,9 +389,110 @@ def _crop_prob_around_point(
         s_m = maxy - y1 * PIX
         w2, s2 = _TO_WGS84.transform(w_m, s_m)
         e2, n2 = _TO_WGS84.transform(e_m, n_m)
-        return cropped, (float(w2), float(s2), float(e2), float(n2))
+        cropped_bounds = (float(w2), float(s2), float(e2), float(n2))
     except Exception:
-        return cropped, bounds
+        pass
+
+    return {
+        "x0": x0,
+        "y0": y0,
+        "x1": x1,
+        "y1": y1,
+        "bounds": cropped_bounds,
+        "anchor_px": (max(0, min(x1 - x0 - 1, x - x0)), max(0, min(y1 - y0 - 1, y - y0))),
+    }
+
+
+def _apply_crop_window(prob: np.ndarray, crop_window: Dict[str, Any]) -> Tuple[np.ndarray, Tuple[float, float, float, float], Tuple[int, int]]:
+    x0 = crop_window["x0"]
+    y0 = crop_window["y0"]
+    x1 = crop_window["x1"]
+    y1 = crop_window["y1"]
+    return prob[y0:y1, x0:x1], crop_window["bounds"], crop_window["anchor_px"]
+
+
+def _radial_alpha_mask(shape: Tuple[int, int], anchor_px: Tuple[int, int]) -> np.ndarray:
+    H, W = shape
+    cx, cy = anchor_px
+    yy, xx = np.indices((H, W), dtype=np.float32)
+    dist = np.sqrt((xx - float(cx)) ** 2 + (yy - float(cy)) ** 2)
+    corner_dists = [
+        math.hypot(float(cx), float(cy)),
+        math.hypot(float(W - 1 - cx), float(cy)),
+        math.hypot(float(cx), float(H - 1 - cy)),
+        math.hypot(float(W - 1 - cx), float(H - 1 - cy)),
+    ]
+    max_dist = max(max(corner_dists), 1.0)
+    norm = np.clip(dist / max_dist, 0.0, 1.0)
+    fade = np.clip(1.0 - np.power(norm, 1.7), 0.0, 1.0)
+    return fade.astype(np.float32)
+
+
+def _prob_to_display_png(prob: np.ndarray, threshold: float, anchor_px: Tuple[int, int]) -> bytes:
+    gray = _prob_to_grayscale(prob, threshold=threshold)
+    active = (gray > 0).astype(np.float32)
+    fade = _radial_alpha_mask(gray.shape, anchor_px)
+    alpha = np.round(active * fade * 255.0).astype(np.uint8)
+    return _encode_png_from_channels(gray, alpha=alpha)
+
+
+def _step_label(lead_hours: int) -> str:
+    if lead_hours % 24 == 0:
+        days = lead_hours // 24
+        return f"{days} day" if days == 1 else f"{days} days"
+    return f"{lead_hours} hours"
+
+
+def _rollout_multistep_predictions(
+    lat: float,
+    lon: float,
+    *,
+    Tseq: int,
+    steps: int,
+    step_hours: int,
+    crop_frac: float,
+    ignition: bool,
+    ref_time: Optional[dt.datetime],
+) -> Tuple[Tuple[float, float, float, float], Dict[str, Any], list]:
+    dyn, stat, bounds, base_time = _prepare_prediction_inputs(
+        lat,
+        lon,
+        Tseq,
+        ignition=ignition,
+        ref_time=ref_time,
+        hours_step=step_hours,
+    )
+    normalized_steps = max(1, int(steps))
+    crop_window = _build_crop_window(dyn.shape[-2:], bounds, lat, lon, crop_frac)
+    rollout = []
+    current_dyn = dyn.copy()
+
+    for index in range(normalized_steps):
+        lead_hours = (index + 1) * int(step_hours)
+        prob = _predict_probability_from_inputs(current_dyn, stat, log_label=f"Forecast step {index + 1}")
+        rollout.append({
+            "index": index,
+            "lead_hours": lead_hours,
+            "label": _step_label(lead_hours),
+            "prob": prob,
+        })
+
+        if index == normalized_steps - 1:
+            continue
+
+        next_time = base_time + dt.timedelta(hours=lead_hours)
+        wx = fetch_weather_grids(lat, lon, ref_time=next_time)
+        next_slice = np.stack([
+            np.clip(prob, 0.0, 1.0),
+            wx["u"], wx["v"], wx["gust"],
+            wx["tempC"], wx["q"], wx["precip"],
+        ], axis=0).astype(np.float32)
+        if current_dyn.shape[0] == 1:
+            current_dyn = next_slice[None, ...]
+        else:
+            current_dyn = np.concatenate([current_dyn[1:], next_slice[None, ...]], axis=0)
+
+    return bounds, crop_window, rollout
 
 
 @app.get("/health")
@@ -370,7 +536,8 @@ def predict_png(
 ):
     ref_time = _parse_date_param(date)
     prob, bounds = _predict_probability(lat, lon, Tseq=Tseq, ignition=ignition, ref_time=ref_time)
-    prob, bounds = _crop_prob_around_point(prob, bounds, lat, lon, crop_frac)
+    crop_window = _build_crop_window(prob.shape, bounds, lat, lon, crop_frac)
+    prob, bounds, _ = _apply_crop_window(prob, crop_window)
     # Optional threshold override for meta only
     threshold = float(thr) if thr is not None else MODEL_THRESHOLD
 
@@ -411,9 +578,10 @@ def predict_raster_json(
 ):
     ref_time = _parse_date_param(date)
     prob, bounds = _predict_probability(lat, lon, Tseq=Tseq, ignition=ignition, ref_time=ref_time)
-    prob, bounds = _crop_prob_around_point(prob, bounds, lat, lon, crop_frac)
+    crop_window = _build_crop_window(prob.shape, bounds, lat, lon, crop_frac)
+    prob, bounds, anchor_px = _apply_crop_window(prob, crop_window)
     threshold = float(thr) if thr is not None else MODEL_THRESHOLD
-    png = _prob_to_png(prob, threshold=threshold)
+    png = _prob_to_display_png(prob, threshold=threshold, anchor_px=anchor_px)
 
     return {
         "bounds": list(map(float, bounds)),
@@ -437,7 +605,8 @@ def predict_geojson(
 ):
     ref_time = _parse_date_param(date)
     prob, bounds = _predict_probability(lat, lon, Tseq=Tseq, ignition=ignition, ref_time=ref_time)
-    prob, bounds = _crop_prob_around_point(prob, bounds, lat, lon, crop_frac)
+    crop_window = _build_crop_window(prob.shape, bounds, lat, lon, crop_frac)
+    prob, bounds, _ = _apply_crop_window(prob, crop_window)
     threshold = float(thr) if thr is not None else MODEL_THRESHOLD
     gj = _prob_to_geojson(prob, bounds, threshold=threshold)
     return JSONResponse(content=gj)
@@ -456,4 +625,53 @@ def predict_raster_json_raw(lat: float = Query(...), lon: float = Query(...), Ts
         "prob_min": float(prob.min()),
         "prob_mean": float(prob.mean()),
         "prob_max": float(prob.max()),
+    }
+
+
+@app.get("/predict_multistep")
+def predict_multistep(
+    lat: float = Query(...),
+    lon: float = Query(...),
+    Tseq: int = Query(1),
+    steps: int = Query(6),
+    step_hours: int = Query(6),
+    thr: float = Query(None),
+    crop_frac: float = Query(0.5),
+    ignition: bool = Query(False),
+    date: str = Query(None),
+):
+    ref_time = _parse_date_param(date)
+    threshold = float(thr) if thr is not None else MODEL_THRESHOLD
+    bounds, crop_window, rollout = _rollout_multistep_predictions(
+        lat,
+        lon,
+        Tseq=Tseq,
+        steps=steps,
+        step_hours=step_hours,
+        crop_frac=crop_frac,
+        ignition=ignition,
+        ref_time=ref_time,
+    )
+
+    payload_steps = []
+    cropped_bounds = crop_window["bounds"]
+    for step in rollout:
+        cropped, _, anchor_px = _apply_crop_window(step["prob"], crop_window)
+        png = _prob_to_display_png(cropped, threshold=threshold, anchor_px=anchor_px)
+        payload_steps.append({
+            "index": step["index"],
+            "lead_hours": step["lead_hours"],
+            "label": step["label"],
+            "image_base64": base64.b64encode(png).decode("ascii"),
+            "prob_min": float(cropped.min()),
+            "prob_mean": float(cropped.mean()),
+            "prob_max": float(cropped.max()),
+            "area_fraction": float((cropped >= threshold).mean()),
+        })
+
+    return {
+        "bounds": list(map(float, cropped_bounds)),
+        "threshold": threshold,
+        "step_hours": int(step_hours),
+        "steps": payload_steps,
     }
