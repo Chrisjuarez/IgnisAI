@@ -45,7 +45,7 @@ router.get("/raster", async (req, res) => {
       lon,
       Tseq: Tseq || 1,
       ...(thr ? { thr } : {}),
-      crop_frac: crop_frac != null ? crop_frac : 1.5,
+      crop_frac: crop_frac != null ? crop_frac : 0.5,
       ...(date ? { date, ignition: true } : {}),
     };
 
@@ -157,6 +157,42 @@ router.get("/vector", async (req, res) => {
   } catch (err) {
     console.error("vector error:", err?.response?.data || err.message);
     return res.status(502).json({ error: "tilesvc_vector_failed", detail: err.message });
+  }
+});
+
+// GET /api/predict-fire-spread/multistep?lat=&lon=&steps=&step_hours=&Tseq=&thr=&date=
+router.get("/multistep", async (req, res) => {
+  try {
+    const { lat, lon, steps, step_hours, Tseq, thr, crop_frac, date } = req.query;
+    if (lat == null || lon == null) {
+      return res.status(400).json({ error: "lat and lon are required" });
+    }
+
+    const params = {
+      lat,
+      lon,
+      steps: steps || 6,
+      step_hours: step_hours || 6,
+      Tseq: Tseq || 1,
+      ...(thr ? { thr } : {}),
+      crop_frac: crop_frac != null ? crop_frac : 0.5,
+      ...(date ? { date, ignition: true } : {}),
+    };
+
+    const forecast = await getJSON(`${TILE_SVC}/predict_multistep`, params, 80000);
+    if (!Array.isArray(forecast?.bounds) || forecast.bounds.length !== 4 || !Array.isArray(forecast?.steps)) {
+      throw new Error(`tilesvc multistep missing bounds/steps: ${JSON.stringify(forecast)?.slice(0, 200)}`);
+    }
+
+    return res.json({
+      bounds: forecast.bounds,
+      threshold: forecast?.threshold,
+      step_hours: forecast?.step_hours,
+      steps: forecast.steps,
+    });
+  } catch (err) {
+    console.error("multistep error:", err?.response?.data || err.message);
+    return res.status(502).json({ error: "tilesvc_multistep_failed", detail: err.message });
   }
 });
 

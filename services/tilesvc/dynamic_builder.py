@@ -139,7 +139,7 @@ def _rasterize_fire(points, t_start, t_end, affine):
 OPEN_METEO_ARCHIVE = "https://archive-api.open-meteo.com/v1/archive"
 
 
-def _fetch_weather(lat: float, lon: float, ref_time: dt.datetime = None):
+def fetch_weather_grids(lat: float, lon: float, ref_time: dt.datetime = None):
     """
     Fetch weather and expand to per-pixel constant grids.
     If ref_time is provided and in the past (>24h ago), use the Open-Meteo Archive API.
@@ -270,11 +270,12 @@ def build_dynamic_for_tile(lat: float, lon: float, T_seq: int = 1, hours_step: i
         # Inject into the most recent timestep (last index)
         fire_stack[-1] = np.maximum(fire_stack[-1], ign).astype(np.float32)
     # Weather (constant over the tile for now; uses archive for historical dates)
-    wx = _fetch_weather(lat, lon, ref_time=ref_time)
-
     # Assemble dynamic tensor
     dyn = []
     for t in range(T_seq):
+        # Use the end of each slice as the weather timestamp for that timestep.
+        step_ref_time = now - dt.timedelta(hours=(T_seq - 1 - t) * hours_step)
+        wx = fetch_weather_grids(lat, lon, ref_time=step_ref_time)
         dyn.append(np.stack([
             fire_stack[t],
             wx["u"], wx["v"], wx["gust"],

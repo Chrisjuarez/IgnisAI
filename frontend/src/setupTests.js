@@ -81,10 +81,19 @@ jest.mock('mapbox-gl', () => {
       this.setLayoutProperty = jest.fn();
       this.setPaintProperty = jest.fn();
       this.setCenter = jest.fn();
+      this.getCenter = jest.fn(() => ({ lat: 38, lng: -98 }));
       this.setZoom = jest.fn(z => { this._zoom = z; });
       this.getZoom = jest.fn(() => this._zoom);
+      this.fitBounds = jest.fn();
+      this.flyTo = jest.fn(({ center, zoom } = {}) => {
+        if (Array.isArray(center)) {
+          this.getCenter = jest.fn(() => ({ lng: center[0], lat: center[1] }));
+        }
+        if (zoom != null) this._zoom = zoom;
+      });
       this.zoomIn = jest.fn(() => { this._zoom += 1; });
       this.zoomOut = jest.fn(() => { this._zoom -= 1; });
+      this.loaded = jest.fn(() => true);
       this.remove = jest.fn();
     }
 

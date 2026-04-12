@@ -133,9 +133,10 @@ async function colorizeGrayscalePngToHeatmapDataUrl(base64Png, opts = {}) {
   // Backend normalizes per-tile: 0 = transparent (below threshold), 1-255 = probability range
   for (let i = 0; i < data.length; i += 4) {
     const raw = data[i]; // 0..255
+    const sourceAlpha = (data[i + 3] ?? 255) / 255;
 
     // Pixel value 0 means below threshold — fully transparent
-    if (raw === 0) {
+    if (raw === 0 || sourceAlpha === 0) {
       data[i + 3] = 0;
       continue;
     }
@@ -178,11 +179,119 @@ async function colorizeGrayscalePngToHeatmapDataUrl(base64Png, opts = {}) {
     data[i] = r;
     data[i + 1] = g;
     data[i + 2] = b;
-    data[i + 3] = Math.round(a * 255);
+    data[i + 3] = Math.round(a * sourceAlpha * 255);
   }
 
   ctx.putImageData(imageData, 0, 0);
   return canvas.toDataURL('image/png');
+}
+
+function rasterBoundsToCoordinates(bounds) {
+  const [west, south, east, north] = bounds;
+  return [
+    [west, north],
+    [east, north],
+    [east, south],
+    [west, south],
+  ];
+}
+
+export async function renderPredictionRasterFrame(map, frame, opts = {}) {
+  await waitForMapLoad(map);
+
+  const bounds = frame?.bounds;
+  const imageUrl = frame?.heatmapUrl;
+  if (!Array.isArray(bounds) || bounds.length !== 4) {
+    throw new Error(`Bad raster bounds: ${JSON.stringify(bounds)}`);
+  }
+  if (!imageUrl || typeof imageUrl !== 'string') {
+    throw new Error('Missing heatmapUrl for raster frame');
+  }
+
+  removeIfExists(map, IDS.rasterLayer, IDS.rasterSource);
+  map.addSource(IDS.rasterSource, {
+    type: 'image',
+    url: imageUrl,
+    coordinates: rasterBoundsToCoordinates(bounds),
+  });
+  map.addLayer({
+    id: IDS.rasterLayer,
+    type: 'raster',
+    source: IDS.rasterSource,
+    paint: {
+      'raster-opacity': 1.0,
+      'raster-resampling': 'linear',
+    },
+  });
+
+  if (opts.showBounds) {
+    const boundsGeo = boundsToPolygonGeoJSON(bounds);
+    if (!map.getSource(IDS.boundsSource)) {
+      map.addSource(IDS.boundsSource, { type: 'geojson', data: boundsGeo });
+    } else {
+      map.getSource(IDS.boundsSource).setData(boundsGeo);
+    }
+
+    if (!map.getLayer(IDS.boundsLayer)) {
+      map.addLayer({
+        id: IDS.boundsLayer,
+        type: 'line',
+        source: IDS.boundsSource,
+        paint: {
+          'line-width': 2,
+          'line-opacity': 0.6,
+        },
+      });
+    }
+  } else {
+    removeIfExists(map, IDS.boundsLayer, IDS.boundsSource);
+  }
+
+  return { kind: 'raster', bounds, meta: frame?.meta || null };
+}
+
+export async function prepareMultistepRasterFrames(payload, opts = {}) {
+  const bounds = payload?.bounds;
+  const steps = Array.isArray(payload?.steps) ? payload.steps : [];
+  if (!Array.isArray(bounds) || bounds.length !== 4) {
+    throw new Error(`Bad multistep bounds: ${JSON.stringify(bounds)}`);
+  }
+  if (!steps.length) {
+    throw new Error('Multistep payload did not include any steps');
+  }
+
+  const frames = await Promise.all(
+    steps.map(async step => {
+      if (!step?.image_base64 || typeof step.image_base64 !== 'string') {
+        throw new Error('Multistep step missing image_base64');
+      }
+      const heatmapUrl = await colorizeGrayscalePngToHeatmapDataUrl(step.image_base64, {
+        gamma: opts.gamma ?? 0.85,
+        opacity: opts.opacity ?? 0.85,
+        smooth: opts.smooth ?? true,
+      });
+      return {
+        ...step,
+        bounds,
+        heatmapUrl,
+        meta: {
+          threshold: payload?.threshold,
+          step_hours: payload?.step_hours,
+          prob_min: step?.prob_min,
+          prob_mean: step?.prob_mean,
+          prob_max: step?.prob_max,
+          area_fraction: step?.area_fraction,
+        },
+      };
+    })
+  );
+
+  return {
+    bounds,
+    threshold: payload?.threshold,
+    stepHours: payload?.step_hours,
+    frames,
+  };
 }
 
 /**
@@ -272,56 +381,7 @@ export async function addRasterOverlay(map, apiBase, lat, lon, opts = {}) {
     alphaThreshold: (opts.thr != null ? Number(opts.thr) : null),
   });
 
-  const [west, south, east, north] = bounds;
-  const coords = [
-    [west, north],
-    [east, north],
-    [east, south],
-    [west, south],
-  ];
-
-  // Remove any existing raster overlay (stable IDs)
-  removeIfExists(map, IDS.rasterLayer, IDS.rasterSource);
-
-  map.addSource(IDS.rasterSource, {
-    type: 'image',
-    url: heatmapUrl,
-    coordinates: coords,
-  });
-
-  map.addLayer({
-    id: IDS.rasterLayer,
-    type: 'raster',
-    source: IDS.rasterSource,
-    paint: {
-      'raster-opacity': 1.0,
-      'raster-resampling': 'linear',
-    },
-  });
-
-  // Add/update bounds outline for alignment/debug (optional)
-  if (opts.showBounds) {
-    const boundsGeo = boundsToPolygonGeoJSON(bounds);
-    if (!map.getSource(IDS.boundsSource)) {
-      map.addSource(IDS.boundsSource, { type: 'geojson', data: boundsGeo });
-    } else {
-      map.getSource(IDS.boundsSource).setData(boundsGeo);
-    }
-
-    if (!map.getLayer(IDS.boundsLayer)) {
-      map.addLayer({
-        id: IDS.boundsLayer,
-        type: 'line',
-        source: IDS.boundsSource,
-        paint: {
-          'line-width': 2,
-          'line-opacity': 0.6,
-        },
-      });
-    }
-  } else {
-    removeIfExists(map, IDS.boundsLayer, IDS.boundsSource);
-  }
+  await renderPredictionRasterFrame(map, { bounds, heatmapUrl, meta: payload }, opts);
 
   return { kind: 'raster', bounds, meta: payload };
 }

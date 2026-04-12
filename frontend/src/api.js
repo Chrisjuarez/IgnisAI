@@ -87,6 +87,45 @@ export const predictFireSpreadRaster = async ({ lat, lng, lon, thr, Tseq, date }
   return data; // { bounds, image_base64, ... }
 };
 
+/**
+ * Multistep raster forecast timeline.
+ * Backend expects: /predict-fire-spread/multistep?lat=&lon=&steps=&step_hours=
+ */
+export const predictFireSpreadMultistep = async ({
+  lat,
+  lng,
+  lon,
+  thr,
+  Tseq,
+  date,
+  steps,
+  stepHours,
+} = {}) => {
+  const latitude = lat != null ? Number(lat) : null;
+  const longitude =
+    lon != null ? Number(lon) : (lng != null ? Number(lng) : null);
+
+  if (latitude == null || Number.isNaN(latitude) || longitude == null || Number.isNaN(longitude)) {
+    throw new Error(`predictFireSpreadMultistep missing lat/lon (lat=${lat}, lng=${lng}, lon=${lon})`);
+  }
+
+  const threshold = thr == null ? DEFAULT_THR : Number(thr);
+
+  const { data } = await api.get("/predict-fire-spread/multistep", {
+    params: {
+      lat: latitude,
+      lon: longitude,
+      ...(steps ? { steps } : {}),
+      ...(stepHours ? { step_hours: stepHours } : {}),
+      ...(Tseq ? { Tseq } : {}),
+      ...(threshold != null ? { thr: threshold } : {}),
+      ...(date ? { date } : {}),
+    },
+  });
+
+  return data;
+};
+
 // Keep your old name if the UI calls it:
 export const predictFireSpread = async ({ lat, lng, thr, date } = {}) =>
   predictFireSpreadVector({ lat, lng, thr, date });
