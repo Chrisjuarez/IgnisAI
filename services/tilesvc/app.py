@@ -190,6 +190,21 @@ def _postprocess_probability(prob: np.ndarray) -> np.ndarray:
     return np.clip(prob, 0.0, 1.0)
 
 
+def _resize_prob_to_shape(prob: np.ndarray, shape: Tuple[int, int]) -> np.ndarray:
+    target_h, target_w = map(int, shape)
+    if prob.shape == (target_h, target_w):
+        return np.asarray(prob, dtype=np.float32)
+
+    tensor = torch.from_numpy(np.asarray(prob, dtype=np.float32)).unsqueeze(0).unsqueeze(0)
+    resized = torch.nn.functional.interpolate(
+        tensor,
+        size=(target_h, target_w),
+        mode="bilinear",
+        align_corners=False,
+    )
+    return resized[0, 0].cpu().numpy().astype(np.float32)
+
+
 def _predict_probability_from_inputs(dyn: np.ndarray, stat: np.ndarray, *, log_label: str = "Prediction") -> np.ndarray:
     model = _load_model_once()
 
@@ -331,8 +346,10 @@ def _point_pixel_for_raster(
         tile = lonlat_to_tile(lon, lat)
         minx, miny, maxx, maxy = tile_bounds_albers(tile)
         x_m, y_m = lonlat_to_xy_m(lon, lat)
-        x = int(round((x_m - minx) / float(PIX)))
-        y = int(round((maxy - y_m) / float(PIX)))
+        pixel_w = (maxx - minx) / float(max(W, 1))
+        pixel_h = (maxy - miny) / float(max(H, 1))
+        x = int(round((x_m - minx) / pixel_w))
+        y = int(round((maxy - y_m) / pixel_h))
     except Exception:
         w, s, e, n = bounds
         dx = (e - w) / float(W)
@@ -383,10 +400,12 @@ def _build_crop_window(
     cropped_bounds = bounds
     try:
         minx, miny, maxx, maxy = tile_bounds_albers(lonlat_to_tile(lon, lat))
-        w_m = minx + x0 * PIX
-        e_m = minx + x1 * PIX
-        n_m = maxy - y0 * PIX
-        s_m = maxy - y1 * PIX
+        pixel_w = (maxx - minx) / float(max(W, 1))
+        pixel_h = (maxy - miny) / float(max(H, 1))
+        w_m = minx + x0 * pixel_w
+        e_m = minx + x1 * pixel_w
+        n_m = maxy - y0 * pixel_h
+        s_m = maxy - y1 * pixel_h
         w2, s2 = _TO_WGS84.transform(w_m, s_m)
         e2, n2 = _TO_WGS84.transform(e_m, n_m)
         cropped_bounds = (float(w2), float(s2), float(e2), float(n2))
@@ -463,13 +482,15 @@ def _rollout_multistep_predictions(
         hours_step=step_hours,
     )
     normalized_steps = max(1, int(steps))
-    crop_window = _build_crop_window(dyn.shape[-2:], bounds, lat, lon, crop_frac)
+    crop_window = None
     rollout = []
     current_dyn = dyn.copy()
 
     for index in range(normalized_steps):
         lead_hours = (index + 1) * int(step_hours)
         prob = _predict_probability_from_inputs(current_dyn, stat, log_label=f"Forecast step {index + 1}")
+        if crop_window is None:
+            crop_window = _build_crop_window(prob.shape, bounds, lat, lon, crop_frac)
         rollout.append({
             "index": index,
             "lead_hours": lead_hours,
@@ -482,8 +503,9 @@ def _rollout_multistep_predictions(
 
         next_time = base_time + dt.timedelta(hours=lead_hours)
         wx = fetch_weather_grids(lat, lon, ref_time=next_time)
+        next_fire = _resize_prob_to_shape(prob, current_dyn.shape[-2:])
         next_slice = np.stack([
-            np.clip(prob, 0.0, 1.0),
+            np.clip(next_fire, 0.0, 1.0),
             wx["u"], wx["v"], wx["gust"],
             wx["tempC"], wx["q"], wx["precip"],
         ], axis=0).astype(np.float32)
@@ -491,6 +513,9 @@ def _rollout_multistep_predictions(
             current_dyn = next_slice[None, ...]
         else:
             current_dyn = np.concatenate([current_dyn[1:], next_slice[None, ...]], axis=0)
+
+    if crop_window is None:
+        crop_window = _build_crop_window(current_dyn.shape[-2:], bounds, lat, lon, crop_frac)
 
     return bounds, crop_window, rollout
 
