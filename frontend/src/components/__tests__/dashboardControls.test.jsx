@@ -1,21 +1,94 @@
 import React from 'react';
-import { render, screen, fireEvent, waitFor } from '@testing-library/react';
+import { render, screen, fireEvent, waitFor, act } from '@testing-library/react';
 import mapboxgl from 'mapbox-gl';
 import FireControls from '../FireControls';
+import {
+  getWildfireData,
+  predictFireSpreadMultistep,
+} from '../../api';
+import {
+  prepareMultistepRasterFrames,
+  renderPredictionRasterFrame,
+  removePredictionOverlays,
+} from '../../utils/addPredictionOverlay';
 
 jest.mock('../../api', () => ({
   getWildfireData: jest.fn(() => Promise.resolve({ data: { data: [] } })),
-  predictFireSpread: jest.fn(() => Promise.resolve({}))
+  predictFireSpread: jest.fn(() => Promise.resolve({})),
+  predictFireSpreadMultistep: jest.fn(() => Promise.resolve({
+    bounds: [-118.6, 34.0, -118.1, 34.4],
+    threshold: 0.01,
+    step_hours: 6,
+    steps: [
+      { index: 0, lead_hours: 6, label: '6 hours', image_base64: 'frame-1', prob_max: 0.11, prob_mean: 0.03, area_fraction: 0.08 },
+      { index: 1, lead_hours: 12, label: '12 hours', image_base64: 'frame-2', prob_max: 0.19, prob_mean: 0.05, area_fraction: 0.11 },
+    ]
+  }))
+}));
+
+jest.mock('../../utils/addPredictionOverlay', () => ({
+  addPredictionOverlay: jest.fn(() => Promise.resolve({ bounds: [-118.6, 34.0, -118.1, 34.4] })),
+  prepareMultistepRasterFrames: jest.fn(async payload => ({
+    bounds: payload.bounds,
+    threshold: payload.threshold,
+    stepHours: payload.step_hours,
+    frames: payload.steps.map(step => ({
+      ...step,
+      bounds: payload.bounds,
+      heatmapUrl: `data:image/png;base64,${step.image_base64}`,
+      meta: {
+        prob_max: step.prob_max,
+        prob_mean: step.prob_mean,
+      }
+    }))
+  })),
+  renderPredictionRasterFrame: jest.fn(() => Promise.resolve({ kind: 'raster' })),
+  removePredictionOverlays: jest.fn(),
 }));
 
 describe('Dashboard controls', () => {
   let consoleErrorSpy;
+  const multistepPayload = {
+    bounds: [-118.6, 34.0, -118.1, 34.4],
+    threshold: 0.01,
+    step_hours: 6,
+    steps: [
+      { index: 0, lead_hours: 6, label: '6 hours', image_base64: 'frame-1', prob_max: 0.11, prob_mean: 0.03, area_fraction: 0.08 },
+      { index: 1, lead_hours: 12, label: '12 hours', image_base64: 'frame-2', prob_max: 0.19, prob_mean: 0.05, area_fraction: 0.11 },
+    ]
+  };
 
   beforeEach(() => {
     consoleErrorSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
+    jest.useRealTimers();
+    mapboxgl.Popup.mockImplementation(() => ({
+      setLngLat: jest.fn().mockReturnThis(),
+      setHTML: jest.fn().mockReturnThis(),
+      addTo: jest.fn().mockReturnThis(),
+      remove: jest.fn(),
+    }));
+    getWildfireData.mockResolvedValue({ data: { data: [] } });
+    predictFireSpreadMultistep.mockResolvedValue(multistepPayload);
+    prepareMultistepRasterFrames.mockImplementation(async payload => ({
+      bounds: payload.bounds,
+      threshold: payload.threshold,
+      stepHours: payload.step_hours,
+      frames: payload.steps.map(step => ({
+        ...step,
+        bounds: payload.bounds,
+        heatmapUrl: `data:image/png;base64,${step.image_base64}`,
+        meta: {
+          prob_max: step.prob_max,
+          prob_mean: step.prob_mean,
+        }
+      }))
+    }));
+    renderPredictionRasterFrame.mockResolvedValue({ kind: 'raster' });
+    removePredictionOverlays.mockImplementation(() => {});
   });
 
   afterEach(() => {
+    jest.useRealTimers();
     expect(consoleErrorSpy).not.toHaveBeenCalled();
     consoleErrorSpy.mockRestore();
   });
@@ -192,5 +265,98 @@ describe('Dashboard controls', () => {
     fireEvent.click(zoomOutButton);
     expect(mapInstance.zoomOut).toHaveBeenCalledTimes(1);
     expect(mapInstance._zoom).toBe(initialZoom);
+  });
+
+  test('forecast panel appears and slider updates the active forecast frame', async () => {
+    const MapComponent = require('../MapComponent').default;
+
+    render(
+      <MapComponent
+        brightnessFilter=""
+        confidenceFilter=""
+        onFiresUpdated={jest.fn()}
+        setIsFetching={jest.fn()}
+        mapStyle="mapbox://styles/mapbox/streets-v12"
+        userLocation={null}
+        range={0}
+        onNearbyFiresUpdate={jest.fn()}
+      />
+    );
+
+    fireEvent.click(await screen.findByRole('button', { name: /history/i }));
+    fireEvent.click(screen.getByRole('button', { name: /camp\/paradise fire/i }));
+
+    expect(await screen.findByTestId('forecast-panel')).toBeInTheDocument();
+    expect(screen.getByText('6 hours')).toBeInTheDocument();
+
+    fireEvent.change(screen.getByLabelText(/forecast timeline slider/i), { target: { value: '1' } });
+
+    await waitFor(() => expect(screen.getByText('12 hours')).toBeInTheDocument());
+    expect(renderPredictionRasterFrame).toHaveBeenCalled();
+  });
+
+  test('forecast playback advances and clear removes the overlay state', async () => {
+    jest.useFakeTimers();
+    const MapComponent = require('../MapComponent').default;
+
+    render(
+      <MapComponent
+        brightnessFilter=""
+        confidenceFilter=""
+        onFiresUpdated={jest.fn()}
+        setIsFetching={jest.fn()}
+        mapStyle="mapbox://styles/mapbox/streets-v12"
+        userLocation={null}
+        range={0}
+        onNearbyFiresUpdate={jest.fn()}
+      />
+    );
+
+    fireEvent.click(await screen.findByRole('button', { name: /history/i }));
+    fireEvent.click(screen.getByRole('button', { name: /camp\/paradise fire/i }));
+    expect(await screen.findByTestId('forecast-panel')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: /play/i }));
+    act(() => {
+      jest.advanceTimersByTime(1300);
+    });
+
+    await waitFor(() => expect(screen.getByText('12 hours')).toBeInTheDocument());
+
+    fireEvent.click(screen.getByRole('button', { name: /clear forecast timeline/i }));
+    await waitFor(() => expect(screen.queryByTestId('forecast-panel')).not.toBeInTheDocument());
+    expect(removePredictionOverlays).toHaveBeenCalled();
+
+    jest.useRealTimers();
+  });
+
+  test('custom historical runs call the multistep api with date', async () => {
+    const MapComponent = require('../MapComponent').default;
+    const { container } = render(
+      <MapComponent
+        brightnessFilter=""
+        confidenceFilter=""
+        onFiresUpdated={jest.fn()}
+        setIsFetching={jest.fn()}
+        mapStyle="mapbox://styles/mapbox/streets-v12"
+        userLocation={null}
+        range={0}
+        onNearbyFiresUpdate={jest.fn()}
+      />
+    );
+
+    fireEvent.click(await screen.findByRole('button', { name: /history/i }));
+    fireEvent.change(container.querySelector('input[type="date"]'), { target: { value: '2021-08-14' } });
+    fireEvent.click(screen.getByRole('button', { name: /run custom date/i }));
+
+    await waitFor(() => {
+      expect(predictFireSpreadMultistep).toHaveBeenCalledWith(expect.objectContaining({
+        date: '2021-08-14',
+        stepHours: 6,
+        steps: 6,
+      }));
+    });
+    expect(await screen.findByTestId('forecast-panel')).toBeInTheDocument();
+    expect(prepareMultistepRasterFrames).toHaveBeenCalled();
   });
 });

@@ -10,8 +10,17 @@ import React, {
 } from 'react';
 import mapboxgl from 'mapbox-gl';
 import 'mapbox-gl/dist/mapbox-gl.css';
-import { getWildfireData, predictFireSpread } from '../api';
-import { addPredictionOverlay } from '../utils/addPredictionOverlay';
+import {
+  getWildfireData,
+  predictFireSpread,
+  predictFireSpreadMultistep
+} from '../api';
+import {
+  addPredictionOverlay,
+  prepareMultistepRasterFrames,
+  removePredictionOverlays,
+  renderPredictionRasterFrame
+} from '../utils/addPredictionOverlay';
 
 // ---- Tokens / Base URLs -----------------------------------------------------
 const MAPBOX_TOKEN =
@@ -116,6 +125,11 @@ const MapComponent = forwardRef(({
   const [wildfires, setWildfires]       = useState([]);
   const [isPredicting, setIsPredicting] = useState(false);
   const [activePopup, setActivePopup]   = useState(null);
+  const [forecastFrames, setForecastFrames] = useState([]);
+  const [activeForecastIndex, setActiveForecastIndex] = useState(0);
+  const [forecastVisible, setForecastVisible] = useState(false);
+  const [isForecastPlaying, setIsForecastPlaying] = useState(false);
+  const [forecastTitle, setForecastTitle] = useState('Ignis Forecast Timeline');
 
   // Historical fire testing state
   const [showHistPanel, setShowHistPanel] = useState(false);
@@ -133,8 +147,13 @@ const MapComponent = forwardRef(({
     setIsFetching?.(true);
     try {
       // You can pass { predictableOnly:true } if you want to hide weak signals by default.
-      const { data } = await getWildfireData();
-      const arr = data?.data || [];
+      const response = await getWildfireData();
+      const payload = response?.data ?? response;
+      const arr = Array.isArray(payload?.data)
+        ? payload.data
+        : Array.isArray(payload)
+          ? payload
+          : [];
       setWildfires(arr);
       onFiresUpdated?.(arr.length);
       updateWildfireSource(arr);
@@ -265,58 +284,95 @@ const MapComponent = forwardRef(({
     toggleNdvi
   }), [fetchWildfires, toggleNdvi]);
 
+  const clearForecastTimeline = useCallback(() => {
+    setIsForecastPlaying(false);
+    setForecastVisible(false);
+    setForecastFrames([]);
+    setActiveForecastIndex(0);
+    removePredictionOverlays(mapRef.current);
+  }, []);
+
+  const retryPrediction = useCallback(async (label, task, retries = 3) => {
+    let lastErr = null;
+    for (let attempt = 0; attempt < retries; attempt++) {
+      try {
+        return await task();
+      } catch (err) {
+        lastErr = err;
+        console.warn(`${label} attempt ${attempt + 1} failed, retrying...`, err.message);
+      }
+    }
+    throw lastErr;
+  }, []);
+
+  const loadForecastTimeline = useCallback(async ({
+    lat,
+    lon,
+    date,
+    title = 'Ignis Forecast Timeline',
+    steps = 6,
+    stepHours = 6,
+    fitBounds = true,
+  }) => {
+    const response = await retryPrediction('Forecast timeline', () =>
+      predictFireSpreadMultistep({
+        lat,
+        lon,
+        thr: 0.01,
+        Tseq: 1,
+        date,
+        steps,
+        stepHours,
+      })
+    );
+    const payload = response?.data ?? response;
+
+    const prepared = await prepareMultistepRasterFrames(payload, {
+      gamma: 0.7,
+      opacity: 0.75,
+      smooth: true,
+    });
+
+    const firstFrame = prepared.frames[0];
+    await renderPredictionRasterFrame(mapRef.current, firstFrame);
+    if (fitBounds && firstFrame?.bounds) {
+      const [w, s, e, n] = firstFrame.bounds;
+      mapRef.current?.fitBounds?.([[w, s], [e, n]], { padding: 40, duration: 800 });
+    }
+
+    setForecastTitle(title);
+    setForecastFrames(prepared.frames);
+    setActiveForecastIndex(0);
+    setIsForecastPlaying(false);
+    setForecastVisible(true);
+    return prepared;
+  }, [retryPrediction]);
+
   // ---------- Prediction ----------
   const handlePredictFireSpread = async (fireProps) => {
     if (isPredicting) return;
     setIsPredicting(true);
     try {
       if (activePopup) activePopup.remove();
+      clearForecastTimeline();
 
-      // Retry logic for cold-start timeouts (Render spins down idle services)
-      let prediction = null;
-      let lastErr = null;
-      for (let attempt = 0; attempt < 3; attempt++) {
-        try {
-          prediction = await predictFireSpread({
+      const [prediction] = await Promise.all([
+        retryPrediction('Prediction summary', () =>
+          predictFireSpread({
             lat: fireProps.latitude,
             lng: fireProps.longitude,
             thr: 0.01,
             Tseq: 1,
-          });
-          break;
-        } catch (err) {
-          lastErr = err;
-          console.warn(`Prediction attempt ${attempt + 1} failed, retrying...`, err.message);
-        }
-      }
-      if (!prediction) throw lastErr;
+          })
+        ),
+        loadForecastTimeline({
+          lat: fireProps.latitude,
+          lon: fireProps.longitude,
+          title: 'Ignis Forecast Timeline',
+        }),
+      ]);
 
-      // Show raster heatmap overlay (with same retry tolerance via fetch)
-      const result = await addPredictionOverlay(mapRef.current, {
-        apiBase: API_BASE,
-        lat: fireProps.latitude,
-        lon: fireProps.longitude,
-        mode: 'raster',
-        thr: 0.01,
-        floor: 0.01,
-        Tseq: 1,
-        gamma: 0.7,
-        opacity: 0.75,
-        smooth: true,
-        alphaThreshold: 0.01,
-      });
-
-      // Fit to overlay bounds (makes it look “accurate” instead of offset)
-      if (result?.bounds) {
-        const [w, s, e, n] = result.bounds;
-        mapRef.current.fitBounds([[w, s], [e, n]], { padding: 40, duration: 800 });
-      }
-
-      // 2) Keep popup + stats
       showPredictionPopup(fireProps, prediction);
-
-      // OPTIONAL: If you still want vector polygons sometimes, keep this behind a toggle.
-      // if (prediction?.geojson) displayFirePrediction({ geojson: prediction.geojson });
     } catch (error) {
       console.error('Failed to predict fire spread:', error);
       const map = mapRef.current;
@@ -482,31 +538,21 @@ const MapComponent = forwardRef(({
     try {
       const { lat, lon, date, zoom, name } = preset;
 
-      map.flyTo({ center: [lon, lat], zoom: zoom || 10, duration: 1200 });
+      if (activePopup) activePopup.remove();
+      map.flyTo?.({ center: [lon, lat], zoom: zoom || 10, duration: 1200 });
+      clearForecastTimeline();
 
-      const result = await addPredictionOverlay(map, {
-        apiBase: API_BASE,
+      const prepared = await loadForecastTimeline({
         lat,
         lon,
-        mode: 'raster',
-        thr: 0.01,
-        Tseq: 1,
         date,
-        gamma: 0.7,
-        floor: 0.01,
-        opacity: 0.75,
-        smooth: true,
-        alphaThreshold: 0.01,
+        title: `${name} Forecast Timeline`,
       });
 
-      if (result?.bounds) {
-        const [w, s, e, n] = result.bounds;
-        map.fitBounds([[w, s], [e, n]], { padding: 40, duration: 800 });
-      }
-
       // Show info popup
-      const probMax = result?.meta?.prob_max;
-      const probMean = result?.meta?.prob_mean;
+      const firstFrame = prepared?.frames?.[0];
+      const probMax = firstFrame?.prob_max;
+      const probMean = firstFrame?.prob_mean;
       const popup = new mapboxgl.Popup()
         .setLngLat([lon, lat])
         .setHTML(`
@@ -516,6 +562,7 @@ const MapComponent = forwardRef(({
               <h5>Historical Prediction (${date})</h5>
               <p><strong>Max probability:</strong> ${probMax != null ? (probMax * 100).toFixed(1) + '%' : '--'}</p>
               <p><strong>Mean probability:</strong> ${probMean != null ? (probMean * 100).toFixed(2) + '%' : '--'}</p>
+              <p><strong>Timeline:</strong> every 6 hours</p>
               <p style="margin-top:8px;font-size:0.85em;color:#888;">
                 Uses archived weather data. FIRMS fire detections only available for recent dates;
                 older fires use ignition-point mode.
@@ -703,11 +750,33 @@ const MapComponent = forwardRef(({
       setupLayers();
       updateWildfireSource();
       updateUserSource();
+      if (forecastVisible && forecastFrames[activeForecastIndex]) {
+        renderPredictionRasterFrame(map, forecastFrames[activeForecastIndex]).catch(err => {
+          console.error('Forecast frame render error:', err);
+        });
+      }
     });
   }, [mapStyle]);
 
   useEffect(() => { updateWildfireSource(); }, [wildfires, brightnessFilter, confidenceFilter]);
   useEffect(() => { updateUserSource(); }, [userLocation]);
+
+  useEffect(() => {
+    if (!forecastVisible || !forecastFrames.length) return;
+    const frame = forecastFrames[activeForecastIndex];
+    if (!frame) return;
+    renderPredictionRasterFrame(mapRef.current, frame).catch(err => {
+      console.error('Forecast frame render error:', err);
+    });
+  }, [forecastVisible, forecastFrames, activeForecastIndex]);
+
+  useEffect(() => {
+    if (!forecastVisible || !isForecastPlaying || forecastFrames.length < 2) return undefined;
+    const id = window.setInterval(() => {
+      setActiveForecastIndex(idx => (idx + 1) % forecastFrames.length);
+    }, 1200);
+    return () => window.clearInterval(id);
+  }, [forecastVisible, isForecastPlaying, forecastFrames.length]);
 
   useEffect(() => {
     const onKey = e => { if (e.key.toLowerCase() === 'n') toggleNdvi(); };
@@ -789,10 +858,49 @@ const MapComponent = forwardRef(({
         padding: 6px 10px; cursor: pointer; font-size: 13px; font-weight: 700;
       }
       .hist-toggle:hover { background: #FF8800; }
+      .forecast-panel {
+        position: absolute; left: 50%; bottom: 18px; transform: translateX(-50%);
+        z-index: 12; min-width: 360px; max-width: calc(100% - 32px);
+        background: rgba(22, 24, 27, 0.94); color: #f7f3ea;
+        border-radius: 12px; padding: 14px 16px; box-shadow: 0 10px 30px rgba(0,0,0,0.35);
+        border: 1px solid rgba(255,255,255,0.08);
+      }
+      .forecast-header {
+        display: flex; align-items: center; justify-content: space-between; gap: 12px;
+        margin-bottom: 10px;
+      }
+      .forecast-title {
+        font-size: 13px; font-weight: 700; letter-spacing: 0.04em; text-transform: uppercase;
+        color: #ffb347;
+      }
+      .forecast-label {
+        font-size: 20px; font-weight: 700; margin: 2px 0 0;
+      }
+      .forecast-meta {
+        font-size: 12px; color: rgba(247,243,234,0.72); margin-bottom: 12px;
+      }
+      .forecast-slider {
+        width: 100%;
+        accent-color: #ff7b2f;
+      }
+      .forecast-controls {
+        display: flex; align-items: center; justify-content: space-between; gap: 8px;
+        margin-top: 12px;
+      }
+      .forecast-btn {
+        border: none; border-radius: 8px; cursor: pointer; font-weight: 700;
+        padding: 8px 12px; background: #2e343b; color: #fff;
+      }
+      .forecast-btn:hover { background: #454c54; }
+      .forecast-btn.primary { background: #ff7b2f; color: #111; }
+      .forecast-btn.primary:hover { background: #ff944f; }
+      .forecast-btn.ghost { background: transparent; border: 1px solid rgba(255,255,255,0.16); }
     `;
     document.head.appendChild(style);
     return () => { document.head.removeChild(style); };
   }, []);
+
+  const activeForecastFrame = forecastFrames[activeForecastIndex] || null;
 
   return (
     <div style={{ width: '100%', height: '100%', position: 'relative' }}>
@@ -838,6 +946,66 @@ const MapComponent = forwardRef(({
           >
             {histRunning ? 'Running...' : 'Run Custom Date'}
           </button>
+        </div>
+      )}
+      {forecastVisible && activeForecastFrame && (
+        <div className="forecast-panel" data-testid="forecast-panel">
+          <div className="forecast-header">
+            <div>
+              <div className="forecast-title">{forecastTitle}</div>
+              <div className="forecast-label">{activeForecastFrame.label}</div>
+            </div>
+            <button
+              className="forecast-btn ghost"
+              onClick={clearForecastTimeline}
+              aria-label="Clear forecast timeline"
+            >
+              Clear
+            </button>
+          </div>
+          <div className="forecast-meta">
+            Frame {activeForecastIndex + 1} of {forecastFrames.length}
+            {activeForecastFrame?.prob_max != null ? ` · Peak ${(activeForecastFrame.prob_max * 100).toFixed(1)}%` : ''}
+          </div>
+          <input
+            className="forecast-slider"
+            type="range"
+            min="0"
+            max={Math.max(0, forecastFrames.length - 1)}
+            step="1"
+            value={activeForecastIndex}
+            aria-label="Forecast timeline slider"
+            onChange={e => {
+              setIsForecastPlaying(false);
+              setActiveForecastIndex(Number(e.target.value));
+            }}
+          />
+          <div className="forecast-controls">
+            <button
+              className="forecast-btn"
+              onClick={() => {
+                setIsForecastPlaying(false);
+                setActiveForecastIndex(idx => (idx - 1 + forecastFrames.length) % forecastFrames.length);
+              }}
+            >
+              Prev
+            </button>
+            <button
+              className="forecast-btn primary"
+              onClick={() => setIsForecastPlaying(v => !v)}
+            >
+              {isForecastPlaying ? 'Pause' : 'Play'}
+            </button>
+            <button
+              className="forecast-btn"
+              onClick={() => {
+                setIsForecastPlaying(false);
+                setActiveForecastIndex(idx => (idx + 1) % forecastFrames.length);
+              }}
+            >
+              Next
+            </button>
+          </div>
         </div>
       )}
     </div>
