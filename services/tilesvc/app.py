@@ -205,6 +205,59 @@ def _resize_prob_to_shape(prob: np.ndarray, shape: Tuple[int, int]) -> np.ndarra
     return resized[0, 0].cpu().numpy().astype(np.float32)
 
 
+def _rectangle_coordinates_from_bounds(bounds: Tuple[float, float, float, float]) -> list:
+    w, s, e, n = bounds
+    return [
+        [float(w), float(n)],
+        [float(e), float(n)],
+        [float(e), float(s)],
+        [float(w), float(s)],
+    ]
+
+
+def _bbox_from_coordinates(coordinates: list) -> Tuple[float, float, float, float]:
+    lons = [float(coord[0]) for coord in coordinates]
+    lats = [float(coord[1]) for coord in coordinates]
+    return (min(lons), min(lats), max(lons), max(lats))
+
+
+def _window_coordinates(
+    shape: Tuple[int, int],
+    lat: float,
+    lon: float,
+    x0: int,
+    y0: int,
+    x1: int,
+    y1: int,
+    fallback_bounds: Tuple[float, float, float, float],
+) -> Tuple[list, Tuple[float, float, float, float]]:
+    H, W = shape
+    try:
+        minx, miny, maxx, maxy = tile_bounds_albers(lonlat_to_tile(lon, lat))
+        pixel_w = (maxx - minx) / float(max(W, 1))
+        pixel_h = (maxy - miny) / float(max(H, 1))
+        west_m = minx + x0 * pixel_w
+        east_m = minx + x1 * pixel_w
+        north_m = maxy - y0 * pixel_h
+        south_m = maxy - y1 * pixel_h
+        corners_m = [
+            (west_m, north_m),
+            (east_m, north_m),
+            (east_m, south_m),
+            (west_m, south_m),
+        ]
+        coordinates = []
+        for x_m, y_m in corners_m:
+            lon2, lat2 = _TO_WGS84.transform(x_m, y_m)
+            if not (math.isfinite(lon2) and math.isfinite(lat2)):
+                raise ValueError("non-finite transformed crop corner")
+            coordinates.append([float(lon2), float(lat2)])
+        return coordinates, _bbox_from_coordinates(coordinates)
+    except Exception:
+        rectangle = _rectangle_coordinates_from_bounds(fallback_bounds)
+        return rectangle, fallback_bounds
+
+
 def _predict_probability_from_inputs(dyn: np.ndarray, stat: np.ndarray, *, log_label: str = "Prediction") -> np.ndarray:
     model = _load_model_once()
 
@@ -374,43 +427,32 @@ def _build_crop_window(
     x, y = _point_pixel_for_raster(shape, bounds, lat, lon)
 
     if crop_frac is None or crop_frac >= 1.0 or crop_frac <= 0:
-        return {
-            "x0": 0,
-            "y0": 0,
-            "x1": W,
-            "y1": H,
-            "bounds": bounds,
-            "anchor_px": (x, y),
-        }
+        x0, y0, x1, y1 = 0, 0, W, H
+    else:
+        crop_w = max(1, int(W * crop_frac))
+        crop_h = max(1, int(H * crop_frac))
 
-    crop_w = max(1, int(W * crop_frac))
-    crop_h = max(1, int(H * crop_frac))
+        x0 = x - crop_w // 2
+        y0 = y - crop_h // 2
+        x1 = x0 + crop_w
+        y1 = y0 + crop_h
 
-    x0 = x - crop_w // 2
-    y0 = y - crop_h // 2
-    x1 = x0 + crop_w
-    y1 = y0 + crop_h
+        # clamp to bounds
+        x0 = max(0, x0)
+        y0 = max(0, y0)
+        x1 = min(W, x1)
+        y1 = min(H, y1)
 
-    # clamp to bounds
-    x0 = max(0, x0)
-    y0 = max(0, y0)
-    x1 = min(W, x1)
-    y1 = min(H, y1)
-
-    cropped_bounds = bounds
-    try:
-        minx, miny, maxx, maxy = tile_bounds_albers(lonlat_to_tile(lon, lat))
-        pixel_w = (maxx - minx) / float(max(W, 1))
-        pixel_h = (maxy - miny) / float(max(H, 1))
-        w_m = minx + x0 * pixel_w
-        e_m = minx + x1 * pixel_w
-        n_m = maxy - y0 * pixel_h
-        s_m = maxy - y1 * pixel_h
-        w2, s2 = _TO_WGS84.transform(w_m, s_m)
-        e2, n2 = _TO_WGS84.transform(e_m, n_m)
-        cropped_bounds = (float(w2), float(s2), float(e2), float(n2))
-    except Exception:
-        pass
+    cropped_coordinates, cropped_bounds = _window_coordinates(
+        shape,
+        lat,
+        lon,
+        x0,
+        y0,
+        x1,
+        y1,
+        bounds,
+    )
 
     return {
         "x0": x0,
@@ -418,6 +460,7 @@ def _build_crop_window(
         "x1": x1,
         "y1": y1,
         "bounds": cropped_bounds,
+        "coordinates": cropped_coordinates,
         "anchor_px": (max(0, min(x1 - x0 - 1, x - x0)), max(0, min(y1 - y0 - 1, y - y0))),
     }
 
@@ -610,6 +653,7 @@ def predict_raster_json(
 
     return {
         "bounds": list(map(float, bounds)),
+        "coordinates": crop_window["coordinates"],
         "image_base64": base64.b64encode(png).decode("ascii"),
         "threshold": threshold,
         "prob_min": float(prob.min()),
@@ -696,6 +740,7 @@ def predict_multistep(
 
     return {
         "bounds": list(map(float, cropped_bounds)),
+        "coordinates": crop_window["coordinates"],
         "threshold": threshold,
         "step_hours": int(step_hours),
         "steps": payload_steps,

@@ -60,6 +60,7 @@ router.get("/raster", async (req, res) => {
 
     return res.json({
       bounds,
+      coordinates: Array.isArray(raster?.coordinates) ? raster.coordinates : undefined,
       image_base64,
       threshold: raster?.threshold,
       prob_min: raster?.prob_min,
@@ -186,6 +187,7 @@ router.get("/multistep", async (req, res) => {
 
     return res.json({
       bounds: forecast.bounds,
+      coordinates: Array.isArray(forecast?.coordinates) ? forecast.coordinates : undefined,
       threshold: forecast?.threshold,
       step_hours: forecast?.step_hours,
       steps: forecast.steps,

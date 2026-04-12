@@ -13,6 +13,12 @@ describe('GET /api/predict-fire-spread routes', () => {
     axios.get.mockResolvedValue({
       data: {
         bounds: [-118.6, 34.0, -118.1, 34.4],
+        coordinates: [
+          [-118.6, 34.4],
+          [-118.1, 34.4],
+          [-118.1, 34.0],
+          [-118.6, 34.0],
+        ],
         image_base64: 'abc123',
         threshold: 0.01,
         prob_min: 0.0,
@@ -29,6 +35,12 @@ describe('GET /api/predict-fire-spread routes', () => {
 
     expect(res.body).toMatchObject({
       bounds: [-118.6, 34.0, -118.1, 34.4],
+      coordinates: [
+        [-118.6, 34.4],
+        [-118.1, 34.4],
+        [-118.1, 34.0],
+        [-118.6, 34.0],
+      ],
       image_base64: 'abc123',
       threshold: 0.01,
     });
@@ -50,6 +62,12 @@ describe('GET /api/predict-fire-spread routes', () => {
     axios.get.mockResolvedValue({
       data: {
         bounds: [-118.6, 34.0, -118.1, 34.4],
+        coordinates: [
+          [-118.6, 34.4],
+          [-118.1, 34.4],
+          [-118.1, 34.0],
+          [-118.6, 34.0],
+        ],
         threshold: 0.01,
         step_hours: 6,
         steps: [
@@ -83,6 +101,12 @@ describe('GET /api/predict-fire-spread routes', () => {
 
     expect(res.body).toMatchObject({
       bounds: [-118.6, 34.0, -118.1, 34.4],
+      coordinates: [
+        [-118.6, 34.4],
+        [-118.1, 34.4],
+        [-118.1, 34.0],
+        [-118.6, 34.0],
+      ],
       threshold: 0.01,
       step_hours: 6,
       steps: [
