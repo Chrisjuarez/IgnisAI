@@ -24,12 +24,13 @@ const FIRMS_PRODUCTS = [
 ];
 const FIRMS_DAYS = Math.max(1, Math.min(Number(process.env.FIRMS_DAYS || 2), 5)); // clamp 1..5
 const FIRMS_BBOX = process.env.FIRMS_BBOX || '-125.0,24.0,-66.0,49.0';           // CONUS default
+const FIRMS_HEADER = 'latitude,longitude,bright_ti4,scan,track,acq_date,acq_time,satellite,instrument,confidence,version,bright_ti5,frp,daynight';
 
 // --- Helpers ---------------------------------------------------------------
 
 async function fetchFirmsProduct(product) {
-const NASA_KEY = (process.env.NASA_API_KEY || process.env.NASA_KEY || '').trim();
-const keyPart = NASA_KEY ? `${NASA_KEY}/` : '';
+  const NASA_KEY = (process.env.NASA_API_KEY || process.env.NASA_KEY || '').trim();
+  const keyPart = NASA_KEY ? `${NASA_KEY}/` : '';
   const url = `https://firms.modaps.eosdis.nasa.gov/api/area/csv/${keyPart}${product}/${FIRMS_BBOX}/${FIRMS_DAYS}`;
   const { data } = await axios.get(url, {
     headers: { 'User-Agent': 'ignis-ai (chrisjuarez1596@gmail.com)' },
@@ -122,6 +123,35 @@ function parseCSV(csvText, opts = {}) {
   });
 }
 
+function stripCsvRows(csvText = '') {
+  const lines = String(csvText || '')
+    .trim()
+    .split('\n')
+    .map(line => line.trim())
+    .filter(Boolean);
+  return lines.length > 1 ? lines.slice(1) : [];
+}
+
+function dedupeFires(fires = []) {
+  const unique = new Map();
+  for (const fire of fires) {
+    const timestamp = fire.timestamp instanceof Date
+      ? fire.timestamp.toISOString()
+      : new Date(fire.timestamp).toISOString();
+    const key = [
+      fire.latitude,
+      fire.longitude,
+      timestamp,
+      fire.satellite || '',
+      fire.instrument || '',
+    ].join('|');
+    if (!unique.has(key)) {
+      unique.set(key, fire);
+    }
+  }
+  return Array.from(unique.values());
+}
+
 // --- Route ----------------------------------------------------------------
 
 router.get('/wildfires', wildfireLimiter, async (req, res) => {
@@ -131,17 +161,22 @@ router.get('/wildfires', wildfireLimiter, async (req, res) => {
 
     // Fetch multiple FIRMS products, merge, drop headers
     const results = await Promise.allSettled(FIRMS_PRODUCTS.map(fetchFirmsProduct));
-    const bodies = results
+    const successfulBodies = results
       .filter(r => r.status === 'fulfilled')
-      .map(r => r.value.split('\n').slice(1).join('\n')) // strip header
-      .filter(Boolean);
+      .map(r => r.value);
 
-    if (!bodies.length) {
-      return res.status(502).json({ message: 'FIRMS fetch failed', count: 0, data: [] });
+    if (!successfulBodies.length) {
+      const firstError = results.find(r => r.status === 'rejected')?.reason;
+      return res.status(500).json({ error: firstError?.message || 'NASA API unavailable' });
     }
 
-    const mergedCsv = 'latitude,longitude,acq_date,acq_time\n' + bodies.join('\n');
-    const fires = parseCSV(mergedCsv, { excludeFlares, predictableOnly });
+    const mergedRows = successfulBodies.flatMap(stripCsvRows);
+    if (!mergedRows.length) {
+      return res.status(200).json({ message: 'No valid fire data', count: 0, data: [] });
+    }
+
+    const mergedCsv = `${FIRMS_HEADER}\n${mergedRows.join('\n')}`;
+    const fires = dedupeFires(parseCSV(mergedCsv, { excludeFlares, predictableOnly }));
     const parsedCount = fires.length;
 
     // Header-only / no rows
