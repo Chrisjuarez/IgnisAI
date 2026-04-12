@@ -196,11 +196,27 @@ function rasterBoundsToCoordinates(bounds) {
   ];
 }
 
+function isFiniteCoordinatePair(pair) {
+  return Array.isArray(pair)
+    && pair.length === 2
+    && Number.isFinite(Number(pair[0]))
+    && Number.isFinite(Number(pair[1]));
+}
+
+function resolveRasterCoordinates(frame) {
+  const coordinates = frame?.coordinates;
+  if (Array.isArray(coordinates) && coordinates.length === 4 && coordinates.every(isFiniteCoordinatePair)) {
+    return coordinates.map(([lon, lat]) => [Number(lon), Number(lat)]);
+  }
+  return rasterBoundsToCoordinates(frame?.bounds);
+}
+
 export async function renderPredictionRasterFrame(map, frame, opts = {}) {
   await waitForMapLoad(map);
 
   const bounds = frame?.bounds;
   const imageUrl = frame?.heatmapUrl;
+  const coordinates = resolveRasterCoordinates(frame);
   if (!Array.isArray(bounds) || bounds.length !== 4) {
     throw new Error(`Bad raster bounds: ${JSON.stringify(bounds)}`);
   }
@@ -212,7 +228,7 @@ export async function renderPredictionRasterFrame(map, frame, opts = {}) {
   map.addSource(IDS.rasterSource, {
     type: 'image',
     url: imageUrl,
-    coordinates: rasterBoundsToCoordinates(bounds),
+    coordinates,
   });
   map.addLayer({
     id: IDS.rasterLayer,
@@ -273,6 +289,7 @@ export async function prepareMultistepRasterFrames(payload, opts = {}) {
       return {
         ...step,
         bounds,
+        coordinates: payload?.coordinates,
         heatmapUrl,
         meta: {
           threshold: payload?.threshold,
@@ -381,9 +398,19 @@ export async function addRasterOverlay(map, apiBase, lat, lon, opts = {}) {
     alphaThreshold: (opts.thr != null ? Number(opts.thr) : null),
   });
 
-  await renderPredictionRasterFrame(map, { bounds, heatmapUrl, meta: payload }, opts);
+  await renderPredictionRasterFrame(map, {
+    bounds,
+    coordinates: payload?.coordinates,
+    heatmapUrl,
+    meta: payload,
+  }, opts);
 
-  return { kind: 'raster', bounds, meta: payload };
+  return {
+    kind: 'raster',
+    bounds,
+    coordinates: payload?.coordinates,
+    meta: payload
+  };
 }
 
 /**
