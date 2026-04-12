@@ -43,20 +43,25 @@ router.get('/current', async (req, res) => {
 
     const { data } = await axios.get(url, { params });
 
+    const hourly = {
+      time: data.hourly?.time?.slice(0, 24) || [],
+      temperature_2m: data.hourly?.temperature_2m?.slice(0, 24) || [],
+      relative_humidity_2m: data.hourly?.relative_humidity_2m?.slice(0, 24) || [],
+      wind_speed_10m: data.hourly?.wind_speed_10m?.slice(0, 24) || [],
+      wind_gusts_10m: data.hourly?.wind_gusts_10m?.slice(0, 24) || [],
+      precipitation: data.hourly?.precipitation?.slice(0, 24) || [],
+    };
+    const hourlyWindDirection = data.hourly?.wind_direction_10m?.slice(0, 24);
+    if (Array.isArray(hourlyWindDirection) && hourlyWindDirection.length > 0) {
+      hourly.wind_direction_10m = hourlyWindDirection;
+    }
+
     const snapshot = {
       latitude: lat,
       longitude: lon,
       fetchedAt: new Date(),
       current: data.current,
-      hourly: {
-        time: data.hourly?.time?.slice(0, 24) || [],
-        temperature_2m: data.hourly?.temperature_2m?.slice(0, 24) || [],
-        relative_humidity_2m: data.hourly?.relative_humidity_2m?.slice(0, 24) || [],
-        wind_speed_10m: data.hourly?.wind_speed_10m?.slice(0, 24) || [],
-        wind_direction_10m: data.hourly?.wind_direction_10m?.slice(0, 24) || [],
-        wind_gusts_10m: data.hourly?.wind_gusts_10m?.slice(0, 24) || [],
-        precipitation: data.hourly?.precipitation?.slice(0, 24) || [],
-      },
+      hourly,
     };
 
     // Only write if Mongo is actually connected (prevents buffering timeouts in tests)
