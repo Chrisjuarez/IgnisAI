@@ -3,7 +3,7 @@ const request = require('supertest');
 
 // --- Mocks (declare BEFORE requiring app) ---
 jest.mock('axios', () => ({ get: jest.fn() }));
-jest.mock('../models/Wildfire', () => ({ insertMany: jest.fn() }));
+jest.mock('../models/Wildfire', () => ({ insertMany: jest.fn(), find: jest.fn() }));
 
 const axios = require('axios');
 const Wildfire = require('../models/Wildfire');
@@ -51,12 +51,18 @@ describe('GET /api/wildfires', () => {
   });
 
   it('propagates provider errors (500)', async () => {
+    Wildfire.find.mockResolvedValue([]);
     axios.get.mockRejectedValue(new Error('NASA API unavailable'));
 
     const res = await request(app).get('/api/wildfires');
 
-    expect(res.status).toBe(500);
-    expect(res.body).toHaveProperty('error', 'NASA API unavailable');
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({
+      message: 'FIRMS fetch failed; no cached wildfire data',
+      count: 0,
+      data: [],
+      stale: true,
+    });
     expect(Wildfire.insertMany).not.toHaveBeenCalled();
   });
 });
