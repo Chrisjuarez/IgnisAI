@@ -55,12 +55,24 @@ def tile_bounds_albers(tile: TileID):
     return x0, y0, x1, y1
 
 
+def tile_coordinates_lonlat(tile: TileID):
+    """Return tile image coordinates as [[NW], [NE], [SE], [SW]] in lon/lat."""
+    minx, miny, maxx, maxy = tile_bounds_albers(tile)
+    corners = [
+        _to_wgs84.transform(minx, maxy),
+        _to_wgs84.transform(maxx, maxy),
+        _to_wgs84.transform(maxx, miny),
+        _to_wgs84.transform(minx, miny),
+    ]
+    return [[float(lon), float(lat)] for lon, lat in corners]
+
+
 def tile_bounds_lonlat(tile: TileID):
     """Return (W,S,E,N) in lon/lat for the tile."""
-    minx, miny, maxx, maxy = tile_bounds_albers(tile)
-    (w, s) = _to_wgs84.transform(minx, miny)
-    (e, n) = _to_wgs84.transform(maxx, maxy)
-    return float(w), float(s), float(e), float(n)
+    coords = tile_coordinates_lonlat(tile)
+    lons = [coord[0] for coord in coords]
+    lats = [coord[1] for coord in coords]
+    return min(lons), min(lats), max(lons), max(lats)
 
 
 # -------------------------------------------------------------------
