@@ -11,6 +11,13 @@
 //
 // Also exports removePredictionOverlays(map) so you can add a “Clear overlay” UI later.
 
+// Gamma controls the contrast curve applied to the probability heatmap.
+// Values < 1 brighten (lift faint signals), > 1 darken.
+// Multistep forecast frames use a slightly lighter touch than single-step
+// raster overlays because the timeline is already animated and easier to read.
+const GAMMA_RASTER = 0.85;     // single-step raster overlay
+const GAMMA_MULTISTEP = 0.7;   // multistep forecast timeline frames
+
 const IDS = {
   rasterSource: 'ignis-pred-raster-src',
   rasterLayer: 'ignis-pred-raster-layer',
@@ -91,7 +98,7 @@ function clamp01(x) {
  */
 async function colorizeGrayscalePngToHeatmapDataUrl(base64Png, opts = {}) {
   const {
-    gamma = 0.65,
+    gamma = GAMMA_RASTER,
     opacity = 0.80,
     smooth = true,
   } = opts;
@@ -124,6 +131,10 @@ async function colorizeGrayscalePngToHeatmapDataUrl(base64Png, opts = {}) {
     ctx.clearRect(0, 0, canvas.width, canvas.height);
     ctx.imageSmoothingEnabled = true;
     ctx.drawImage(tmp, 0, 0, canvas.width, canvas.height);
+
+    // Release the intermediate bitmap; avoids accumulation on rapid re-predictions
+    tmp.width = 0;
+    tmp.height = 0;
   }
 
   const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
@@ -282,7 +293,7 @@ export async function prepareMultistepRasterFrames(payload, opts = {}) {
         throw new Error('Multistep step missing image_base64');
       }
       const heatmapUrl = await colorizeGrayscalePngToHeatmapDataUrl(step.image_base64, {
-        gamma: opts.gamma ?? 0.85,
+        gamma: opts.gamma ?? GAMMA_MULTISTEP,
         opacity: opts.opacity ?? 0.85,
         smooth: opts.smooth ?? true,
       });
@@ -391,7 +402,7 @@ export async function addRasterOverlay(map, apiBase, lat, lon, opts = {}) {
 
   // Colorize grayscale to heatmap
   const heatmapUrl = await colorizeGrayscalePngToHeatmapDataUrl(b64, {
-    gamma: opts.gamma ?? 0.85,
+    gamma: opts.gamma ?? GAMMA_RASTER,
     floor: opts.floor ?? 0.02,
     opacity: opts.opacity ?? 0.85,
     smooth: opts.smooth ?? true,

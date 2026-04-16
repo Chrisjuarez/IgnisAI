@@ -149,4 +149,186 @@ describe('GET /api/predict-fire-spread routes', () => {
       detail: expect.any(String),
     });
   });
+
+  // ── /vector ────────────────────────────────────────────────────────────────
+
+  it('returns vector prediction with geojson + env data', async () => {
+    // /vector makes 3 sequential tilesvc calls: predict_geojson, predict (meta), then weather
+    axios.get
+      .mockResolvedValueOnce({
+        data: {
+          type: 'FeatureCollection',
+          features: [
+            {
+              type: 'Feature',
+              properties: { threshold: 0.01 },
+              geometry: { type: 'Polygon', coordinates: [[[0, 0], [1, 0], [1, 1], [0, 1], [0, 0]]] },
+            },
+          ],
+        },
+      })
+      .mockResolvedValueOnce({
+        data: {
+          bounds: [-118.6, 34.0, -118.1, 34.4],
+          area_fraction: 0.15,
+          threshold: 0.01,
+          prob_min: 0.0,
+          prob_mean: 0.05,
+          prob_max: 0.22,
+        },
+      })
+      // weather call — allow it to fail gracefully (the route swallows weather errors)
+      .mockRejectedValueOnce(new Error('weather unavailable'));
+
+    const res = await request(app)
+      .get('/api/predict-fire-spread/vector')
+      .query({ lat: 34.05, lon: -118.25 })
+      .expect(200);
+
+    expect(res.body).toMatchObject({
+      geojson: { type: 'FeatureCollection' },
+      spread_probability: expect.any(Number),
+      spread_distance_km: expect.any(Number),
+      threshold: 0.01,
+      bounds: [-118.6, 34.0, -118.1, 34.4],
+      prob_min: 0.0,
+      prob_max: 0.22,
+      environmental_data: expect.objectContaining({ data_source: 'unknown' }),
+    });
+    expect(res.body.geojson.features).toHaveLength(1);
+  });
+
+  it('enriches vector features with wind direction and spread probability', async () => {
+    const mockFeature = {
+      type: 'Feature',
+      properties: {},
+      geometry: { type: 'Polygon', coordinates: [[[0, 0], [1, 0], [1, 1], [0, 1], [0, 0]]] },
+    };
+
+    axios.get
+      .mockResolvedValueOnce({
+        data: { type: 'FeatureCollection', features: [mockFeature] },
+      })
+      .mockResolvedValueOnce({
+        data: {
+          bounds: [-118.6, 34.0, -118.1, 34.4],
+          area_fraction: 0.10,
+          threshold: 0.01,
+        },
+      })
+      .mockResolvedValueOnce({
+        data: {
+          data: {
+            current: {
+              wind_speed_10m: 5.5,
+              wind_direction_10m: 270,
+              temperature_2m: 35,
+              relative_humidity_2m: 20,
+            },
+          },
+        },
+      });
+
+    const res = await request(app)
+      .get('/api/predict-fire-spread/vector')
+      .query({ lat: 34.05, lon: -118.25 })
+      .expect(200);
+
+    const feature = res.body.geojson.features[0];
+    expect(feature.properties.direction).toBe(270);
+    expect(feature.properties.spread_probability).toBeCloseTo(0.10);
+    expect(res.body.environmental_data).toMatchObject({
+      wind_direction: 270,
+      temperature: 35,
+      humidity: 20,
+      data_source: 'weather_api',
+    });
+  });
+
+  it('returns 400 when lat/lon are missing from vector request', async () => {
+    const res = await request(app)
+      .get('/api/predict-fire-spread/vector')
+      .query({ lat: 34.05 }) // missing lon
+      .expect(400);
+
+    expect(res.body).toMatchObject({ error: expect.any(String) });
+    expect(axios.get).not.toHaveBeenCalled();
+  });
+
+  it('propagates vector tilesvc failures as structured 5xx json', async () => {
+    axios.get.mockRejectedValue(new Error('tilesvc unreachable'));
+
+    const res = await request(app)
+      .get('/api/predict-fire-spread/vector')
+      .query({ lat: 34.05, lon: -118.25 })
+      .expect(502);
+
+    expect(res.body).toMatchObject({
+      error: 'tilesvc_vector_failed',
+      detail: expect.any(String),
+    });
+  });
+
+  // ── Error paths ─────────────────────────────────────────────────────────────
+
+  it('returns 400 when lat/lon are missing from raster request', async () => {
+    const res = await request(app)
+      .get('/api/predict-fire-spread/raster')
+      .query({ lon: -118.25 }) // missing lat
+      .expect(400);
+
+    expect(res.body).toMatchObject({ error: expect.any(String) });
+    expect(axios.get).not.toHaveBeenCalled();
+  });
+
+  it('returns 400 when lat/lon are missing from multistep request', async () => {
+    const res = await request(app)
+      .get('/api/predict-fire-spread/multistep')
+      .query({}) // missing both
+      .expect(400);
+
+    expect(res.body).toMatchObject({ error: expect.any(String) });
+    expect(axios.get).not.toHaveBeenCalled();
+  });
+
+  it('propagates raster tilesvc failures as structured 5xx json', async () => {
+    axios.get.mockRejectedValue(new Error('connection refused'));
+
+    const res = await request(app)
+      .get('/api/predict-fire-spread/raster')
+      .query({ lat: 34.05, lon: -118.25 })
+      .expect(502);
+
+    expect(res.body).toMatchObject({
+      error: 'tilesvc_raster_failed',
+      detail: expect.any(String),
+    });
+  });
+
+  it('returns 502 when raster response is missing required fields', async () => {
+    // tilesvc returns something unexpected (e.g. missing image_base64)
+    axios.get.mockResolvedValue({
+      data: { bounds: [-118.6, 34.0, -118.1, 34.4] }, // no image_base64
+    });
+
+    const res = await request(app)
+      .get('/api/predict-fire-spread/raster')
+      .query({ lat: 34.05, lon: -118.25 })
+      .expect(502);
+
+    expect(res.body).toMatchObject({ error: 'tilesvc_raster_failed' });
+  });
+
+  it('returns 502 when multistep response is missing steps array', async () => {
+    axios.get.mockResolvedValue({
+      data: { bounds: [-118.6, 34.0, -118.1, 34.4] }, // no steps array
+    });
+
+    const res = await request(app)
+      .get('/api/predict-fire-spread/multistep')
+      .query({ lat: 34.05, lon: -118.25 })
+      .expect(502);
+
+    expect(res.body).toMatchObject({ error: 'tilesvc_multistep_failed' });
+  });
 });
