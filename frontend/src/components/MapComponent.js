@@ -130,6 +130,8 @@ const MapComponent = forwardRef(({
   const [forecastVisible, setForecastVisible] = useState(false);
   const [isForecastPlaying, setIsForecastPlaying] = useState(false);
   const [forecastTitle, setForecastTitle] = useState('Ignis Forecast Timeline');
+  const [isForecastLoading, setIsForecastLoading] = useState(false);
+  const [forecastError, setForecastError] = useState(null);
 
   // Historical fire testing state
   const [showHistPanel, setShowHistPanel] = useState(false);
@@ -314,38 +316,43 @@ const MapComponent = forwardRef(({
     stepHours = 6,
     fitBounds = true,
   }) => {
-    const response = await retryPrediction('Forecast timeline', () =>
-      predictFireSpreadMultistep({
-        lat,
-        lon,
-        thr: 0.01,
-        Tseq: 1,
-        date,
-        steps,
-        stepHours,
-      })
-    );
-    const payload = response?.data ?? response;
+    setIsForecastLoading(true);
+    setForecastError(null);
+    try {
+      const response = await retryPrediction('Forecast timeline', () =>
+        predictFireSpreadMultistep({
+          lat,
+          lon,
+          thr: 0.01,
+          Tseq: 1,
+          date,
+          steps,
+          stepHours,
+        })
+      );
+      const payload = response?.data ?? response;
 
-    const prepared = await prepareMultistepRasterFrames(payload, {
-      gamma: 0.7,
-      opacity: 0.75,
-      smooth: true,
-    });
+      const prepared = await prepareMultistepRasterFrames(payload, {
+        opacity: 0.75,
+        smooth: true,
+      });
 
-    const firstFrame = prepared.frames[0];
-    await renderPredictionRasterFrame(mapRef.current, firstFrame);
-    if (fitBounds && firstFrame?.bounds) {
-      const [w, s, e, n] = firstFrame.bounds;
-      mapRef.current?.fitBounds?.([[w, s], [e, n]], { padding: 40, duration: 800 });
+      const firstFrame = prepared.frames[0];
+      await renderPredictionRasterFrame(mapRef.current, firstFrame);
+      if (fitBounds && firstFrame?.bounds) {
+        const [w, s, e, n] = firstFrame.bounds;
+        mapRef.current?.fitBounds?.([[w, s], [e, n]], { padding: 40, duration: 800 });
+      }
+
+      setForecastTitle(title);
+      setForecastFrames(prepared.frames);
+      setActiveForecastIndex(0);
+      setIsForecastPlaying(false);
+      setForecastVisible(true);
+      return prepared;
+    } finally {
+      setIsForecastLoading(false);
     }
-
-    setForecastTitle(title);
-    setForecastFrames(prepared.frames);
-    setActiveForecastIndex(0);
-    setIsForecastPlaying(false);
-    setForecastVisible(true);
-    return prepared;
   }, [retryPrediction]);
 
   // ---------- Prediction ----------
@@ -356,7 +363,9 @@ const MapComponent = forwardRef(({
       if (activePopup) activePopup.remove();
       clearForecastTimeline();
 
-      const [prediction] = await Promise.all([
+      // Run both concurrently but handle failures independently so one
+      // failing doesn't silently swallow the other's result.
+      const [predResult, forecastResult] = await Promise.allSettled([
         retryPrediction('Prediction summary', () =>
           predictFireSpread({
             lat: fireProps.latitude,
@@ -372,22 +381,31 @@ const MapComponent = forwardRef(({
         }),
       ]);
 
-      showPredictionPopup(fireProps, prediction);
-    } catch (error) {
-      console.error('Failed to predict fire spread:', error);
-      const map = mapRef.current;
-      if (map) {
-        const popup = new mapboxgl.Popup()
-          .setLngLat([fireProps.longitude, fireProps.latitude])
-          .setHTML(`
-            <div class="wildfire-popup">
-              <h4>${getSeverityIcon(fireProps.brightnessCat)} ${fireProps.brightnessCat} Fire</h4>
-              <p>Error predicting fire spread. Please try again.</p>
-            </div>
-          `)
-          .addTo(map);
-        setActivePopup(popup);
+      if (predResult.status === 'fulfilled') {
+        showPredictionPopup(fireProps, predResult.value);
+      } else {
+        console.error('Failed to predict fire spread:', predResult.reason);
+        const map = mapRef.current;
+        if (map) {
+          const popup = new mapboxgl.Popup()
+            .setLngLat([fireProps.longitude, fireProps.latitude])
+            .setHTML(`
+              <div class="wildfire-popup">
+                <h4>${getSeverityIcon(fireProps.brightnessCat)} ${fireProps.brightnessCat} Fire</h4>
+                <p>Error predicting fire spread. Please try again.</p>
+              </div>
+            `)
+            .addTo(map);
+          setActivePopup(popup);
+        }
       }
+
+      if (forecastResult.status === 'rejected') {
+        console.error('Forecast timeline failed:', forecastResult.reason);
+        setForecastError(forecastResult.reason?.message || 'Forecast failed. Please try again.');
+      }
+    } catch (error) {
+      console.error('Unexpected prediction error:', error);
     } finally {
       setIsPredicting(false);
     }
@@ -574,6 +592,7 @@ const MapComponent = forwardRef(({
       setActivePopup(popup);
     } catch (e) {
       console.error('Historical prediction error:', e);
+      setForecastError(e?.message || 'Historical forecast failed. Please try again.');
     } finally {
       setHistRunning(false);
     }
@@ -895,6 +914,21 @@ const MapComponent = forwardRef(({
       .forecast-btn.primary { background: #ff7b2f; color: #111; }
       .forecast-btn.primary:hover { background: #ff944f; }
       .forecast-btn.ghost { background: transparent; border: 1px solid rgba(255,255,255,0.16); }
+      .forecast-loading-bar {
+        height: 4px; border-radius: 2px; margin-top: 14px; overflow: hidden;
+        background: #2e343b;
+      }
+      .forecast-loading-bar::after {
+        content: ''; display: block; height: 100%;
+        background: linear-gradient(90deg, transparent 0%, #ff7b2f 40%, #ffb347 60%, transparent 100%);
+        background-size: 200% 100%;
+        animation: forecast-shimmer 1.4s ease-in-out infinite;
+      }
+      @keyframes forecast-shimmer {
+        0%   { background-position: 200% 0; }
+        100% { background-position: -200% 0; }
+      }
+      .forecast-error-msg { color: #ff6b6b; font-size: 12px; margin-top: 8px; }
     `;
     document.head.appendChild(style);
     return () => { document.head.removeChild(style); };
@@ -946,6 +980,30 @@ const MapComponent = forwardRef(({
           >
             {histRunning ? 'Running...' : 'Run Custom Date'}
           </button>
+        </div>
+      )}
+      {isForecastLoading && (
+        <div className="forecast-panel" data-testid="forecast-loading">
+          <div className="forecast-header">
+            <div className="forecast-title">Loading Forecast…</div>
+          </div>
+          <div className="forecast-meta">Preparing fire spread timeline</div>
+          <div className="forecast-loading-bar" />
+        </div>
+      )}
+      {forecastError && !forecastVisible && !isForecastLoading && (
+        <div className="forecast-panel" data-testid="forecast-error">
+          <div className="forecast-header">
+            <div className="forecast-title">Forecast Unavailable</div>
+            <button
+              className="forecast-btn ghost"
+              onClick={() => setForecastError(null)}
+              aria-label="Dismiss forecast error"
+            >
+              Dismiss
+            </button>
+          </div>
+          <div className="forecast-error-msg">{forecastError}</div>
         </div>
       )}
       {forecastVisible && activeForecastFrame && (
