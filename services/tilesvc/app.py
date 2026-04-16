@@ -234,12 +234,11 @@ def _window_coordinates(
     H, W = shape
     try:
         minx, miny, maxx, maxy = tile_bounds_albers(lonlat_to_tile(lon, lat))
-        pixel_w = (maxx - minx) / float(max(W, 1))
-        pixel_h = (maxy - miny) / float(max(H, 1))
-        west_m = minx + x0 * pixel_w
-        east_m = minx + x1 * pixel_w
-        north_m = maxy - y0 * pixel_h
-        south_m = maxy - y1 * pixel_h
+        # Use PIX directly — same grid constant the model was trained with
+        west_m = minx + x0 * PIX
+        east_m = minx + x1 * PIX
+        north_m = maxy - y0 * PIX
+        south_m = maxy - y1 * PIX
         corners_m = [
             (west_m, north_m),
             (east_m, north_m),
@@ -399,10 +398,9 @@ def _point_pixel_for_raster(
         tile = lonlat_to_tile(lon, lat)
         minx, miny, maxx, maxy = tile_bounds_albers(tile)
         x_m, y_m = lonlat_to_xy_m(lon, lat)
-        pixel_w = (maxx - minx) / float(max(W, 1))
-        pixel_h = (maxy - miny) / float(max(H, 1))
-        x = int(round((x_m - minx) / pixel_w))
-        y = int(round((maxy - y_m) / pixel_h))
+        # Use the grid constant PIX directly — avoids coupling to image dimensions
+        x = int(round((x_m - minx) / PIX))
+        y = int(round((maxy - y_m) / PIX))
     except Exception:
         w, s, e, n = bounds
         dx = (e - w) / float(W)
