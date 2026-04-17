@@ -23,7 +23,7 @@ from .grid import (
     lonlat_to_xy_m,
     PIX,
 )
-from .dynamic_builder import build_dynamic_for_tile, fetch_weather_grids
+from .dynamic_builder import DEFAULT_DYNAMIC_ORDER, build_dynamic_for_tile, fetch_weather_grids
 from .static_builder import load_static_for_tile, CHANNEL_ORDER
 
 import rasterio
@@ -54,10 +54,26 @@ MODEL_CD = int(os.getenv("MODEL_CD", "7"))
 MODEL_CS = int(os.getenv("MODEL_CS", "15"))
 MODEL_HIDDEN = int(os.getenv("MODEL_HIDDEN", "128"))
 MODEL_LSTM_LAYERS = int(os.getenv("MODEL_LSTM_LAYERS", "1"))
+MODEL_CONFIG_PATH = os.getenv("MODEL_CONFIG_PATH") or str(Path(__file__).with_name("model_config.default.json"))
 PRED_SMOOTH_SIGMA = float(os.getenv("PRED_SMOOTH_SIGMA", "1.5"))
 PRED_UPSCALE = int(os.getenv("PRED_UPSCALE", "6"))
 
 _model = None
+_model_meta = None
+
+
+def _csv_env(name: str, default: List[str]) -> List[str]:
+    raw = os.getenv(name)
+    if not raw:
+        return list(default)
+    parsed = [part.strip() for part in raw.split(",") if part.strip()]
+    return parsed or list(default)
+
+
+MODEL_TSEQ = int(os.getenv("MODEL_TSEQ", "1"))
+MODEL_STEP_HOURS = int(os.getenv("MODEL_STEP_HOURS", "24"))
+MODEL_DYNAMIC_ORDER = _csv_env("MODEL_DYNAMIC_ORDER", DEFAULT_DYNAMIC_ORDER)
+MODEL_STATIC_ORDER = _csv_env("MODEL_STATIC_ORDER", CHANNEL_ORDER)
 
 
 def _try_parse_from_filename(path: str) -> Tuple[Optional[int], Optional[int], Optional[int], Optional[int]]:
@@ -66,6 +82,17 @@ def _try_parse_from_filename(path: str) -> Tuple[Optional[int], Optional[int], O
     if not m:
         return None, None, None, None
     return int(m.group(1)), int(m.group(2)), int(m.group(3)), int(m.group(4))
+
+
+_filename_cd, _filename_cs, _filename_h, _filename_t = _try_parse_from_filename(MODEL_PATH)
+if _filename_cd and os.getenv("MODEL_CD") is None:
+    MODEL_CD = _filename_cd
+if _filename_cs and os.getenv("MODEL_CS") is None:
+    MODEL_CS = _filename_cs
+if _filename_h and os.getenv("MODEL_HIDDEN") is None:
+    MODEL_HIDDEN = _filename_h
+if _filename_t and os.getenv("MODEL_TSEQ") is None:
+    MODEL_TSEQ = _filename_t
 
 
 def _extract_bounds_from_grid(grid: Any, lat: float, lon: float) -> Tuple[float, float, float, float]:
@@ -97,11 +124,159 @@ def _extract_bounds_from_grid(grid: Any, lat: float, lon: float) -> Tuple[float,
     return (lon - half, lat - half, lon + half, lat + half)
 
 
+def _load_model_config_file() -> Dict[str, Any]:
+    if not MODEL_CONFIG_PATH:
+        return {}
+    try:
+        with open(MODEL_CONFIG_PATH, "r") as f:
+            if MODEL_CONFIG_PATH.endswith((".yml", ".yaml")):
+                # Avoid adding a YAML dependency to the service; JSON is the supported config format.
+                raise RuntimeError("MODEL_CONFIG_PATH must be JSON unless PyYAML is added")
+            return json.load(f)
+    except Exception as exc:
+        print(f"⚠️  Failed to load MODEL_CONFIG_PATH={MODEL_CONFIG_PATH}: {exc}")
+        return {}
+
+
+def _list_from_meta(meta: Dict[str, Any], *keys: str) -> Optional[List[str]]:
+    for key in keys:
+        value = meta.get(key)
+        if isinstance(value, str):
+            parsed = [part.strip() for part in value.split(",") if part.strip()]
+            if parsed:
+                return parsed
+        if isinstance(value, (list, tuple)) and value:
+            return [str(part) for part in value]
+    return None
+
+
+def _apply_model_metadata(meta: Dict[str, Any], source: str) -> None:
+    global MODEL_CD, MODEL_CS, MODEL_HIDDEN, MODEL_LSTM_LAYERS, MODEL_THRESHOLD
+    global MODEL_TSEQ, MODEL_STEP_HOURS, MODEL_DYNAMIC_ORDER, MODEL_STATIC_ORDER
+
+    if not isinstance(meta, dict) or not meta:
+        return
+
+    source_str = str(source or "")
+    checkpoint_wins = source_str == MODEL_PATH or source_str.endswith((".pt", ".pth"))
+
+    if meta.get("cd") is not None and (checkpoint_wins or os.getenv("MODEL_CD") is None):
+        MODEL_CD = int(meta["cd"])
+    if meta.get("cs") is not None and (checkpoint_wins or os.getenv("MODEL_CS") is None):
+        MODEL_CS = int(meta["cs"])
+    if meta.get("hidden") is not None and (checkpoint_wins or os.getenv("MODEL_HIDDEN") is None):
+        MODEL_HIDDEN = int(meta["hidden"])
+    if meta.get("lstm_layers") is not None and (checkpoint_wins or os.getenv("MODEL_LSTM_LAYERS") is None):
+        MODEL_LSTM_LAYERS = int(meta["lstm_layers"])
+    if meta.get("best_threshold") is not None and (checkpoint_wins or os.getenv("MODEL_THRESHOLD") is None):
+        MODEL_THRESHOLD = float(meta["best_threshold"])
+    if meta.get("threshold") is not None and (checkpoint_wins or os.getenv("MODEL_THRESHOLD") is None):
+        MODEL_THRESHOLD = float(meta["threshold"])
+    seq_len = meta.get("seq_len", meta.get("Tseq", meta.get("tseq", meta.get("T"))))
+    if seq_len is not None and (checkpoint_wins or os.getenv("MODEL_TSEQ") is None):
+        MODEL_TSEQ = int(seq_len)
+    step_hours = meta.get("step_hours", meta.get("hours_step"))
+    if step_hours is not None and (checkpoint_wins or os.getenv("MODEL_STEP_HOURS") is None):
+        MODEL_STEP_HOURS = int(step_hours)
+
+    dyn_order = _list_from_meta(meta, "dyn_order", "dynamic_order", "dynamic_channels")
+    if dyn_order and (checkpoint_wins or os.getenv("MODEL_DYNAMIC_ORDER") is None):
+        MODEL_DYNAMIC_ORDER = dyn_order
+
+    stat_order = _list_from_meta(meta, "stat_order", "static_order", "static_channels")
+    if stat_order and (checkpoint_wins or os.getenv("MODEL_STATIC_ORDER") is None):
+        MODEL_STATIC_ORDER = stat_order
+
+    print(f"[tilesvc] Applied model metadata from {source}")
+
+
+def _checkpoint_metadata_from_obj(ckpt: Any) -> Dict[str, Any]:
+    if isinstance(ckpt, dict):
+        return {
+            k: v
+            for k, v in ckpt.items()
+            if k not in {"state_dict", "model_state_dict", "optimizer", "scheduler"}
+            and not hasattr(v, "shape")
+        }
+    return {}
+
+
+def _model_metadata(config_status: str = None) -> Dict[str, Any]:
+    extra = _model_meta or {}
+    meta = {
+        "model_path": MODEL_PATH,
+        "model_exists": os.path.exists(MODEL_PATH),
+        "device": str(DEVICE),
+        "Cd": MODEL_CD,
+        "Cs": MODEL_CS,
+        "hidden": MODEL_HIDDEN,
+        "lstm_layers": MODEL_LSTM_LAYERS,
+        "threshold": MODEL_THRESHOLD,
+        "Tseq": MODEL_TSEQ,
+        "step_hours": MODEL_STEP_HOURS,
+        "dynamic_order": list(MODEL_DYNAMIC_ORDER),
+        "static_order": list(MODEL_STATIC_ORDER),
+        "metadata_source": extra.get("config_source"),
+        "config_status": config_status or (
+            "explicit_or_checkpoint" if (_model_meta or MODEL_CONFIG_PATH) else "environment_or_filename_defaults"
+        ),
+    }
+    for key in ("model_name", "production_valid", "static_placeholders", "normalization", "metadata_notes"):
+        if key in extra and extra[key] is not None:
+            meta[key] = extra[key]
+    return meta
+
+
+def _ensure_model_metadata_loaded(load_checkpoint: bool = True) -> None:
+    global _model_meta
+    if _model_meta is not None:
+        return
+
+    config_meta = _load_model_config_file()
+    if config_meta:
+        _apply_model_metadata(config_meta, MODEL_CONFIG_PATH or "MODEL_CONFIG_PATH")
+
+    checkpoint_meta = {}
+    if load_checkpoint and os.path.exists(MODEL_PATH):
+        try:
+            ckpt = torch.load(MODEL_PATH, map_location="cpu")
+            checkpoint_meta = _checkpoint_metadata_from_obj(ckpt)
+            if checkpoint_meta:
+                _apply_model_metadata(checkpoint_meta, MODEL_PATH)
+        except Exception as exc:
+            print(f"⚠️  Failed to read checkpoint metadata from {MODEL_PATH}: {exc}")
+
+    status = "checkpoint" if checkpoint_meta else ("config_file" if config_meta else "environment_or_filename_defaults")
+    merged_meta = {**config_meta, **checkpoint_meta}
+    _model_meta = {
+        "config_source": status,
+        "checkpoint_meta_keys": sorted(checkpoint_meta.keys()),
+        "config_meta_keys": sorted(config_meta.keys()),
+        "model_name": merged_meta.get("model_name") or merged_meta.get("name"),
+        "production_valid": merged_meta.get("production_valid"),
+        "static_placeholders": _list_from_meta(
+            merged_meta,
+            "static_placeholders",
+            "placeholder_static_channels",
+            "unavailable_static_channels",
+        ) or [],
+        "normalization": merged_meta.get("normalization"),
+        "metadata_notes": merged_meta.get("notes"),
+    }
+
+
+_initial_config_meta = _load_model_config_file()
+if _initial_config_meta:
+    _apply_model_metadata(_initial_config_meta, MODEL_CONFIG_PATH or "MODEL_CONFIG_PATH")
+
+
 def _load_model_once():
     global _model, MODEL_CD, MODEL_CS, MODEL_HIDDEN, MODEL_LSTM_LAYERS
 
     if _model is not None:
         return _model
+
+    _ensure_model_metadata_loaded(load_checkpoint=True)
 
     if not os.path.exists(MODEL_PATH):
         print(f"⚠️  MODEL_PATH does not exist: {MODEL_PATH}")
@@ -131,6 +306,9 @@ def _load_model_once():
     )
 
     ckpt = torch.load(MODEL_PATH, map_location=DEVICE)
+    checkpoint_meta = _checkpoint_metadata_from_obj(ckpt)
+    if checkpoint_meta:
+        _apply_model_metadata(checkpoint_meta, MODEL_PATH)
 
     if isinstance(ckpt, torch.nn.Module):
         model = ckpt
@@ -141,7 +319,13 @@ def _load_model_once():
         for k, v in state.items():
             nk = k[7:] if isinstance(k, str) and k.startswith("module.") else k
             cleaned[nk] = v
-        model.load_state_dict(cleaned, strict=False)
+        incompat = model.load_state_dict(cleaned, strict=False)
+        if getattr(incompat, "missing_keys", None) or getattr(incompat, "unexpected_keys", None):
+            print(
+                "⚠️  Model state_dict loaded with mismatches: "
+                f"missing={getattr(incompat, 'missing_keys', [])}, "
+                f"unexpected={getattr(incompat, 'unexpected_keys', [])}"
+            )
         model.to(DEVICE)
     else:
         raise RuntimeError(f"Unsupported checkpoint type: {type(ckpt)}")
@@ -176,11 +360,87 @@ def _resolve_prediction_time(ref_time: Optional[dt.datetime]) -> dt.datetime:
 
 def _load_static_tensor(tile: Any) -> np.ndarray:
     stat_dict = load_static_for_tile(tile)
+    aliases = {
+        "NDVI": "ndvi",
+        "BI": "bli",
+        "BLI": "bli",
+        "ERC": "erc",
+        "PDSI": "pdsi",
+        "CHILI": "chili",
+    }
+    arrays = []
+    missing = []
+    for key in MODEL_STATIC_ORDER:
+        value = stat_dict.get(key)
+        if value is None and aliases.get(key) is not None:
+            value = stat_dict.get(aliases[key])
+        if value is None:
+            missing.append(key)
+            continue
+        arrays.append(np.asarray(value, np.float32))
+    if missing:
+        raise RuntimeError(f"Static channel missing: {missing}; have keys={list(stat_dict.keys())}")
     try:
-        return np.stack([np.asarray(stat_dict[k], np.float32) for k in CHANNEL_ORDER], axis=0)
+        return np.stack(arrays, axis=0)
     except KeyError as e:
         missing = str(e)
         raise RuntimeError(f"Static channel missing: {missing}; have keys={list(stat_dict.keys())}")
+
+
+def _channel_stats(arr: np.ndarray) -> Dict[str, Any]:
+    a = np.asarray(arr, dtype=np.float32)
+    finite = np.isfinite(a)
+    if not finite.any():
+        return {"min": None, "mean": None, "max": None, "pct_zero": None, "finite": False}
+    vals = a[finite]
+    return {
+        "min": float(vals.min()),
+        "mean": float(vals.mean()),
+        "max": float(vals.max()),
+        "pct_zero": float((vals == 0).mean()),
+        "finite": True,
+    }
+
+
+def _tensor_input_summary(
+    dyn: np.ndarray,
+    stat: np.ndarray,
+    *,
+    bounds: Tuple[float, float, float, float],
+    base_time: dt.datetime,
+) -> Dict[str, Any]:
+    critical_static = {
+        "NDVI", "BI", "ERC", "PDSI", "CHILI",
+        "ndvi", "bi", "erc", "pdsi", "chili",
+        "fuel1", "fuel2", "fuel3", "water", "impervious", "population",
+    }
+    dynamic_channels = {
+        name: _channel_stats(dyn[:, idx, :, :])
+        for idx, name in enumerate(MODEL_DYNAMIC_ORDER)
+    }
+    static_channels = {
+        name: {
+            **_channel_stats(stat[idx]),
+            "placeholder_or_missing": (
+                name in critical_static and float((np.asarray(stat[idx]) == 0).mean()) > 0.999
+            ),
+        }
+        for idx, name in enumerate(MODEL_STATIC_ORDER)
+    }
+    return {
+        "dyn_shape": list(dyn.shape),
+        "stat_shape": list(stat.shape),
+        "bounds": [float(v) for v in bounds],
+        "base_time": base_time.isoformat(),
+        "dynamic_order": list(MODEL_DYNAMIC_ORDER),
+        "static_order": list(MODEL_STATIC_ORDER),
+        "dynamic_channels": dynamic_channels,
+        "static_channels": static_channels,
+        "missing_or_placeholder_static": [
+            name for name, stats in static_channels.items()
+            if stats.get("placeholder_or_missing")
+        ],
+    }
 
 
 def _postprocess_probability(prob: np.ndarray) -> np.ndarray:
@@ -294,6 +554,7 @@ def _prepare_prediction_inputs(
     ref_time: Optional[dt.datetime] = None,
     hours_step: int = 24,
 ) -> Tuple[np.ndarray, np.ndarray, Tuple[float, float, float, float], dt.datetime]:
+    _ensure_model_metadata_loaded(load_checkpoint=True)
     tile, _, bounds = build_grid(lat, lon)
     dyn = build_dynamic_for_tile(
         lat,
@@ -302,6 +563,7 @@ def _prepare_prediction_inputs(
         hours_step=hours_step,
         ignition=ignition,
         ref_time=ref_time,
+        channel_order=MODEL_DYNAMIC_ORDER,
     )
     stat = _load_static_tensor(tile)
     return dyn, stat, bounds, _resolve_prediction_time(ref_time)
@@ -337,12 +599,6 @@ def _prob_to_grayscale(prob: np.ndarray, threshold: float = None) -> np.ndarray:
 
     if threshold is not None:
         p = np.where(p >= float(threshold), p, 0.0)
-
-    pmin = float(p[p > 0].min()) if (p > 0).any() else 0.0
-    pmax = float(p.max())
-    if pmax > pmin:
-        normalized = np.where(p > 0, (p - pmin) / (pmax - pmin), 0.0)
-        return (normalized * 255.0).astype(np.uint8)
     return (p * 255.0).astype(np.uint8)
 
 
@@ -700,11 +956,21 @@ def _rollout_multistep_predictions(
         next_time = base_time + dt.timedelta(hours=lead_hours)
         wx = fetch_weather_grids(lat, lon, ref_time=next_time)
         next_fire = _resize_prob_to_shape(prob, current_dyn.shape[-2:])
-        next_slice = np.stack([
-            np.clip(next_fire, 0.0, 1.0),
-            wx["u"], wx["v"], wx["gust"],
-            wx["tempC"], wx["q"], wx["precip"],
-        ], axis=0).astype(np.float32)
+        zero = np.zeros_like(next_fire, dtype=np.float32)
+        channels = {
+            "fire_t": np.clip(next_fire, 0.0, 1.0),
+            "frp": zero,
+            "u": wx["u"],
+            "v": wx["v"],
+            "gust": wx["gust"],
+            "temp": wx["temp"],
+            "tempC": wx["tempC"],
+            "rh": wx["rh"],
+            "q": wx["q"],
+            "prcp": wx["prcp"],
+            "precip": wx["precip"],
+        }
+        next_slice = np.stack([channels[name] for name in MODEL_DYNAMIC_ORDER], axis=0).astype(np.float32)
         if current_dyn.shape[0] == 1:
             current_dyn = next_slice[None, ...]
         else:
@@ -723,6 +989,7 @@ def health():
 
 @app.get("/healthz")
 def healthz():
+    _ensure_model_metadata_loaded(load_checkpoint=False)
     model_exists = os.path.exists(MODEL_PATH)
     return {
         "ok": True,
@@ -734,6 +1001,10 @@ def healthz():
         "hidden": MODEL_HIDDEN,
         "lstm_layers": MODEL_LSTM_LAYERS,
         "threshold": MODEL_THRESHOLD,
+        "Tseq": MODEL_TSEQ,
+        "step_hours": MODEL_STEP_HOURS,
+        "dynamic_order": MODEL_DYNAMIC_ORDER,
+        "static_order": MODEL_STATIC_ORDER,
     }
 
 
@@ -744,11 +1015,36 @@ def tile_bounds_endpoint(lat: float = Query(...), lon: float = Query(...)):
     return {"bounds": [float(bounds[0]), float(bounds[1]), float(bounds[2]), float(bounds[3])]} 
 
 
+@app.get("/input_audit")
+def input_audit(
+    lat: float = Query(...),
+    lon: float = Query(...),
+    Tseq: int = Query(MODEL_TSEQ),
+    step_hours: int = Query(MODEL_STEP_HOURS),
+    ignition: bool = Query(False),
+    date: str = Query(None),
+):
+    ref_time = _parse_date_param(date)
+    dyn, stat, bounds, base_time = _prepare_prediction_inputs(
+        lat,
+        lon,
+        Tseq,
+        ignition=ignition,
+        ref_time=ref_time,
+        hours_step=step_hours,
+    )
+    return {
+        "ok": True,
+        "model_meta": _model_metadata(),
+        "input_summary": _tensor_input_summary(dyn, stat, bounds=bounds, base_time=base_time),
+    }
+
+
 @app.get("/predict")
 def predict_png(
     lat: float = Query(...),
     lon: float = Query(...),
-    Tseq: int = Query(1),
+    Tseq: int = Query(MODEL_TSEQ),
     png: bool = Query(True),
     thr: float = Query(None),
     crop_frac: float = Query(1.0),
@@ -779,7 +1075,7 @@ def predict_png(
 
 
 @app.get("/predict_raster")
-def predict_raster_png(lat: float = Query(...), lon: float = Query(...), Tseq: int = Query(1), date: str = Query(None)):
+def predict_raster_png(lat: float = Query(...), lon: float = Query(...), Tseq: int = Query(MODEL_TSEQ), date: str = Query(None)):
     ref_time = _parse_date_param(date)
     prob, bounds = _predict_probability(lat, lon, Tseq=Tseq, ref_time=ref_time)
     png = _prob_to_png(prob)
@@ -791,14 +1087,16 @@ def predict_raster_png(lat: float = Query(...), lon: float = Query(...), Tseq: i
 def predict_raster_json(
     lat: float = Query(...),
     lon: float = Query(...),
-    Tseq: int = Query(1),
+    Tseq: int = Query(MODEL_TSEQ),
     thr: float = Query(None),
     crop_frac: float = Query(0.5),
     ignition: bool = Query(False),
     date: str = Query(None),
 ):
     ref_time = _parse_date_param(date)
-    prob, bounds = _predict_probability(lat, lon, Tseq=Tseq, ignition=ignition, ref_time=ref_time)
+    dyn, stat, bounds, base_time = _prepare_prediction_inputs(lat, lon, Tseq, ignition=ignition, ref_time=ref_time)
+    input_summary = _tensor_input_summary(dyn, stat, bounds=bounds, base_time=base_time)
+    prob = _predict_probability_from_inputs(dyn, stat)
     crop_window = _build_crop_window(prob.shape, bounds, lat, lon, crop_frac)
     prob, bounds, anchor_px = _apply_crop_window(prob, crop_window)
     threshold = float(thr) if thr is not None else MODEL_THRESHOLD
@@ -813,13 +1111,16 @@ def predict_raster_json(
         "prob_mean": float(prob.mean()),
         "prob_max": float(prob.max()),
         "area_fraction": float((prob >= threshold).mean()),
+        "probability_scale": {"mode": "absolute", "min": 0.0, "max": 1.0},
+        "model_meta": _model_metadata(),
+        "input_summary": input_summary,
     }
 
 @app.get("/predict_geojson")
 def predict_geojson(
     lat: float = Query(...),
     lon: float = Query(...),
-    Tseq: int = Query(1),
+    Tseq: int = Query(MODEL_TSEQ),
     thr: float = Query(None),
     crop_frac: float = Query(0.5),
     ignition: bool = Query(False),
@@ -834,7 +1135,7 @@ def predict_geojson(
     return JSONResponse(content=gj)
 
 @app.get("/predict_raster_json_raw")
-def predict_raster_json_raw(lat: float = Query(...), lon: float = Query(...), Tseq: int = Query(1), ignition: bool = Query(True), date: str = Query(None)):
+def predict_raster_json_raw(lat: float = Query(...), lon: float = Query(...), Tseq: int = Query(MODEL_TSEQ), ignition: bool = Query(True), date: str = Query(None)):
     ref_time = _parse_date_param(date)
     prob, bounds = _predict_probability(lat, lon, Tseq=Tseq, ignition=ignition, ref_time=ref_time)
 
@@ -854,9 +1155,9 @@ def predict_raster_json_raw(lat: float = Query(...), lon: float = Query(...), Ts
 def predict_multistep(
     lat: float = Query(...),
     lon: float = Query(...),
-    Tseq: int = Query(1),
+    Tseq: int = Query(MODEL_TSEQ),
     steps: int = Query(6),
-    step_hours: int = Query(6),
+    step_hours: int = Query(MODEL_STEP_HOURS),
     thr: float = Query(None),
     crop_frac: float = Query(0.5),
     ignition: bool = Query(False),
@@ -880,7 +1181,7 @@ def predict_multistep(
     debug_dump = "dump" in debug_modes
 
     normalized_steps = max(1, int(steps))
-    debug_sink: Dict[str, Any] = {} if debug_dump else None
+    debug_sink: Dict[str, Any] = {}
 
     if debug_solid:
         # Step-1 plumbing sanity test: bypass the model entirely and produce a
@@ -905,10 +1206,9 @@ def predict_multistep(
             }
             for i in range(normalized_steps)
         ]
-        if debug_sink is not None:
-            debug_sink["dyn"] = dyn
-            debug_sink["stat"] = stat
-            debug_sink["base_time"] = base_time
+        debug_sink["dyn"] = dyn
+        debug_sink["stat"] = stat
+        debug_sink["base_time"] = base_time
     else:
         bounds, crop_window, rollout = _rollout_multistep_predictions(
             lat,
@@ -941,6 +1241,8 @@ def predict_multistep(
             "prob_mean": float(cropped.mean()),
             "prob_max": float(cropped.max()),
             "area_fraction": float((cropped >= threshold).mean()),
+            "contour": _prob_to_geojson(cropped, cropped_bounds, threshold=threshold),
+            "contour_50": _prob_to_geojson(cropped, cropped_bounds, threshold=0.5),
         })
 
     debug_payload: Dict[str, Any] = {}
@@ -975,6 +1277,14 @@ def predict_multistep(
         "threshold": threshold,
         "step_hours": int(step_hours),
         "steps": payload_steps,
+        "probability_scale": {"mode": "absolute", "min": 0.0, "max": 1.0},
+        "model_meta": _model_metadata(),
+        "input_summary": _tensor_input_summary(
+            debug_sink["dyn"],
+            debug_sink["stat"],
+            bounds=bounds,
+            base_time=debug_sink["base_time"],
+        ),
     }
     if debug_modes:
         debug_payload["modes"] = sorted(debug_modes)
