@@ -435,7 +435,22 @@ def _build_crop_window(
         x1 = x0 + crop_w
         y1 = y0 + crop_h
 
-        # clamp to bounds
+        # Slide the window inward when it extends past a tile boundary so
+        # the crop stays full-size and the fire doesn't end up at the edge.
+        if x1 > W:
+            x0 -= (x1 - W)
+            x1 = W
+        if x0 < 0:
+            x1 += (-x0)
+            x0 = 0
+        if y1 > H:
+            y0 -= (y1 - H)
+            y1 = H
+        if y0 < 0:
+            y1 += (-y0)
+            y0 = 0
+
+        # Final safety clamp (handles tile smaller than crop_w)
         x0 = max(0, x0)
         y0 = max(0, y0)
         x1 = min(W, x1)
@@ -475,6 +490,8 @@ def _radial_alpha_mask(shape: Tuple[int, int], anchor_px: Tuple[int, int]) -> np
     H, W = shape
     cx, cy = anchor_px
     yy, xx = np.indices((H, W), dtype=np.float32)
+
+    # Radial fade from the anchor (fire source) outward
     dist = np.sqrt((xx - float(cx)) ** 2 + (yy - float(cy)) ** 2)
     corner_dists = [
         math.hypot(float(cx), float(cy)),
@@ -484,8 +501,37 @@ def _radial_alpha_mask(shape: Tuple[int, int], anchor_px: Tuple[int, int]) -> np
     ]
     max_dist = max(max(corner_dists), 1.0)
     norm = np.clip(dist / max_dist, 0.0, 1.0)
-    fade = np.clip(1.0 - np.power(norm, 1.7), 0.0, 1.0)
-    return fade.astype(np.float32)
+    radial_fade = np.clip(1.0 - np.power(norm, 1.7), 0.0, 1.0)
+
+    # Edge vignette: fade toward all 4 borders to remove the hard rectangular
+    # frame that becomes visible when the overlay is viewed zoomed out.
+    # The fade is suppressed on any edge that the anchor is near, so the fire
+    # source itself is never darkened when it sits close to a tile boundary.
+    margin = max(3, min(W, H) // 6)
+
+    # Normalised distance from each edge (0 = at edge, 1 = >= margin inside)
+    d_left   = np.clip(xx / margin, 0.0, 1.0)
+    d_right  = np.clip((W - 1 - xx) / margin, 0.0, 1.0)
+    d_top    = np.clip(yy / margin, 0.0, 1.0)
+    d_bottom = np.clip((H - 1 - yy) / margin, 0.0, 1.0)
+
+    # How far the anchor itself is from each edge (0 = anchor at edge, 1 = far)
+    a_left   = float(np.clip(cx / margin, 0.0, 1.0))
+    a_right  = float(np.clip((W - 1 - cx) / margin, 0.0, 1.0))
+    a_top    = float(np.clip(cy / margin, 0.0, 1.0))
+    a_bottom = float(np.clip((H - 1 - cy) / margin, 0.0, 1.0))
+
+    # edge_weight = d_edge + (1 - a_edge): when anchor is AT the edge (a=0),
+    # weight is always 1 (no fade there); when anchor is far (a=1), weight
+    # equals d_edge (full fade at that border).
+    vignette = (
+        np.clip(d_left   + (1.0 - a_left),   0.0, 1.0) *
+        np.clip(d_right  + (1.0 - a_right),  0.0, 1.0) *
+        np.clip(d_top    + (1.0 - a_top),    0.0, 1.0) *
+        np.clip(d_bottom + (1.0 - a_bottom), 0.0, 1.0)
+    )
+
+    return (radial_fade * vignette).astype(np.float32)
 
 
 def _prob_to_display_png(prob: np.ndarray, threshold: float, anchor_px: Tuple[int, int]) -> bytes:
