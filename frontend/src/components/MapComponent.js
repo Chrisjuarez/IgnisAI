@@ -14,7 +14,6 @@ import {
   getWildfireData,
   getWildfireFootprints,
   getFirePerimeters,
-  predictFireSpread,
   predictFireSpreadMultistep
 } from '../api';
 import {
@@ -38,6 +37,62 @@ const API_BASE =
   '/api';
 
 const R_EARTH = 3958.8; // miles
+const OBSERVED_CELL_MAX_KM = 0.42;
+const OBSERVED_CELL_MIN_KM = 0.18;
+const DEFAULT_DISPLAY_FLOOR = 0.02;
+
+const FOOTPRINT_FILL_COLOR = [
+  'match', ['get', 'brightnessCat'],
+  'Extreme', '#d7191c',
+  'Severe',  '#f04e23',
+  'Moderate', '#fdae42',
+  '#ffd166'
+];
+const FOOTPRINT_FILL_OPACITY = [
+  'interpolate', ['linear'], ['get', 'confidencePct'],
+  0, 0.025,
+  50, 0.045,
+  100, 0.075
+];
+const FOOTPRINT_FILL_OPACITY_FORECAST = [
+  'interpolate', ['linear'], ['get', 'confidencePct'],
+  0, 0.0,
+  100, 0.0
+];
+const FOOTPRINT_LINE_COLOR = [
+  'match', ['get', 'instrument'],
+  'MODIS', '#ffe0b2',
+  '#fff3cf'
+];
+const FOOTPRINT_LINE_WIDTH = [
+  'match', ['get', 'footprint_source'],
+  'firms_scan_track', 0.9,
+  0.45
+];
+const OBSERVED_CELL_FILL_OPACITY = [
+  'interpolate', ['linear'], ['get', 'confidencePct'],
+  0, 0.18,
+  50, 0.36,
+  100, 0.62
+];
+const OBSERVED_CELL_FILL_OPACITY_FORECAST = [
+  'interpolate', ['linear'], ['get', 'confidencePct'],
+  0, 0.05,
+  100, 0.16
+];
+const POINT_CIRCLE_OPACITY = [
+  'interpolate', ['linear'], ['get', 'confidencePct'],
+  0, 0.08,
+  50, 0.18,
+  100, 0.28
+];
+const POINT_CIRCLE_OPACITY_FORECAST = [
+  'interpolate', ['linear'], ['get', 'confidencePct'],
+  0, 0.03,
+  100, 0.10
+];
+const PERIMETER_FILL_OPACITY = 0.08;
+const PERIMETER_FILL_OPACITY_FORECAST = 0.045;
 
 // ---- Helpers ----------------------------------------------------------------
 function getBrightnessCategory(b) {
@@ -173,6 +228,89 @@ function filterFootprintCollection(collection, brightnessFilter, confidenceFilte
   };
 }
 
+function fireMatchesFilters(fire, brightnessFilter, confidenceFilter) {
+  const b = getBrightnessCategory(fire.brightness);
+  const pct = confidenceToPercent(fire.confidence);
+  const c = bracketConfidence(pct);
+  return (!brightnessFilter || brightnessFilter === b)
+    && (!confidenceFilter || confidenceFilter === c);
+}
+
+function normalizedFireProperties(fire) {
+  const pct = confidenceToPercent(fire.confidence);
+  const brightnessCat = getBrightnessCategory(fire.brightness);
+  const predictable = (fire.predictable === true) || (fire.brightness >= 325 && pct >= 50);
+  return {
+    brightnessCat,
+    confidencePct: pct,
+    confidence: pct,
+    predictable,
+    timestamp: fire.timestamp,
+    brightness: fire.brightness,
+    frp: fire.frp,
+    scan: fire.scan,
+    track: fire.track,
+    satellite: fire.satellite,
+    instrument: fire.instrument,
+    product: fire.product,
+    daynight: fire.daynight,
+    latitude: fire.latitude,
+    longitude: fire.longitude
+  };
+}
+
+function observedCellSizeKm(fire) {
+  const scan = Number(fire.scan);
+  const track = Number(fire.track);
+  const nominal = String(fire.product || fire.instrument || '').toUpperCase().includes('MODIS') ? 0.50 : 0.32;
+  const sourceSize = Math.max(
+    Number.isFinite(scan) && scan > 0 ? scan : nominal,
+    Number.isFinite(track) && track > 0 ? track : nominal,
+  );
+  return Math.max(OBSERVED_CELL_MIN_KM, Math.min(OBSERVED_CELL_MAX_KM, sourceSize));
+}
+
+function fireToObservedCellFeature(fire) {
+  const lat = Number(fire.latitude);
+  const lon = Number(fire.longitude);
+  if (!Number.isFinite(lat) || !Number.isFinite(lon)) return null;
+
+  const sizeKm = observedCellSizeKm(fire);
+  const halfLat = (sizeKm / 111.32) / 2;
+  const lonKm = Math.max(0.1, 111.32 * Math.cos((lat * Math.PI) / 180));
+  const halfLon = (sizeKm / lonKm) / 2;
+  const props = normalizedFireProperties(fire);
+  return {
+    type: 'Feature',
+    geometry: {
+      type: 'Polygon',
+      coordinates: [[
+        [lon - halfLon, lat + halfLat],
+        [lon + halfLon, lat + halfLat],
+        [lon + halfLon, lat - halfLat],
+        [lon - halfLon, lat - halfLat],
+        [lon - halfLon, lat + halfLat],
+      ]]
+    },
+    properties: {
+      ...props,
+      observed_cell_km: sizeKm,
+      display_geometry: 'firms_detection_cell',
+    }
+  };
+}
+
+function observedCellCollection(dataArray, brightnessFilter, confidenceFilter) {
+  const fires = Array.isArray(dataArray) ? dataArray : [];
+  return {
+    type: 'FeatureCollection',
+    features: fires
+      .filter(fire => fireMatchesFilters(fire, brightnessFilter, confidenceFilter))
+      .map(fireToObservedCellFeature)
+      .filter(Boolean),
+  };
+}
+
 // ---- Component --------------------------------------------------------------
 const MapComponent = forwardRef(({
   brightnessFilter,
@@ -187,6 +325,7 @@ const MapComponent = forwardRef(({
   const mapContainerRef = useRef();
   const mapRef          = useRef();
   const clickHandlerRef = useRef();
+  const perimeterClickHandlerRef = useRef();
 
   const [wildfires, setWildfires]       = useState([]);
   const [wildfireFootprints, setWildfireFootprints] = useState(emptyFeatureCollection);
@@ -288,44 +427,26 @@ const MapComponent = forwardRef(({
     const src = map.getSource('wildfires-source');
     if (!src) return;
 
-    const filtered = dataArray.filter(f => {
-      const b = getBrightnessCategory(f.brightness);
-      const pct = confidenceToPercent(f.confidence);
-      const c = bracketConfidence(pct);
-      return (!brightnessFilter || brightnessFilter === b)
-          && (!confidenceFilter || confidenceFilter === c);
-    });
+    const filtered = dataArray.filter(f => fireMatchesFilters(f, brightnessFilter, confidenceFilter));
     onFiresUpdated?.(filtered.length);
 
     src.setData({
       type: 'FeatureCollection',
-      features: filtered.map(f => {
-        const pct = confidenceToPercent(f.confidence);
-        const brightnessCat = getBrightnessCategory(f.brightness);
-        // Predictability heuristic (also provided by backend in newer version)
-        const predictable = (f.predictable === true) || (f.brightness >= 325 && pct >= 50);
-        return {
-          type: 'Feature',
-          geometry: { type: 'Point', coordinates: [f.longitude, f.latitude] },
-          properties: {
-            brightnessCat,
-            confidencePct: pct,           // store as 0..100 for UI
-            predictable,
-            timestamp: f.timestamp,
-            brightness: f.brightness,
-            frp: f.frp,
-            scan: f.scan,
-            track: f.track,
-            satellite: f.satellite,
-            instrument: f.instrument,
-            product: f.product,
-            daynight: f.daynight,
-            latitude: f.latitude,
-            longitude: f.longitude
-          }
-        };
-      })
+      features: filtered.map(f => ({
+        type: 'Feature',
+        geometry: { type: 'Point', coordinates: [f.longitude, f.latitude] },
+        properties: normalizedFireProperties(f)
+      }))
     });
+    updateObservedFireCellsSource(dataArray);
+  }
+
+  function updateObservedFireCellsSource(dataArray = wildfires) {
+    const map = mapRef.current;
+    if (!map) return;
+    const src = map.getSource('observed-fire-cells-source');
+    if (!src) return;
+    src.setData(observedCellCollection(dataArray, brightnessFilter, confidenceFilter));
   }
 
   function updateWildfireFootprintsSource(data = wildfireFootprints) {
@@ -343,6 +464,26 @@ const MapComponent = forwardRef(({
     if (!src) return;
     const geojson = data?.type === 'FeatureCollection' ? data : emptyFeatureCollection();
     src.setData(geojson);
+  }
+
+  function setObservedLayerMode(mode = 'normal') {
+    const map = mapRef.current;
+    if (!map) return;
+    const isForecast = mode === 'forecast';
+    const paint = [
+      ['observed-fire-cells-fill', 'fill-opacity', isForecast ? OBSERVED_CELL_FILL_OPACITY_FORECAST : OBSERVED_CELL_FILL_OPACITY],
+      ['observed-fire-cells-outline', 'line-opacity', isForecast ? 0.35 : 0.78],
+      ['wildfire-footprints-fill', 'fill-opacity', isForecast ? FOOTPRINT_FILL_OPACITY_FORECAST : FOOTPRINT_FILL_OPACITY],
+      ['wildfire-footprints-outline', 'line-opacity', isForecast ? 0.0 : 0.30],
+      ['wildfires-layer', 'circle-opacity', isForecast ? POINT_CIRCLE_OPACITY_FORECAST : POINT_CIRCLE_OPACITY],
+      ['fire-perimeters-fill', 'fill-opacity', isForecast ? PERIMETER_FILL_OPACITY_FORECAST : PERIMETER_FILL_OPACITY],
+      ['fire-perimeters-outline', 'line-opacity', isForecast ? 0.72 : 0.90],
+    ];
+    paint.forEach(([layerId, property, value]) => {
+      if (map.getLayer(layerId)) {
+        try { map.setPaintProperty(layerId, property, value); } catch (_) {}
+      }
+    });
   }
 
   function updateUserSource() {
@@ -433,6 +574,7 @@ const MapComponent = forwardRef(({
     setForecastFrames([]);
     setActiveForecastIndex(0);
     removePredictionOverlays(mapRef.current);
+    setObservedLayerMode('normal');
   }, []);
 
   const retryPrediction = useCallback(async (label, task, retries = 3) => {
@@ -466,6 +608,7 @@ const MapComponent = forwardRef(({
           lon,
           date,
           steps,
+          displayFloor: DEFAULT_DISPLAY_FLOOR,
           ...(stepHours ? { stepHours } : {}),
         })
       );
@@ -477,6 +620,7 @@ const MapComponent = forwardRef(({
       });
 
       const firstFrame = prepared.frames[0];
+      setObservedLayerMode('forecast');
       await renderPredictionRasterFrame(mapRef.current, firstFrame);
       if (fitBounds && firstFrame?.bounds) {
         const [w, s, e, n] = firstFrame.bounds;
@@ -502,47 +646,29 @@ const MapComponent = forwardRef(({
       if (activePopup) activePopup.remove();
       clearForecastTimeline();
 
-      // Run both concurrently but handle failures independently so one
-      // failing doesn't silently swallow the other's result.
-      const [predResult, forecastResult] = await Promise.allSettled([
-        retryPrediction('Prediction summary', () =>
-          predictFireSpread({
-            lat: fireProps.latitude,
-            lng: fireProps.longitude,
-          })
-        ),
-        loadForecastTimeline({
-          lat: fireProps.latitude,
-          lon: fireProps.longitude,
-          title: 'Ignis Forecast Timeline',
-        }),
-      ]);
-
-      if (predResult.status === 'fulfilled') {
-        showPredictionPopup(fireProps, predResult.value);
-      } else {
-        console.error('Failed to predict fire spread:', predResult.reason);
-        const map = mapRef.current;
-        if (map) {
-          const popup = new mapboxgl.Popup()
-            .setLngLat([fireProps.longitude, fireProps.latitude])
-            .setHTML(`
-              <div class="wildfire-popup">
-                <h4>${getSeverityIcon(fireProps.brightnessCat)} ${fireProps.brightnessCat} Fire</h4>
-                <p>Error predicting fire spread. Please try again.</p>
-              </div>
-            `)
-            .addTo(map);
-          setActivePopup(popup);
-        }
-      }
-
-      if (forecastResult.status === 'rejected') {
-        console.error('Forecast timeline failed:', forecastResult.reason);
-        setForecastError(forecastResult.reason?.message || 'Forecast failed. Please try again.');
-      }
+      const prepared = await loadForecastTimeline({
+        lat: fireProps.latitude,
+        lon: fireProps.longitude,
+        title: 'Ignis Forecast Timeline',
+      });
+      showPredictionPopup(fireProps, forecastSummaryFromPrepared(prepared));
     } catch (error) {
-      console.error('Unexpected prediction error:', error);
+      console.error('Forecast timeline failed:', error);
+      setObservedLayerMode('normal');
+      setForecastError(error?.message || 'Forecast failed. Please try again.');
+      const map = mapRef.current;
+      if (map) {
+        const popup = new mapboxgl.Popup()
+          .setLngLat([fireProps.longitude, fireProps.latitude])
+          .setHTML(`
+            <div class="wildfire-popup">
+              <h4>${getSeverityIcon(fireProps.brightnessCat)} ${fireProps.brightnessCat} Fire</h4>
+              <p>Error predicting fire spread. Please try again.</p>
+            </div>
+          `)
+          .addTo(map);
+        setActivePopup(popup);
+      }
     } finally {
       setIsPredicting(false);
     }
@@ -572,6 +698,29 @@ const MapComponent = forwardRef(({
     });
   };
 
+  const forecastSummaryFromPrepared = (prepared) => {
+    const frames = Array.isArray(prepared?.frames) ? prepared.frames : [];
+    const peakFrame = frames.reduce((best, frame) => {
+      if (!best) return frame;
+      return Number(frame?.prob_max ?? 0) > Number(best?.prob_max ?? 0) ? frame : best;
+    }, null);
+    const firstFrame = frames[0] || peakFrame || {};
+    const meta = peakFrame?.meta || firstFrame?.meta || {};
+    return {
+      prob_max: peakFrame?.prob_max ?? firstFrame?.prob_max ?? meta.prob_max ?? 0,
+      prob_mean: peakFrame?.prob_mean ?? firstFrame?.prob_mean ?? meta.prob_mean ?? 0,
+      area_fraction: peakFrame?.area_fraction ?? firstFrame?.area_fraction ?? meta.area_fraction ?? 0,
+      display_area_fraction: peakFrame?.display_area_fraction ?? firstFrame?.display_area_fraction ?? meta.display_area_fraction,
+      threshold: meta.threshold ?? prepared?.threshold,
+      display_floor: meta.display_floor ?? prepared?.displayFloor,
+      step_hours: meta.step_hours ?? prepared?.stepHours,
+      label: peakFrame?.label ?? firstFrame?.label,
+      environmental_data: {
+        data_source: 'model_input_audit',
+      },
+    };
+  };
+
   const showPredictionPopup = (fireProps, prediction) => {
     const map = mapRef.current;
     if (!map) return;
@@ -582,7 +731,13 @@ const MapComponent = forwardRef(({
     const probMean = prediction?.prob_mean ?? 0;
     const maxPct = Math.round(probMax * 100);
     const meanPct = (probMean * 100).toFixed(1);
-    const willSpread = maxPct >= 15 ? 'Yes' : maxPct >= 5 ? 'Possibly' : 'Unlikely';
+    const threshold = Number(prediction?.threshold);
+    const displayFloor = Number(prediction?.display_floor);
+    const willSpread = Number.isFinite(threshold) && probMax >= threshold
+      ? 'Yes'
+      : probMax >= Math.max(Number.isFinite(displayFloor) ? displayFloor : 0.02, 0.15)
+        ? 'Possible'
+        : 'Unlikely';
     // Spread distance based on prob_max rather than area_fraction
     const spreadKm = prediction?.spread_distance_km ?? (64 * Math.sqrt(Math.max(0, probMax)));
 
@@ -596,6 +751,8 @@ const MapComponent = forwardRef(({
             <p><strong>Will spread:</strong> ${willSpread}</p>
             <p><strong>Peak probability:</strong> ${pctStr(maxPct)}</p>
             <p><strong>Mean probability:</strong> ${meanPct}%</p>
+            ${Number.isFinite(threshold) ? `<p><strong>Decision threshold:</strong> ${(threshold * 100).toFixed(0)}%</p>` : ''}
+            ${Number.isFinite(displayFloor) ? `<p><strong>Display floor:</strong> ${(displayFloor * 100).toFixed(0)}%</p>` : ''}
             <p><strong>Est. spread distance:</strong> ${fmt(spreadKm, 1)} km</p>
             <div class="env-data">
               <h6>Environmental Factors</h6>
@@ -665,7 +822,7 @@ const MapComponent = forwardRef(({
         lon: longitude,
         mode,
         gamma: 0.7,
-        floor: 0.01,
+        displayFloor: DEFAULT_DISPLAY_FLOOR,
         opacity: 0.75,
         smooth: true,
         alphaThreshold: 0.01,
@@ -733,6 +890,7 @@ const MapComponent = forwardRef(({
       setActivePopup(popup);
     } catch (e) {
       console.error('Historical prediction error:', e);
+      setObservedLayerMode('normal');
       setForecastError(e?.message || 'Historical forecast failed. Please try again.');
     } finally {
       setHistRunning(false);
@@ -757,9 +915,11 @@ const MapComponent = forwardRef(({
     const map = mapRef.current;
     if (!map) return;
 
-    // Observed fire shape: FIRMS footprint polygons first, circles only as secondary click targets.
+    // Observed fire shape: small per-detection cells are primary; raw scan/track footprints stay subdued.
     [
       'wildfires-layer',
+      'observed-fire-cells-outline',
+      'observed-fire-cells-fill',
       'wildfire-footprints-outline',
       'wildfire-footprints-fill',
       'fire-perimeters-outline',
@@ -767,8 +927,43 @@ const MapComponent = forwardRef(({
     ].forEach(id => {
       if (map.getLayer(id)) map.removeLayer(id);
     });
-    ['wildfires-source', 'wildfire-footprints-source', 'fire-perimeters-source'].forEach(id => {
+    ['wildfires-source', 'observed-fire-cells-source', 'wildfire-footprints-source', 'fire-perimeters-source'].forEach(id => {
       if (map.getSource(id)) map.removeSource(id);
+    });
+
+    map.addSource('observed-fire-cells-source', {
+      type: 'geojson',
+      data: emptyFeatureCollection(),
+    });
+    map.addLayer({
+      id: 'observed-fire-cells-fill',
+      type: 'fill',
+      source: 'observed-fire-cells-source',
+      paint: {
+        'fill-color': FOOTPRINT_FILL_COLOR,
+        'fill-opacity': OBSERVED_CELL_FILL_OPACITY,
+      }
+    });
+    map.addLayer({
+      id: 'observed-fire-cells-outline',
+      type: 'line',
+      source: 'observed-fire-cells-source',
+      paint: {
+        'line-color': [
+          'match', ['get', 'brightnessCat'],
+          'Extreme', '#fff1cc',
+          'Severe', '#ffd6b0',
+          'Moderate', '#ffe6a4',
+          '#fff6cc'
+        ],
+        'line-width': [
+          'interpolate', ['linear'], ['zoom'],
+          4, 0.25,
+          8, 0.55,
+          12, 1.0
+        ],
+        'line-opacity': 0.78,
+      }
     });
 
     map.addSource('wildfire-footprints-source', {
@@ -780,19 +975,8 @@ const MapComponent = forwardRef(({
       type: 'fill',
       source: 'wildfire-footprints-source',
       paint: {
-        'fill-color': [
-          'match', ['get', 'brightnessCat'],
-          'Extreme', '#d7191c',
-          'Severe',  '#f04e23',
-          'Moderate', '#fdae42',
-          '#ffd166'
-        ],
-        'fill-opacity': [
-          'interpolate', ['linear'], ['get', 'confidencePct'],
-          0, 0.16,
-          50, 0.36,
-          100, 0.62
-        ],
+        'fill-color': FOOTPRINT_FILL_COLOR,
+        'fill-opacity': FOOTPRINT_FILL_OPACITY,
       }
     });
     map.addLayer({
@@ -800,17 +984,9 @@ const MapComponent = forwardRef(({
       type: 'line',
       source: 'wildfire-footprints-source',
       paint: {
-        'line-color': [
-          'match', ['get', 'instrument'],
-          'MODIS', '#ffe0b2',
-          '#fff3cf'
-        ],
-        'line-width': [
-          'match', ['get', 'footprint_source'],
-          'firms_scan_track', 1.1,
-          0.7
-        ],
-        'line-opacity': 0.55,
+        'line-color': FOOTPRINT_LINE_COLOR,
+        'line-width': FOOTPRINT_LINE_WIDTH,
+        'line-opacity': 0.30,
       }
     });
 
@@ -824,7 +1000,7 @@ const MapComponent = forwardRef(({
       source: 'fire-perimeters-source',
       paint: {
         'fill-color': '#ff2d2d',
-        'fill-opacity': 0.12,
+        'fill-opacity': PERIMETER_FILL_OPACITY,
       }
     });
     map.addLayer({
@@ -858,12 +1034,7 @@ const MapComponent = forwardRef(({
           'Moderate', '#FF6600',
           '#FFA500'
         ],
-        'circle-opacity': [
-          'interpolate', ['linear'], ['get', 'confidencePct'],
-          0, 0.08,
-          50, 0.18,
-          100, 0.28
-        ],
+        'circle-opacity': POINT_CIRCLE_OPACITY,
         'circle-stroke-width': [
           'match', ['get', 'brightnessCat'],
           'Extreme', 0.9,
@@ -881,8 +1052,13 @@ const MapComponent = forwardRef(({
 
     // Click handler (re-bind safely)
     if (clickHandlerRef.current) {
-      ['wildfire-footprints-fill', 'wildfires-layer'].forEach(layerId => {
+      ['observed-fire-cells-fill', 'wildfire-footprints-fill', 'wildfires-layer'].forEach(layerId => {
         try { map.off('click', layerId, clickHandlerRef.current); } catch (_) {}
+      });
+    }
+    if (perimeterClickHandlerRef.current) {
+      ['fire-perimeters-fill', 'fire-perimeters-outline'].forEach(layerId => {
+        try { map.off('click', layerId, perimeterClickHandlerRef.current); } catch (_) {}
       });
     }
     clickHandlerRef.current = async e => {
@@ -951,11 +1127,48 @@ const MapComponent = forwardRef(({
       document.getElementById('ignis-overlay-raster')?.addEventListener('click', () => addIgnisOverlayAt(fireProps, 'raster'));
       document.getElementById('ignis-overlay-vector')?.addEventListener('click', () => addIgnisOverlayAt(fireProps, 'vector'));
     };
+    perimeterClickHandlerRef.current = e => {
+      const f = e.features?.[0];
+      if (!f) return;
+      const p = f.properties || {};
+      const center = map.getCenter?.();
+      const coords = e.lngLat
+        ? [e.lngLat.lng, e.lngLat.lat]
+        : [center?.lng ?? center?.lon ?? -98, center?.lat ?? 38];
+      const name = p.poly_IncidentName || p.attr_IncidentName || p.IncidentName || p.FIRE_NAME || p.FireName || p.incidentName || 'Fire perimeter';
+      const source = p.poly_Source || p.Source || p.source || (p.irwin_InitialLatitude ? 'WFIGS/FIRIS' : 'Authoritative perimeter');
+      const date = p.poly_CreateDate || p.attr_ModifiedOnDateTime || p.ModifiedOnDateTime || p.CreateDate || p.date || p.perimeterDate;
+      if (activePopup) activePopup.remove();
+      const popup = new mapboxgl.Popup()
+        .setLngLat(coords)
+        .setHTML(`
+          <div class="wildfire-popup">
+            <h4>Observed Fire Perimeter</h4>
+            <p><strong>Incident:</strong> ${name}</p>
+            <p><strong>Source:</strong> ${source}</p>
+            ${date ? `<p><strong>Observed at:</strong> ${new Date(date).toLocaleString()}</p>` : ''}
+            <p style="margin-top:8px;color:#666;font-size:0.9em;">
+              This is an observed perimeter overlay, not the Ignis forecast.
+            </p>
+          </div>
+        `)
+        .addTo(map);
+      setActivePopup(popup);
+    };
+    map.on('click', 'observed-fire-cells-fill', clickHandlerRef.current);
     map.on('click', 'wildfire-footprints-fill', clickHandlerRef.current);
     map.on('click', 'wildfires-layer', clickHandlerRef.current);
-    ['wildfire-footprints-fill', 'wildfires-layer'].forEach(layerId => {
-      map.on('mouseenter', layerId, () => { map.getCanvas().style.cursor = 'pointer'; });
-      map.on('mouseleave', layerId, () => { map.getCanvas().style.cursor = ''; });
+    map.on('click', 'fire-perimeters-fill', perimeterClickHandlerRef.current);
+    map.on('click', 'fire-perimeters-outline', perimeterClickHandlerRef.current);
+    ['observed-fire-cells-fill', 'wildfire-footprints-fill', 'wildfires-layer', 'fire-perimeters-fill', 'fire-perimeters-outline'].forEach(layerId => {
+      map.on('mouseenter', layerId, () => {
+        const canvas = map.getCanvas?.();
+        if (canvas?.style) canvas.style.cursor = 'pointer';
+      });
+      map.on('mouseleave', layerId, () => {
+        const canvas = map.getCanvas?.();
+        if (canvas?.style) canvas.style.cursor = '';
+      });
     });
 
     // User marker
@@ -993,6 +1206,7 @@ const MapComponent = forwardRef(({
       setupLayers();
       fetchWildfires();
       updateWildfireSource();
+      updateObservedFireCellsSource();
       updateWildfireFootprintsSource();
       updatePerimeterSource();
       updateUserSource();
@@ -1007,9 +1221,11 @@ const MapComponent = forwardRef(({
     map.once('styledata', () => {
       setupLayers();
       updateWildfireSource();
+      updateObservedFireCellsSource();
       updateWildfireFootprintsSource();
       updatePerimeterSource();
       updateUserSource();
+      setObservedLayerMode(forecastVisible ? 'forecast' : 'normal');
       if (forecastVisible && forecastFrames[activeForecastIndex]) {
         renderPredictionRasterFrame(map, forecastFrames[activeForecastIndex]).catch(err => {
           console.error('Forecast frame render error:', err);
@@ -1019,6 +1235,7 @@ const MapComponent = forwardRef(({
   }, [mapStyle]);
 
   useEffect(() => { updateWildfireSource(); }, [wildfires, brightnessFilter, confidenceFilter]);
+  useEffect(() => { updateObservedFireCellsSource(); }, [wildfires, brightnessFilter, confidenceFilter]);
   useEffect(() => { updateWildfireFootprintsSource(); }, [wildfireFootprints, brightnessFilter, confidenceFilter]);
   useEffect(() => { updatePerimeterSource(); }, [firePerimeters]);
   useEffect(() => { updateUserSource(); }, [userLocation]);
@@ -1208,6 +1425,8 @@ const MapComponent = forwardRef(({
     ? activeInputSummary.missing_or_placeholder_static
     : [];
   const activeThreshold = activeForecastMeta.threshold ?? activeForecastFrame?.threshold;
+  const activeDisplayFloor = activeForecastMeta.display_floor ?? activeForecastFrame?.display_floor;
+  const activeDisplayArea = activeForecastFrame?.display_area_fraction ?? activeForecastMeta.display_area_fraction;
   const activeStepHours = activeForecastMeta.step_hours ?? activeForecastFrame?.step_hours;
   const activeScaleMode = activeForecastMeta.probability_scale?.mode || 'absolute';
   const activeModelStatus = activeForecastMeta.model_meta?.config_status || activeForecastMeta.model_meta?.metadata_source || 'model metadata unavailable';
@@ -1322,7 +1541,11 @@ const MapComponent = forwardRef(({
             </div>
           </div>
           <div className={`forecast-status ${missingStaticChannels.length ? 'warn' : ''}`}>
-            Scale: {activeScaleMode} 0-1. Contours: threshold and 50%.
+            Scale: {activeScaleMode} 0-1.
+            {activeDisplayFloor != null ? ` Display floor ${(activeDisplayFloor * 100).toFixed(0)}%.` : ''}
+            {activeDisplayArea != null ? ` Visible cells ${(activeDisplayArea * 100).toFixed(1)}%.` : ''}
+            {' '}
+            Contours: threshold and 50%.
             {' '}
             {missingStaticChannels.length
               ? `Static placeholders: ${missingStaticChannels.slice(0, 5).join(', ')}${missingStaticChannels.length > 5 ? '...' : ''}`
