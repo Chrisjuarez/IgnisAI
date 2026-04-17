@@ -28,13 +28,18 @@ services:
     environment:
       # point to YOUR model filename
       MODEL_PATH: /models/convlstm_unet_Cd7_Cs15_H96_T6_nautilus.pt
+      MODEL_CONFIG_PATH: /app/services/tilesvc/model_config.default.json
       TORCH_DEVICE: cpu
        # optional but recommended: make config explicit
       MODEL_CD: "7"
       MODEL_CS: "15"
       MODEL_HIDDEN: "96"
       MODEL_LSTM_LAYERS: "1"
-      MODEL_THRESHOLD: "0.07"     # tune later (0.25–0.6)
+      MODEL_TSEQ: "6"
+      MODEL_STEP_HOURS: "24"
+      MODEL_DYNAMIC_ORDER: "fire_t,u,v,gust,tempC,q,precip"
+      MODEL_STATIC_ORDER: "elev,slope,aspect_cos,aspect_sin,ndvi,bi,erc,pdsi,chili,impervious,water,population,fuel1,fuel2,fuel3"
+      MODEL_THRESHOLD: "0.85"
     volumes:
       - ./models:/models
     restart: unless-stopped

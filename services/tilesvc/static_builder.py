@@ -24,15 +24,15 @@ OPENTOPO_TIMEOUT = int(os.environ.get("OT_TIMEOUT", "120"))
 OPENTOPO_BUFFER_DEG = float(os.environ.get("OT_BUFFER_DEG", "0.2"))
 
 # Expected static channel order for the model (length must equal MODEL_CS)
-# Match training static_order:
-# [elev, slope, aspect_cos, aspect_sin, ndvi, bli, erc, pdsi, chili, impervious, water, population, fuel1, fuel2, fuel3]
+# Match notebook training static_order:
+# [elev, slope, aspect_cos, aspect_sin, ndvi, bi, erc, pdsi, chili, impervious, water, population, fuel1, fuel2, fuel3]
 CHANNEL_ORDER = [
     "elev",
     "slope",
     "aspect_cos",
     "aspect_sin",
     "ndvi",
-    "bli",
+    "bi",
     "erc",
     "pdsi",
     "chili",
@@ -157,17 +157,25 @@ def _build_static_arrays(tile: TileID) -> Dict[str, np.ndarray]:
         "slope": slope.astype(np.float32),
         "aspect_cos": aspect_cos.astype(np.float32),
         "aspect_sin": aspect_sin.astype(np.float32),
+        # These are explicit placeholders until production raster sources are wired.
+        # Keep both training-case names and legacy lowercase aliases available.
+        "fuel1": zero,
+        "fuel2": zero,
+        "fuel3": zero,
+        "NDVI": zero,
+        "BI": zero,
+        "ERC": zero,
+        "PDSI": zero,
+        "water": zero,
+        "impervious": zero,
+        "population": zero,
+        "CHILI": zero,
         "ndvi": zero,
+        "bi": zero,
         "bli": zero,
         "erc": zero,
         "pdsi": zero,
         "chili": zero,
-        "impervious": zero,
-        "water": zero,
-        "population": zero,
-        "fuel1": zero,
-        "fuel2": zero,
-        "fuel3": zero,
     }
 
 

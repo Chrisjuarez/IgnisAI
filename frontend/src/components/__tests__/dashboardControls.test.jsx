@@ -4,6 +4,8 @@ import mapboxgl from 'mapbox-gl';
 import FireControls from '../FireControls';
 import {
   getWildfireData,
+  getWildfireFootprints,
+  getFirePerimeters,
   predictFireSpreadMultistep,
 } from '../../api';
 import {
@@ -14,6 +16,8 @@ import {
 
 jest.mock('../../api', () => ({
   getWildfireData: jest.fn(() => Promise.resolve({ data: { data: [] } })),
+  getWildfireFootprints: jest.fn(() => Promise.resolve({ data: { geojson: { type: 'FeatureCollection', features: [] } } })),
+  getFirePerimeters: jest.fn(() => Promise.resolve({ data: { geojson: { type: 'FeatureCollection', features: [] } } })),
   predictFireSpread: jest.fn(() => Promise.resolve({})),
   predictFireSpreadMultistep: jest.fn(() => Promise.resolve({
     bounds: [-118.6, 34.0, -118.1, 34.4],
@@ -68,6 +72,8 @@ describe('Dashboard controls', () => {
       remove: jest.fn(),
     }));
     getWildfireData.mockResolvedValue({ data: { data: [] } });
+    getWildfireFootprints.mockResolvedValue({ data: { geojson: { type: 'FeatureCollection', features: [] } } });
+    getFirePerimeters.mockResolvedValue({ data: { geojson: { type: 'FeatureCollection', features: [] } } });
     predictFireSpreadMultistep.mockResolvedValue(multistepPayload);
     prepareMultistepRasterFrames.mockImplementation(async payload => ({
       bounds: payload.bounds,
@@ -267,6 +273,31 @@ describe('Dashboard controls', () => {
     expect(mapInstance._zoom).toBe(initialZoom);
   });
 
+  test('map initializes FIRMS footprint and perimeter layers', async () => {
+    const MapComponent = require('../MapComponent').default;
+
+    render(
+      <MapComponent
+        brightnessFilter=""
+        confidenceFilter=""
+        onFiresUpdated={jest.fn()}
+        setIsFetching={jest.fn()}
+        mapStyle="mapbox://styles/mapbox/streets-v12"
+        userLocation={null}
+        range={0}
+        onNearbyFiresUpdate={jest.fn()}
+      />
+    );
+
+    const mapInstance = mapboxgl.__mockMaps[mapboxgl.__mockMaps.length - 1];
+    await waitFor(() => {
+      expect(mapInstance.getLayer('wildfire-footprints-fill')).toBeTruthy();
+      expect(mapInstance.getLayer('fire-perimeters-outline')).toBeTruthy();
+    });
+    expect(getWildfireFootprints).toHaveBeenCalled();
+    expect(getFirePerimeters).toHaveBeenCalled();
+  });
+
   test('forecast panel appears and slider updates the active forecast frame', async () => {
     const MapComponent = require('../MapComponent').default;
 
@@ -352,7 +383,6 @@ describe('Dashboard controls', () => {
     await waitFor(() => {
       expect(predictFireSpreadMultistep).toHaveBeenCalledWith(expect.objectContaining({
         date: '2021-08-14',
-        stepHours: 6,
         steps: 6,
       }));
     });

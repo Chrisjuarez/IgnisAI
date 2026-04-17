@@ -27,6 +27,11 @@ const IDS = {
   vectorSource: 'ignis-pred-vector-src',
   vectorFill: 'ignis-pred-vector-fill',
   vectorLine: 'ignis-pred-vector-line',
+
+  contourSource: 'ignis-pred-contour-src',
+  contourLine: 'ignis-pred-contour-line',
+  contour50Source: 'ignis-pred-contour50-src',
+  contour50Line: 'ignis-pred-contour50-line',
 };
 
 function waitForMapLoad(map) {
@@ -88,8 +93,7 @@ function clamp01(x) {
 /**
  * Colorize a grayscale PNG (base64) into a heatmap PNG data URL.
  *
- * The backend now normalizes the probability map per-tile (min-max stretch)
- * so grayscale values span 0-255 even when absolute probabilities are low.
+ * The backend encodes absolute probability on a fixed 0-1 scale.
  * Pixels at exactly 0 are below-threshold and should be transparent.
  *
  * - gamma: contrast curve (< 1 brightens, > 1 darkens)
@@ -140,8 +144,8 @@ async function colorizeGrayscalePngToHeatmapDataUrl(base64Png, opts = {}) {
   const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
   const data = imageData.data;
 
-  // Grayscale PNG comes in as R=G=B, A=255
-  // Backend normalizes per-tile: 0 = transparent (below threshold), 1-255 = probability range
+  // Grayscale PNG comes in as R=G=B, A=255.
+  // Backend fixed scale: 0 = transparent (below threshold), 255 = probability 1.0.
   for (let i = 0; i < data.length; i += 4) {
     const raw = data[i]; // 0..255
     const sourceAlpha = (data[i + 3] ?? 255) / 255;
@@ -152,7 +156,7 @@ async function colorizeGrayscalePngToHeatmapDataUrl(base64Png, opts = {}) {
       continue;
     }
 
-    // Normalized intensity (backend already stretched min-max to 0-255)
+    // Absolute probability intensity (backend fixed scale 0-255)
     let v = raw / 255;
     v = Math.pow(v, gamma);
 
@@ -222,6 +226,32 @@ function resolveRasterCoordinates(frame) {
   return rasterBoundsToCoordinates(frame?.bounds);
 }
 
+function isFeatureCollection(geojson) {
+  return geojson?.type === 'FeatureCollection' && Array.isArray(geojson.features);
+}
+
+function upsertLineGeoJSON(map, sourceId, layerId, geojson, paint) {
+  if (!isFeatureCollection(geojson) || !geojson.features.length) {
+    removeIfExists(map, layerId, sourceId);
+    return;
+  }
+
+  if (map.getSource(sourceId)) {
+    map.getSource(sourceId).setData(geojson);
+  } else {
+    map.addSource(sourceId, { type: 'geojson', data: geojson });
+  }
+
+  if (!map.getLayer(layerId)) {
+    map.addLayer({
+      id: layerId,
+      type: 'line',
+      source: sourceId,
+      paint,
+    });
+  }
+}
+
 export async function renderPredictionRasterFrame(map, frame, opts = {}) {
   await waitForMapLoad(map);
 
@@ -249,6 +279,18 @@ export async function renderPredictionRasterFrame(map, frame, opts = {}) {
       'raster-opacity': 1.0,
       'raster-resampling': 'linear',
     },
+  });
+
+  upsertLineGeoJSON(map, IDS.contourSource, IDS.contourLine, frame?.contour, {
+    'line-color': '#fff2a8',
+    'line-width': 2,
+    'line-opacity': 0.95,
+  });
+  upsertLineGeoJSON(map, IDS.contour50Source, IDS.contour50Line, frame?.contour_50, {
+    'line-color': '#ffffff',
+    'line-width': 1.2,
+    'line-dasharray': [2, 1.4],
+    'line-opacity': 0.75,
   });
 
   if (opts.showBounds) {
@@ -309,6 +351,9 @@ export async function prepareMultistepRasterFrames(payload, opts = {}) {
           prob_mean: step?.prob_mean,
           prob_max: step?.prob_max,
           area_fraction: step?.area_fraction,
+          probability_scale: payload?.probability_scale,
+          model_meta: payload?.model_meta,
+          input_summary: payload?.input_summary,
         },
       };
     })
@@ -318,6 +363,9 @@ export async function prepareMultistepRasterFrames(payload, opts = {}) {
     bounds,
     threshold: payload?.threshold,
     stepHours: payload?.step_hours,
+    probabilityScale: payload?.probability_scale,
+    modelMeta: payload?.model_meta,
+    inputSummary: payload?.input_summary,
     frames,
   };
 }
@@ -333,8 +381,8 @@ export async function addRasterOverlay(map, apiBase, lat, lon, opts = {}) {
   const qs = new URLSearchParams({
     lat: String(lat),
     lon: String(lon),
-    ...(opts.Tseq != null ? { Tseq: String(opts.Tseq) } : { Tseq: "1" }),
-    ...(opts.thr != null ? { thr: String(opts.thr) } : { thr: "0.01" }),
+    ...(opts.Tseq != null ? { Tseq: String(opts.Tseq) } : {}),
+    ...(opts.thr != null ? { thr: String(opts.thr) } : {}),
     ...(opts.date ? { date: opts.date } : {}),
   });
 
@@ -435,8 +483,8 @@ export async function addVectorOverlay(map, apiBase, lat, lon, opts = {}) {
   const qs = new URLSearchParams({
     lat: String(lat),
     lon: String(lon),
-    ...(opts.Tseq != null ? { Tseq: String(opts.Tseq) } : { Tseq: "1" }),
-    ...(opts.thr != null ? { thr: String(opts.thr) } : { thr: "0.01" }),
+    ...(opts.Tseq != null ? { Tseq: String(opts.Tseq) } : {}),
+    ...(opts.thr != null ? { thr: String(opts.thr) } : {}),
     ...(opts.date ? { date: opts.date } : {}),
   });
 
@@ -542,6 +590,8 @@ export async function addPredictionOverlay(map, apiBaseOrParams, latMaybe, lonMa
 
 export function removePredictionOverlays(map) {
   if (!map) return;
+  removeIfExists(map, IDS.contourLine, IDS.contourSource);
+  removeIfExists(map, IDS.contour50Line, IDS.contour50Source);
   removeIfExists(map, IDS.rasterLayer, IDS.rasterSource);
   removeIfExists(map, IDS.vectorFill, null);
   removeIfExists(map, IDS.vectorLine, null);
