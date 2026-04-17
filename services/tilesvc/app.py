@@ -1,10 +1,12 @@
 import os
 import io
 import re
+import json
 import math
 import base64
 import datetime as dt
-from typing import Optional, Tuple, Dict, Any
+from pathlib import Path
+from typing import Optional, Tuple, Dict, Any, List
 
 import numpy as np
 from fastapi import FastAPI, Query
@@ -549,6 +551,105 @@ def _step_label(lead_hours: int) -> str:
     return f"{lead_hours} hours"
 
 
+def _encode_solid_png(shape: Tuple[int, int], value: float = 0.5) -> bytes:
+    """
+    Encode a solid-fill PNG for the bounds/coordinate plumbing sanity test.
+
+    Every pixel gets the same gray value and full alpha — no thresholding,
+    no radial alpha mask, no per-pixel processing. If rendering this in the
+    frontend does not produce a cleanly filled translucent rectangle over
+    the advertised crop bounds, the bug is in the bounds/coordinates
+    pipeline rather than in the probability field itself.
+    """
+    H, W = int(shape[0]), int(shape[1])
+    v = int(round(max(0.0, min(1.0, float(value))) * 255.0))
+    gray = np.full((H, W), v, dtype=np.uint8)
+    alpha = np.full((H, W), 255, dtype=np.uint8)
+    return _encode_png_from_channels(gray, alpha=alpha)
+
+
+def _debug_dump_dir(tag: str) -> Path:
+    base = Path(os.getenv("IGNIS_DEBUG_DIR", "/tmp/ignis_debug"))
+    stamp = dt.datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
+    out_dir = base / f"multistep-{stamp}-{tag}"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    return out_dir
+
+
+def _dump_multistep_artifacts(
+    out_dir: Path,
+    *,
+    dyn: np.ndarray,
+    stat: np.ndarray,
+    rollout: List[Dict[str, Any]],
+    crop_window: Dict[str, Any],
+    bounds: Tuple[float, float, float, float],
+    ref_time: Optional[dt.datetime],
+    lat: float,
+    lon: float,
+    step_hours: int,
+    Tseq: int,
+    threshold: float,
+    ignition: bool,
+) -> None:
+    """
+    Save raw model inputs and per-step probability arrays for offline
+    inspection in the notebook (Model_Eval.ipynb). No masking, no cropping,
+    no PNG encoding — we want the tensors the model actually saw / produced.
+    """
+    try:
+        np.save(out_dir / "dyn_input.npy", np.asarray(dyn, dtype=np.float32))
+        np.save(out_dir / "stat_input.npy", np.asarray(stat, dtype=np.float32))
+        for step in rollout:
+            idx = int(step["index"])
+            lead = int(step["lead_hours"])
+            prob = np.asarray(step["prob"], dtype=np.float32)
+            np.save(out_dir / f"prob_step_{idx:02d}_lead{lead:03d}h.npy", prob)
+
+        meta: Dict[str, Any] = {
+            "lat": float(lat),
+            "lon": float(lon),
+            "Tseq": int(Tseq),
+            "step_hours": int(step_hours),
+            "threshold": float(threshold),
+            "ignition": bool(ignition),
+            "ref_time": ref_time.isoformat() if ref_time else None,
+            "bounds": [float(x) for x in bounds],
+            "crop_window": {
+                "x0": int(crop_window["x0"]),
+                "y0": int(crop_window["y0"]),
+                "x1": int(crop_window["x1"]),
+                "y1": int(crop_window["y1"]),
+                "bounds": [float(x) for x in crop_window["bounds"]],
+                "coordinates": crop_window.get("coordinates"),
+                "anchor_px": [int(v) for v in crop_window["anchor_px"]],
+            },
+            "dyn_shape": list(dyn.shape),
+            "stat_shape": list(stat.shape),
+            "steps": [
+                {
+                    "index": int(s["index"]),
+                    "lead_hours": int(s["lead_hours"]),
+                    "label": s["label"],
+                    "prob_shape": list(np.asarray(s["prob"]).shape),
+                    "prob_min": float(np.asarray(s["prob"]).min()),
+                    "prob_mean": float(np.asarray(s["prob"]).mean()),
+                    "prob_max": float(np.asarray(s["prob"]).max()),
+                }
+                for s in rollout
+            ],
+        }
+        with open(out_dir / "metadata.json", "w") as f:
+            json.dump(meta, f, indent=2, default=str)
+    except Exception as ex:
+        # Debug sink is best-effort — never let it take down a request.
+        try:
+            with open(out_dir / "dump_error.txt", "w") as f:
+                f.write(repr(ex))
+        except Exception:
+            pass
+
+
 def _rollout_multistep_predictions(
     lat: float,
     lon: float,
@@ -559,6 +660,7 @@ def _rollout_multistep_predictions(
     crop_frac: float,
     ignition: bool,
     ref_time: Optional[dt.datetime],
+    debug_sink: Optional[Dict[str, Any]] = None,
 ) -> Tuple[Tuple[float, float, float, float], Dict[str, Any], list]:
     dyn, stat, bounds, base_time = _prepare_prediction_inputs(
         lat,
@@ -568,6 +670,13 @@ def _rollout_multistep_predictions(
         ref_time=ref_time,
         hours_step=step_hours,
     )
+    if debug_sink is not None:
+        # Capture the original (pre-rollout) inputs so callers in dump mode can
+        # save the exact tensors the model started from. These are references,
+        # not copies — callers should treat them as read-only.
+        debug_sink["dyn"] = dyn
+        debug_sink["stat"] = stat
+        debug_sink["base_time"] = base_time
     normalized_steps = max(1, int(steps))
     crop_window = None
     rollout = []
@@ -752,25 +861,77 @@ def predict_multistep(
     crop_frac: float = Query(0.5),
     ignition: bool = Query(False),
     date: str = Query(None),
+    debug: str = Query(
+        None,
+        description=(
+            "Diagnostic modes, comma-separated. "
+            "'solid' skips the model and returns a constant 0.5 probability in "
+            "every cell (plumbing test for bounds/coordinates). "
+            "'dump' runs the model normally and saves raw dyn/stat/prob arrays "
+            "to IGNIS_DEBUG_DIR (default /tmp/ignis_debug) for offline analysis. "
+            "Multiple modes may be combined, e.g. debug=solid,dump."
+        ),
+    ),
 ):
     ref_time = _parse_date_param(date)
     threshold = float(thr) if thr is not None else MODEL_THRESHOLD
-    bounds, crop_window, rollout = _rollout_multistep_predictions(
-        lat,
-        lon,
-        Tseq=Tseq,
-        steps=steps,
-        step_hours=step_hours,
-        crop_frac=crop_frac,
-        ignition=ignition,
-        ref_time=ref_time,
-    )
+    debug_modes = {tok.strip().lower() for tok in (debug or "").split(",") if tok.strip()}
+    debug_solid = "solid" in debug_modes
+    debug_dump = "dump" in debug_modes
+
+    normalized_steps = max(1, int(steps))
+    debug_sink: Dict[str, Any] = {} if debug_dump else None
+
+    if debug_solid:
+        # Step-1 plumbing sanity test: bypass the model entirely and produce a
+        # constant probability field on the same input shape / bounds the real
+        # pipeline would use. If the overlay renders as a fully-filled
+        # translucent rectangle aligned with the crop bounds, the bounds and
+        # coordinates pipeline is correct and the bug lives in the probability
+        # field (model / inputs / AR feedback). If the overlay is not a clean
+        # rectangle (e.g. a vertical strip), the bug lives in the
+        # bounds/coordinates math.
+        dyn, stat, bounds, base_time = _prepare_prediction_inputs(
+            lat, lon, Tseq, ignition=ignition, ref_time=ref_time, hours_step=step_hours,
+        )
+        prob_shape = tuple(int(v) for v in dyn.shape[-2:])
+        crop_window = _build_crop_window(prob_shape, bounds, lat, lon, crop_frac)
+        rollout = [
+            {
+                "index": i,
+                "lead_hours": (i + 1) * int(step_hours),
+                "label": _step_label((i + 1) * int(step_hours)),
+                "prob": np.full(prob_shape, 0.5, dtype=np.float32),
+            }
+            for i in range(normalized_steps)
+        ]
+        if debug_sink is not None:
+            debug_sink["dyn"] = dyn
+            debug_sink["stat"] = stat
+            debug_sink["base_time"] = base_time
+    else:
+        bounds, crop_window, rollout = _rollout_multistep_predictions(
+            lat,
+            lon,
+            Tseq=Tseq,
+            steps=normalized_steps,
+            step_hours=step_hours,
+            crop_frac=crop_frac,
+            ignition=ignition,
+            ref_time=ref_time,
+            debug_sink=debug_sink,
+        )
 
     payload_steps = []
     cropped_bounds = crop_window["bounds"]
     for step in rollout:
         cropped, _, anchor_px = _apply_crop_window(step["prob"], crop_window)
-        png = _prob_to_display_png(cropped, threshold=threshold, anchor_px=anchor_px)
+        if debug_solid:
+            # Solid-fill PNG bypasses the radial alpha mask and thresholding
+            # so the plumbing test isn't confounded by per-pixel masking.
+            png = _encode_solid_png(cropped.shape, value=0.5)
+        else:
+            png = _prob_to_display_png(cropped, threshold=threshold, anchor_px=anchor_px)
         payload_steps.append({
             "index": step["index"],
             "lead_hours": step["lead_hours"],
@@ -782,10 +943,40 @@ def predict_multistep(
             "area_fraction": float((cropped >= threshold).mean()),
         })
 
-    return {
+    debug_payload: Dict[str, Any] = {}
+    if debug_dump and debug_sink is not None:
+        tag_parts = []
+        if debug_solid:
+            tag_parts.append("solid")
+        tag_parts.append(f"lat{lat:.4f}")
+        tag_parts.append(f"lon{lon:.4f}")
+        tag = "_".join(tag_parts).replace("-", "m")
+        out_dir = _debug_dump_dir(tag)
+        _dump_multistep_artifacts(
+            out_dir,
+            dyn=debug_sink.get("dyn"),
+            stat=debug_sink.get("stat"),
+            rollout=rollout,
+            crop_window=crop_window,
+            bounds=bounds,
+            ref_time=ref_time,
+            lat=lat,
+            lon=lon,
+            step_hours=int(step_hours),
+            Tseq=int(Tseq),
+            threshold=threshold,
+            ignition=bool(ignition),
+        )
+        debug_payload["dump_dir"] = str(out_dir)
+
+    response: Dict[str, Any] = {
         "bounds": list(map(float, cropped_bounds)),
         "coordinates": crop_window["coordinates"],
         "threshold": threshold,
         "step_hours": int(step_hours),
         "steps": payload_steps,
     }
+    if debug_modes:
+        debug_payload["modes"] = sorted(debug_modes)
+        response["debug"] = debug_payload
+    return response
