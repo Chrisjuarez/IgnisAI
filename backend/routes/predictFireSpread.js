@@ -12,6 +12,11 @@ const SELF_BASE =
   process.env.INTERNAL_SELF_BASE ||
   `http://127.0.0.1:${process.env.PORT || 5000}`;
 
+const PREDICT_RETRY_BACKOFF_MS = Number(
+  process.env.PREDICT_RETRY_BACKOFF_MS || (process.env.NODE_ENV === "test" ? 0 : 750)
+);
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
 async function getJSON(url, params = {}, timeout = 80000, retries = 2) {
   let lastErr;
   for (let i = 0; i <= retries; i++) {
@@ -24,6 +29,9 @@ async function getJSON(url, params = {}, timeout = 80000, retries = 2) {
       // Retry on connection errors or 502/504 (tilesvc cold start)
       if (i < retries && (!status || status === 502 || status === 504)) {
         console.warn(`getJSON attempt ${i + 1} failed (${status || err.code}), retrying...`);
+        if (PREDICT_RETRY_BACKOFF_MS > 0) {
+          await sleep(PREDICT_RETRY_BACKOFF_MS * (i + 1));
+        }
         continue;
       }
       throw err;
@@ -43,7 +51,7 @@ function pickModelFields(payload = {}) {
 // GET /api/predict-fire-spread/raster?lat=&lon=&Tseq=&thr=&date=
 router.get("/raster", async (req, res) => {
   try {
-    const { lat, lon, Tseq, thr, crop_frac, date } = req.query;
+    const { lat, lon, Tseq, thr, display_floor, crop_frac, date } = req.query;
     if (lat == null || lon == null) {
       return res.status(400).json({ error: "lat and lon are required" });
     }
@@ -53,6 +61,7 @@ router.get("/raster", async (req, res) => {
       lon,
       ...(Tseq ? { Tseq } : {}),
       ...(thr ? { thr } : {}),
+      ...(display_floor ? { display_floor } : {}),
       crop_frac: crop_frac != null ? crop_frac : 0.5,
       ...(date ? { date, ignition: true } : {}),
     };
@@ -71,10 +80,12 @@ router.get("/raster", async (req, res) => {
       coordinates: Array.isArray(raster?.coordinates) ? raster.coordinates : undefined,
       image_base64,
       threshold: raster?.threshold,
+      display_floor: raster?.display_floor,
       prob_min: raster?.prob_min,
       prob_max: raster?.prob_max,
       prob_mean: raster?.prob_mean,
       area_fraction: raster?.area_fraction,
+      display_area_fraction: raster?.display_area_fraction,
       ...pickModelFields(raster),
     });
   } catch (err) {
@@ -174,7 +185,7 @@ router.get("/vector", async (req, res) => {
 // GET /api/predict-fire-spread/multistep?lat=&lon=&steps=&step_hours=&Tseq=&thr=&date=&debug=
 router.get("/multistep", async (req, res) => {
   try {
-    const { lat, lon, steps, step_hours, Tseq, thr, crop_frac, date, debug } = req.query;
+    const { lat, lon, steps, step_hours, Tseq, thr, display_floor, crop_frac, date, debug } = req.query;
     if (lat == null || lon == null) {
       return res.status(400).json({ error: "lat and lon are required" });
     }
@@ -186,6 +197,7 @@ router.get("/multistep", async (req, res) => {
       ...(step_hours ? { step_hours } : {}),
       ...(Tseq ? { Tseq } : {}),
       ...(thr ? { thr } : {}),
+      ...(display_floor ? { display_floor } : {}),
       crop_frac: crop_frac != null ? crop_frac : 0.5,
       ...(date ? { date, ignition: true } : {}),
       // Forward diagnostic modes (e.g. "solid", "dump", "solid,dump")
@@ -203,6 +215,7 @@ router.get("/multistep", async (req, res) => {
       bounds: forecast.bounds,
       coordinates: Array.isArray(forecast?.coordinates) ? forecast.coordinates : undefined,
       threshold: forecast?.threshold,
+      display_floor: forecast?.display_floor,
       step_hours: forecast?.step_hours,
       steps: forecast.steps,
       ...pickModelFields(forecast),
