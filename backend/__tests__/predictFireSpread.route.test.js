@@ -25,6 +25,12 @@ describe('GET /api/predict-fire-spread routes', () => {
         prob_mean: 0.04,
         prob_max: 0.21,
         area_fraction: 0.13,
+        probability_scale: { mode: 'absolute', min: 0, max: 1 },
+        model_meta: {
+          Tseq: 6,
+          step_hours: 24,
+          dynamic_order: ['fire_t', 'u', 'v', 'gust', 'tempC', 'q', 'precip'],
+        },
       }
     });
 
@@ -43,19 +49,21 @@ describe('GET /api/predict-fire-spread routes', () => {
       ],
       image_base64: 'abc123',
       threshold: 0.01,
+      probability_scale: { mode: 'absolute', min: 0, max: 1 },
+      model_meta: {
+        Tseq: 6,
+        step_hours: 24,
+        dynamic_order: ['fire_t', 'u', 'v', 'gust', 'tempC', 'q', 'precip'],
+      },
     });
-    expect(axios.get).toHaveBeenCalledWith(
-      expect.stringContaining('/predict_raster_json'),
-      expect.objectContaining({
-        params: expect.objectContaining({
-          lat: '34.05',
-          lon: '-118.25',
-          Tseq: 1,
-          crop_frac: 0.5,
-        }),
-        timeout: 80000,
-      })
-    );
+    const params = axios.get.mock.calls[0][1].params;
+    expect(axios.get.mock.calls[0][0]).toContain('/predict_raster_json');
+    expect(params).toMatchObject({
+      lat: '34.05',
+      lon: '-118.25',
+      crop_frac: 0.5,
+    });
+    expect(params).not.toHaveProperty('Tseq');
   });
 
   it('forwards multistep params and sets ignition for dated requests', async () => {
@@ -70,6 +78,8 @@ describe('GET /api/predict-fire-spread routes', () => {
         ],
         threshold: 0.01,
         step_hours: 6,
+        probability_scale: { mode: 'absolute', min: 0, max: 1 },
+        model_meta: { Tseq: 2, step_hours: 6 },
         steps: [
           {
             index: 0,
@@ -109,6 +119,8 @@ describe('GET /api/predict-fire-spread routes', () => {
       ],
       threshold: 0.01,
       step_hours: 6,
+      probability_scale: { mode: 'absolute', min: 0, max: 1 },
+      model_meta: { Tseq: 2, step_hours: 6 },
       steps: [
         expect.objectContaining({
           index: 0,
@@ -148,6 +160,47 @@ describe('GET /api/predict-fire-spread routes', () => {
       error: 'tilesvc_multistep_failed',
       detail: expect.any(String),
     });
+  });
+
+  it('proxies input audit requests to tilesvc with model metadata', async () => {
+    axios.get.mockResolvedValue({
+      data: {
+        ok: true,
+        model_meta: {
+          Tseq: 6,
+          step_hours: 24,
+          dynamic_order: ['fire_t', 'u', 'v', 'gust', 'tempC', 'q', 'precip'],
+        },
+        input_summary: {
+          dyn_shape: [6, 7, 128, 128],
+          stat_shape: [15, 128, 128],
+          missing_or_placeholder_static: ['NDVI'],
+        },
+      },
+    });
+
+    const res = await request(app)
+      .get('/api/predict-fire-spread/input-audit')
+      .query({ lat: 34.05, lon: -118.25, date: '2025-01-07T18:30:00Z', step_hours: 24 })
+      .expect(200);
+
+    expect(res.body).toMatchObject({
+      ok: true,
+      model_meta: { Tseq: 6, step_hours: 24 },
+      input_summary: { dyn_shape: [6, 7, 128, 128] },
+    });
+    expect(axios.get).toHaveBeenCalledWith(
+      expect.stringContaining('/input_audit'),
+      expect.objectContaining({
+        params: expect.objectContaining({
+          lat: '34.05',
+          lon: '-118.25',
+          date: '2025-01-07T18:30:00Z',
+          step_hours: '24',
+          ignition: true,
+        }),
+      })
+    );
   });
 
   // ── /vector ────────────────────────────────────────────────────────────────

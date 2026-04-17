@@ -32,6 +32,14 @@ async function getJSON(url, params = {}, timeout = 80000, retries = 2) {
   throw lastErr;
 }
 
+function pickModelFields(payload = {}) {
+  return {
+    ...(payload?.model_meta ? { model_meta: payload.model_meta } : {}),
+    ...(payload?.input_summary ? { input_summary: payload.input_summary } : {}),
+    ...(payload?.probability_scale ? { probability_scale: payload.probability_scale } : {}),
+  };
+}
+
 // GET /api/predict-fire-spread/raster?lat=&lon=&Tseq=&thr=&date=
 router.get("/raster", async (req, res) => {
   try {
@@ -43,7 +51,7 @@ router.get("/raster", async (req, res) => {
     const params = {
       lat,
       lon,
-      Tseq: Tseq || 1,
+      ...(Tseq ? { Tseq } : {}),
       ...(thr ? { thr } : {}),
       crop_frac: crop_frac != null ? crop_frac : 0.5,
       ...(date ? { date, ignition: true } : {}),
@@ -67,6 +75,7 @@ router.get("/raster", async (req, res) => {
       prob_max: raster?.prob_max,
       prob_mean: raster?.prob_mean,
       area_fraction: raster?.area_fraction,
+      ...pickModelFields(raster),
     });
   } catch (err) {
     console.error("raster error:", err?.response?.data || err.message);
@@ -88,14 +97,14 @@ router.get("/vector", async (req, res) => {
     // 1) GeoJSON polygons from tilesvc (honor thr!)
     const geojson = await getJSON(
       `${TILE_SVC}/predict_geojson`,
-      { lat, lon, Tseq: Tseq || 1, ...(thr ? { thr } : {}), crop_frac: crop, ...dateParams },
+      { lat, lon, ...(Tseq ? { Tseq } : {}), ...(thr ? { thr } : {}), crop_frac: crop, ...dateParams },
       20000
     );
 
     // 2) Meta (area_fraction + threshold + bounds) from tilesvc
     const meta = await getJSON(
       `${TILE_SVC}/predict`,
-      { lat, lon, Tseq: Tseq || 1, png: false, ...(thr ? { thr } : {}), crop_frac: crop, ...dateParams },
+      { lat, lon, ...(Tseq ? { Tseq } : {}), png: false, ...(thr ? { thr } : {}), crop_frac: crop, ...dateParams },
       80000
     );
 
@@ -154,6 +163,7 @@ router.get("/vector", async (req, res) => {
       prob_min: meta?.prob_min,
       prob_max: meta?.prob_max,
       prob_mean: meta?.prob_mean,
+      ...pickModelFields(meta),
     });
   } catch (err) {
     console.error("vector error:", err?.response?.data || err.message);
@@ -173,8 +183,8 @@ router.get("/multistep", async (req, res) => {
       lat,
       lon,
       steps: steps || 6,
-      step_hours: step_hours || 6,
-      Tseq: Tseq || 1,
+      ...(step_hours ? { step_hours } : {}),
+      ...(Tseq ? { Tseq } : {}),
       ...(thr ? { thr } : {}),
       crop_frac: crop_frac != null ? crop_frac : 0.5,
       ...(date ? { date, ignition: true } : {}),
@@ -195,11 +205,39 @@ router.get("/multistep", async (req, res) => {
       threshold: forecast?.threshold,
       step_hours: forecast?.step_hours,
       steps: forecast.steps,
+      ...pickModelFields(forecast),
       ...(forecast?.debug ? { debug: forecast.debug } : {}),
     });
   } catch (err) {
     console.error("multistep error:", err?.response?.data || err.message);
     return res.status(502).json({ error: "tilesvc_multistep_failed", detail: err.message });
+  }
+});
+
+// GET /api/predict-fire-spread/input-audit?lat=&lon=&date=&Tseq=&step_hours=
+router.get("/input-audit", async (req, res) => {
+  try {
+    const { lat, lon, Tseq, date, step_hours, ignition } = req.query;
+    if (lat == null || lon == null) {
+      return res.status(400).json({ error: "lat and lon are required" });
+    }
+
+    const audit = await getJSON(
+      `${TILE_SVC}/input_audit`,
+      {
+        lat,
+        lon,
+        ...(Tseq ? { Tseq } : {}),
+        ...(date ? { date, ignition: ignition ?? true } : (ignition != null ? { ignition } : {})),
+        ...(step_hours ? { step_hours } : {}),
+      },
+      80000
+    );
+
+    return res.json(audit);
+  } catch (err) {
+    console.error("input-audit error:", err?.response?.data || err.message);
+    return res.status(502).json({ error: "tilesvc_input_audit_failed", detail: err.message });
   }
 });
 

@@ -8,6 +8,7 @@ jest.mock('../models/Wildfire', () => ({ insertMany: jest.fn(), find: jest.fn() 
 const axios = require('axios');
 const Wildfire = require('../models/Wildfire');
 const app = require('../app');
+const fireDataRoute = require('../routes/fireData');
 
 describe('GET /api/wildfires', () => {
   beforeEach(() => {
@@ -37,6 +38,15 @@ describe('GET /api/wildfires', () => {
     const toInsert = Wildfire.insertMany.mock.calls[0][0];
     expect(Array.isArray(toInsert)).toBe(true);
     expect(toInsert).toHaveLength(2);
+    expect(toInsert[0]).toMatchObject({
+      scan: 0.4,
+      track: 0.4,
+      frp: 12.3,
+      instrument: 'VIIRS',
+      satellite: 'N21',
+      product: 'VIIRS_NOAA21_NRT',
+      daynight: 'D',
+    });
   });
 
   it('handles empty CSV (header only)', async () => {
@@ -64,5 +74,44 @@ describe('GET /api/wildfires', () => {
       stale: true,
     });
     expect(Wildfire.insertMany).not.toHaveBeenCalled();
+  });
+
+  it('returns FIRMS detection footprints as valid GeoJSON polygons', async () => {
+    const csv = [
+      'latitude,longitude,bright_ti4,scan,track,acq_date,acq_time,satellite,instrument,confidence,version,bright_ti5,frp,daynight',
+      '34.0522,-118.2437,330.5,0.4,0.5,2024-01-15,1430,N21,VIIRS,high,2.0,328.5,12.3,D'
+    ].join('\n');
+    axios.get.mockResolvedValue({ data: csv });
+
+    const res = await request(app).get('/api/wildfires/footprints');
+
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({
+      count: 1,
+      geojson: { type: 'FeatureCollection' },
+    });
+    const feature = res.body.geojson.features[0];
+    expect(feature.geometry.type).toBe('Polygon');
+    expect(feature.geometry.coordinates[0]).toHaveLength(5);
+    expect(feature.properties).toMatchObject({
+      scan: 0.4,
+      track: 0.5,
+      frp: 12.3,
+      footprint_source: 'firms_scan_track',
+    });
+  });
+
+  it('falls back to nominal MODIS footprint dimensions when scan/track are absent', () => {
+    const feature = fireDataRoute._private.fireToFootprintFeature({
+      latitude: 34,
+      longitude: -118,
+      brightness: 340,
+      confidence: 90,
+      instrument: 'MODIS',
+    });
+
+    expect(feature.properties.footprint_source).toBe('MODIS_1KM');
+    expect(feature.properties.scan).toBe(1);
+    expect(feature.properties.track).toBe(1);
   });
 });

@@ -12,18 +12,18 @@ const api = axios.create({
   timeout: 80000,
 });
 
-// Use something realistic given your model prob_max (~0.25).
-// Tune later; 0.07–0.15 tends to show structure.
-const DEFAULT_THR =
-  (typeof window !== "undefined" &&
-    window._env_?.REACT_APP_MODEL_THR &&
-    Number(window._env_?.REACT_APP_MODEL_THR)) ||
-  (process.env.REACT_APP_MODEL_THR ? Number(process.env.REACT_APP_MODEL_THR) : 0.01);
+const rawDefaultThreshold =
+  (typeof window !== "undefined" && window._env_?.REACT_APP_MODEL_THR) ||
+  process.env.REACT_APP_MODEL_THR ||
+  "";
+const DEFAULT_THR = rawDefaultThreshold !== "" ? Number(rawDefaultThreshold) : null;
 
 // -----------------------------
 // Existing calls
 // -----------------------------
 export const getWildfireData = (opts = {}) => api.get("/wildfires", { params: opts });
+export const getWildfireFootprints = (opts = {}) => api.get("/wildfires/footprints", { params: opts });
+export const getFirePerimeters = (opts = {}) => api.get("/fire-perimeters", { params: opts });
 
 // -----------------------------
 // Prediction endpoints
@@ -50,7 +50,7 @@ export const predictFireSpreadVector = async ({ lat, lng, lon, thr, Tseq, date }
     params: {
       lat: latitude,
       lon: longitude,
-      thr: threshold,
+      ...(threshold != null && !Number.isNaN(threshold) ? { thr: threshold } : {}),
       ...(Tseq ? { Tseq } : {}),
       ...(date ? { date } : {}),
     },
@@ -79,7 +79,7 @@ export const predictFireSpreadRaster = async ({ lat, lng, lon, thr, Tseq, date }
       lat: latitude,
       lon: longitude,
       ...(Tseq ? { Tseq } : {}),
-      ...(threshold != null ? { thr: threshold } : {}),
+      ...(threshold != null && !Number.isNaN(threshold) ? { thr: threshold } : {}),
       ...(date ? { date } : {}),
     },
   });
@@ -118,7 +118,7 @@ export const predictFireSpreadMultistep = async ({
       ...(steps ? { steps } : {}),
       ...(stepHours ? { step_hours: stepHours } : {}),
       ...(Tseq ? { Tseq } : {}),
-      ...(threshold != null ? { thr: threshold } : {}),
+      ...(threshold != null && !Number.isNaN(threshold) ? { thr: threshold } : {}),
       ...(date ? { date } : {}),
     },
   });
