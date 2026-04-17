@@ -346,11 +346,13 @@ export async function prepareMultistepRasterFrames(payload, opts = {}) {
         heatmapUrl,
         meta: {
           threshold: payload?.threshold,
+          display_floor: step?.display_floor ?? payload?.display_floor,
           step_hours: payload?.step_hours,
           prob_min: step?.prob_min,
           prob_mean: step?.prob_mean,
           prob_max: step?.prob_max,
           area_fraction: step?.area_fraction,
+          display_area_fraction: step?.display_area_fraction,
           probability_scale: payload?.probability_scale,
           model_meta: payload?.model_meta,
           input_summary: payload?.input_summary,
@@ -362,6 +364,7 @@ export async function prepareMultistepRasterFrames(payload, opts = {}) {
   return {
     bounds,
     threshold: payload?.threshold,
+    displayFloor: payload?.display_floor,
     stepHours: payload?.step_hours,
     probabilityScale: payload?.probability_scale,
     modelMeta: payload?.model_meta,
@@ -383,6 +386,7 @@ export async function addRasterOverlay(map, apiBase, lat, lon, opts = {}) {
     lon: String(lon),
     ...(opts.Tseq != null ? { Tseq: String(opts.Tseq) } : {}),
     ...(opts.thr != null ? { thr: String(opts.thr) } : {}),
+    ...(opts.displayFloor != null ? { display_floor: String(opts.displayFloor) } : {}),
     ...(opts.date ? { date: opts.date } : {}),
   });
 

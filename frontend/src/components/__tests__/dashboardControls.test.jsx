@@ -21,11 +21,12 @@ jest.mock('../../api', () => ({
   predictFireSpread: jest.fn(() => Promise.resolve({})),
   predictFireSpreadMultistep: jest.fn(() => Promise.resolve({
     bounds: [-118.6, 34.0, -118.1, 34.4],
-    threshold: 0.01,
+    threshold: 0.85,
+    display_floor: 0.02,
     step_hours: 6,
     steps: [
-      { index: 0, lead_hours: 6, label: '6 hours', image_base64: 'frame-1', prob_max: 0.11, prob_mean: 0.03, area_fraction: 0.08 },
-      { index: 1, lead_hours: 12, label: '12 hours', image_base64: 'frame-2', prob_max: 0.19, prob_mean: 0.05, area_fraction: 0.11 },
+      { index: 0, lead_hours: 6, label: '6 hours', image_base64: 'frame-1', prob_max: 0.11, prob_mean: 0.03, area_fraction: 0.00, display_area_fraction: 0.08, display_floor: 0.02 },
+      { index: 1, lead_hours: 12, label: '12 hours', image_base64: 'frame-2', prob_max: 0.19, prob_mean: 0.05, area_fraction: 0.00, display_area_fraction: 0.11, display_floor: 0.02 },
     ]
   }))
 }));
@@ -41,8 +42,11 @@ jest.mock('../../utils/addPredictionOverlay', () => ({
       bounds: payload.bounds,
       heatmapUrl: `data:image/png;base64,${step.image_base64}`,
       meta: {
+        threshold: payload.threshold,
+        display_floor: step.display_floor ?? payload.display_floor,
         prob_max: step.prob_max,
         prob_mean: step.prob_mean,
+        display_area_fraction: step.display_area_fraction,
       }
     }))
   })),
@@ -54,11 +58,12 @@ describe('Dashboard controls', () => {
   let consoleErrorSpy;
   const multistepPayload = {
     bounds: [-118.6, 34.0, -118.1, 34.4],
-    threshold: 0.01,
+    threshold: 0.85,
+    display_floor: 0.02,
     step_hours: 6,
     steps: [
-      { index: 0, lead_hours: 6, label: '6 hours', image_base64: 'frame-1', prob_max: 0.11, prob_mean: 0.03, area_fraction: 0.08 },
-      { index: 1, lead_hours: 12, label: '12 hours', image_base64: 'frame-2', prob_max: 0.19, prob_mean: 0.05, area_fraction: 0.11 },
+      { index: 0, lead_hours: 6, label: '6 hours', image_base64: 'frame-1', prob_max: 0.11, prob_mean: 0.03, area_fraction: 0.00, display_area_fraction: 0.08, display_floor: 0.02 },
+      { index: 1, lead_hours: 12, label: '12 hours', image_base64: 'frame-2', prob_max: 0.19, prob_mean: 0.05, area_fraction: 0.00, display_area_fraction: 0.11, display_floor: 0.02 },
     ]
   };
 
@@ -84,8 +89,11 @@ describe('Dashboard controls', () => {
         bounds: payload.bounds,
         heatmapUrl: `data:image/png;base64,${step.image_base64}`,
         meta: {
+          threshold: payload.threshold,
+          display_floor: step.display_floor ?? payload.display_floor,
           prob_max: step.prob_max,
           prob_mean: step.prob_mean,
+          display_area_fraction: step.display_area_fraction,
         }
       }))
     }));
@@ -291,6 +299,7 @@ describe('Dashboard controls', () => {
 
     const mapInstance = mapboxgl.__mockMaps[mapboxgl.__mockMaps.length - 1];
     await waitFor(() => {
+      expect(mapInstance.getLayer('observed-fire-cells-fill')).toBeTruthy();
       expect(mapInstance.getLayer('wildfire-footprints-fill')).toBeTruthy();
       expect(mapInstance.getLayer('fire-perimeters-outline')).toBeTruthy();
     });

@@ -57,6 +57,7 @@ MODEL_LSTM_LAYERS = int(os.getenv("MODEL_LSTM_LAYERS", "1"))
 MODEL_CONFIG_PATH = os.getenv("MODEL_CONFIG_PATH") or str(Path(__file__).with_name("model_config.default.json"))
 PRED_SMOOTH_SIGMA = float(os.getenv("PRED_SMOOTH_SIGMA", "1.5"))
 PRED_UPSCALE = int(os.getenv("PRED_UPSCALE", "6"))
+PRED_DISPLAY_FLOOR = float(os.getenv("PRED_DISPLAY_FLOOR", "0.02"))
 
 _model = None
 _model_meta = None
@@ -212,6 +213,7 @@ def _model_metadata(config_status: str = None) -> Dict[str, Any]:
         "hidden": MODEL_HIDDEN,
         "lstm_layers": MODEL_LSTM_LAYERS,
         "threshold": MODEL_THRESHOLD,
+        "display_floor": PRED_DISPLAY_FLOOR,
         "Tseq": MODEL_TSEQ,
         "step_hours": MODEL_STEP_HOURS,
         "dynamic_order": list(MODEL_DYNAMIC_ORDER),
@@ -450,6 +452,12 @@ def _postprocess_probability(prob: np.ndarray) -> np.ndarray:
         except Exception:
             pass
     return np.clip(prob, 0.0, 1.0)
+
+
+def _resolve_display_floor(value: Optional[float]) -> float:
+    if value is None:
+        return max(0.0, min(1.0, float(PRED_DISPLAY_FLOOR)))
+    return max(0.0, min(1.0, float(value)))
 
 
 def _resize_prob_to_shape(prob: np.ndarray, shape: Tuple[int, int]) -> np.ndarray:
@@ -1001,6 +1009,7 @@ def healthz():
         "hidden": MODEL_HIDDEN,
         "lstm_layers": MODEL_LSTM_LAYERS,
         "threshold": MODEL_THRESHOLD,
+        "display_floor": PRED_DISPLAY_FLOOR,
         "Tseq": MODEL_TSEQ,
         "step_hours": MODEL_STEP_HOURS,
         "dynamic_order": MODEL_DYNAMIC_ORDER,
@@ -1089,6 +1098,7 @@ def predict_raster_json(
     lon: float = Query(...),
     Tseq: int = Query(MODEL_TSEQ),
     thr: float = Query(None),
+    display_floor: float = Query(None),
     crop_frac: float = Query(0.5),
     ignition: bool = Query(False),
     date: str = Query(None),
@@ -1100,18 +1110,21 @@ def predict_raster_json(
     crop_window = _build_crop_window(prob.shape, bounds, lat, lon, crop_frac)
     prob, bounds, anchor_px = _apply_crop_window(prob, crop_window)
     threshold = float(thr) if thr is not None else MODEL_THRESHOLD
-    png = _prob_to_display_png(prob, threshold=threshold, anchor_px=anchor_px)
+    resolved_display_floor = _resolve_display_floor(display_floor)
+    png = _prob_to_display_png(prob, threshold=resolved_display_floor, anchor_px=anchor_px)
 
     return {
         "bounds": list(map(float, bounds)),
         "coordinates": crop_window["coordinates"],
         "image_base64": base64.b64encode(png).decode("ascii"),
         "threshold": threshold,
+        "display_floor": resolved_display_floor,
         "prob_min": float(prob.min()),
         "prob_mean": float(prob.mean()),
         "prob_max": float(prob.max()),
         "area_fraction": float((prob >= threshold).mean()),
-        "probability_scale": {"mode": "absolute", "min": 0.0, "max": 1.0},
+        "display_area_fraction": float((prob >= resolved_display_floor).mean()),
+        "probability_scale": {"mode": "absolute", "min": 0.0, "max": 1.0, "display_floor": resolved_display_floor},
         "model_meta": _model_metadata(),
         "input_summary": input_summary,
     }
@@ -1159,6 +1172,7 @@ def predict_multistep(
     steps: int = Query(6),
     step_hours: int = Query(MODEL_STEP_HOURS),
     thr: float = Query(None),
+    display_floor: float = Query(None),
     crop_frac: float = Query(0.5),
     ignition: bool = Query(False),
     date: str = Query(None),
@@ -1176,6 +1190,7 @@ def predict_multistep(
 ):
     ref_time = _parse_date_param(date)
     threshold = float(thr) if thr is not None else MODEL_THRESHOLD
+    resolved_display_floor = _resolve_display_floor(display_floor)
     debug_modes = {tok.strip().lower() for tok in (debug or "").split(",") if tok.strip()}
     debug_solid = "solid" in debug_modes
     debug_dump = "dump" in debug_modes
@@ -1231,7 +1246,7 @@ def predict_multistep(
             # so the plumbing test isn't confounded by per-pixel masking.
             png = _encode_solid_png(cropped.shape, value=0.5)
         else:
-            png = _prob_to_display_png(cropped, threshold=threshold, anchor_px=anchor_px)
+            png = _prob_to_display_png(cropped, threshold=resolved_display_floor, anchor_px=anchor_px)
         payload_steps.append({
             "index": step["index"],
             "lead_hours": step["lead_hours"],
@@ -1241,6 +1256,8 @@ def predict_multistep(
             "prob_mean": float(cropped.mean()),
             "prob_max": float(cropped.max()),
             "area_fraction": float((cropped >= threshold).mean()),
+            "display_area_fraction": float((cropped >= resolved_display_floor).mean()),
+            "display_floor": resolved_display_floor,
             "contour": _prob_to_geojson(cropped, cropped_bounds, threshold=threshold),
             "contour_50": _prob_to_geojson(cropped, cropped_bounds, threshold=0.5),
         })
@@ -1275,9 +1292,10 @@ def predict_multistep(
         "bounds": list(map(float, cropped_bounds)),
         "coordinates": crop_window["coordinates"],
         "threshold": threshold,
+        "display_floor": resolved_display_floor,
         "step_hours": int(step_hours),
         "steps": payload_steps,
-        "probability_scale": {"mode": "absolute", "min": 0.0, "max": 1.0},
+        "probability_scale": {"mode": "absolute", "min": 0.0, "max": 1.0, "display_floor": resolved_display_floor},
         "model_meta": _model_metadata(),
         "input_summary": _tensor_input_summary(
             debug_sink["dyn"],
