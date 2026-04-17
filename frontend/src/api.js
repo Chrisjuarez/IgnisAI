@@ -63,7 +63,7 @@ export const predictFireSpreadVector = async ({ lat, lng, lon, thr, Tseq, date }
  * Raster overlay (bounds + image_base64)
  * Backend expects: /predict-fire-spread/raster?lat=&lon=
  */
-export const predictFireSpreadRaster = async ({ lat, lng, lon, thr, Tseq, date } = {}) => {
+export const predictFireSpreadRaster = async ({ lat, lng, lon, thr, displayFloor, Tseq, date } = {}) => {
   const latitude = lat != null ? Number(lat) : null;
   const longitude =
     lon != null ? Number(lon) : (lng != null ? Number(lng) : null);
@@ -80,6 +80,7 @@ export const predictFireSpreadRaster = async ({ lat, lng, lon, thr, Tseq, date }
       lon: longitude,
       ...(Tseq ? { Tseq } : {}),
       ...(threshold != null && !Number.isNaN(threshold) ? { thr: threshold } : {}),
+      ...(displayFloor != null && !Number.isNaN(Number(displayFloor)) ? { display_floor: Number(displayFloor) } : {}),
       ...(date ? { date } : {}),
     },
   });
@@ -100,6 +101,7 @@ export const predictFireSpreadMultistep = async ({
   date,
   steps,
   stepHours,
+  displayFloor,
 } = {}) => {
   const latitude = lat != null ? Number(lat) : null;
   const longitude =
@@ -119,6 +121,7 @@ export const predictFireSpreadMultistep = async ({
       ...(stepHours ? { step_hours: stepHours } : {}),
       ...(Tseq ? { Tseq } : {}),
       ...(threshold != null && !Number.isNaN(threshold) ? { thr: threshold } : {}),
+      ...(displayFloor != null && !Number.isNaN(Number(displayFloor)) ? { display_floor: Number(displayFloor) } : {}),
       ...(date ? { date } : {}),
     },
   });

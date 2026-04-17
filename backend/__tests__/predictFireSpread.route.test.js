@@ -20,12 +20,14 @@ describe('GET /api/predict-fire-spread routes', () => {
           [-118.6, 34.0],
         ],
         image_base64: 'abc123',
-        threshold: 0.01,
+        threshold: 0.85,
+        display_floor: 0.02,
         prob_min: 0.0,
         prob_mean: 0.04,
         prob_max: 0.21,
-        area_fraction: 0.13,
-        probability_scale: { mode: 'absolute', min: 0, max: 1 },
+        area_fraction: 0.00,
+        display_area_fraction: 0.13,
+        probability_scale: { mode: 'absolute', min: 0, max: 1, display_floor: 0.02 },
         model_meta: {
           Tseq: 6,
           step_hours: 24,
@@ -48,8 +50,10 @@ describe('GET /api/predict-fire-spread routes', () => {
         [-118.6, 34.0],
       ],
       image_base64: 'abc123',
-      threshold: 0.01,
-      probability_scale: { mode: 'absolute', min: 0, max: 1 },
+      threshold: 0.85,
+      display_floor: 0.02,
+      display_area_fraction: 0.13,
+      probability_scale: { mode: 'absolute', min: 0, max: 1, display_floor: 0.02 },
       model_meta: {
         Tseq: 6,
         step_hours: 24,
@@ -76,9 +80,10 @@ describe('GET /api/predict-fire-spread routes', () => {
           [-118.1, 34.0],
           [-118.6, 34.0],
         ],
-        threshold: 0.01,
+        threshold: 0.85,
+        display_floor: 0.02,
         step_hours: 6,
-        probability_scale: { mode: 'absolute', min: 0, max: 1 },
+        probability_scale: { mode: 'absolute', min: 0, max: 1, display_floor: 0.02 },
         model_meta: { Tseq: 2, step_hours: 6 },
         steps: [
           {
@@ -89,7 +94,9 @@ describe('GET /api/predict-fire-spread routes', () => {
             prob_min: 0.0,
             prob_mean: 0.03,
             prob_max: 0.14,
-            area_fraction: 0.08,
+            area_fraction: 0.00,
+            display_area_fraction: 0.08,
+            display_floor: 0.02,
           }
         ],
       }
@@ -104,6 +111,7 @@ describe('GET /api/predict-fire-spread routes', () => {
         step_hours: 6,
         Tseq: 2,
         thr: 0.05,
+        display_floor: 0.02,
         crop_frac: 0.4,
         date: '2021-08-14',
       })
@@ -117,9 +125,10 @@ describe('GET /api/predict-fire-spread routes', () => {
         [-118.1, 34.0],
         [-118.6, 34.0],
       ],
-      threshold: 0.01,
+      threshold: 0.85,
+      display_floor: 0.02,
       step_hours: 6,
-      probability_scale: { mode: 'absolute', min: 0, max: 1 },
+      probability_scale: { mode: 'absolute', min: 0, max: 1, display_floor: 0.02 },
       model_meta: { Tseq: 2, step_hours: 6 },
       steps: [
         expect.objectContaining({
@@ -139,6 +148,7 @@ describe('GET /api/predict-fire-spread routes', () => {
           step_hours: '6',
           Tseq: '2',
           thr: '0.05',
+          display_floor: '0.02',
           crop_frac: '0.4',
           date: '2021-08-14',
           ignition: true,
