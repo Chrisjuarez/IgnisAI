@@ -161,10 +161,10 @@ router.get("/vector", async (req, res) => {
   }
 });
 
-// GET /api/predict-fire-spread/multistep?lat=&lon=&steps=&step_hours=&Tseq=&thr=&date=
+// GET /api/predict-fire-spread/multistep?lat=&lon=&steps=&step_hours=&Tseq=&thr=&date=&debug=
 router.get("/multistep", async (req, res) => {
   try {
-    const { lat, lon, steps, step_hours, Tseq, thr, crop_frac, date } = req.query;
+    const { lat, lon, steps, step_hours, Tseq, thr, crop_frac, date, debug } = req.query;
     if (lat == null || lon == null) {
       return res.status(400).json({ error: "lat and lon are required" });
     }
@@ -178,6 +178,10 @@ router.get("/multistep", async (req, res) => {
       ...(thr ? { thr } : {}),
       crop_frac: crop_frac != null ? crop_frac : 0.5,
       ...(date ? { date, ignition: true } : {}),
+      // Forward diagnostic modes (e.g. "solid", "dump", "solid,dump")
+      // so we can exercise the tilesvc debug harness through the normal
+      // stack without hitting the python service directly.
+      ...(debug ? { debug } : {}),
     };
 
     const forecast = await getJSON(`${TILE_SVC}/predict_multistep`, params, 80000);
@@ -191,6 +195,7 @@ router.get("/multistep", async (req, res) => {
       threshold: forecast?.threshold,
       step_hours: forecast?.step_hours,
       steps: forecast.steps,
+      ...(forecast?.debug ? { debug: forecast.debug } : {}),
     });
   } catch (err) {
     console.error("multistep error:", err?.response?.data || err.message);
