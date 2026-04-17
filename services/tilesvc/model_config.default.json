@@ -1,0 +1,46 @@
+{
+  "model_name": "convlstm_unet_Cd7_Cs15_H96_T6_nautilus",
+  "cd": 7,
+  "cs": 15,
+  "hidden": 96,
+  "lstm_layers": 1,
+  "seq_len": 6,
+  "step_hours": 24,
+  "threshold": 0.85,
+  "dynamic_order": ["fire_t", "u", "v", "gust", "tempC", "q", "precip"],
+  "static_order": [
+    "elev",
+    "slope",
+    "aspect_cos",
+    "aspect_sin",
+    "ndvi",
+    "bi",
+    "erc",
+    "pdsi",
+    "chili",
+    "impervious",
+    "water",
+    "population",
+    "fuel1",
+    "fuel2",
+    "fuel3"
+  ],
+  "static_placeholders": [
+    "ndvi",
+    "bi",
+    "erc",
+    "pdsi",
+    "chili",
+    "impervious",
+    "water",
+    "population",
+    "fuel1",
+    "fuel2",
+    "fuel3"
+  ],
+  "production_valid": false,
+  "normalization": {
+    "status": "checkpoint_metadata_required_for_training_parity"
+  },
+  "notes": "Default serving config copied from Model_Eval.ipynb metadata for the current T6 H96 checkpoint. Static placeholder channels make this model audit-visible but not production-valid until real rasters or a retrained checkpoint are used. FIRMS FRP is preserved for footprints/audit, but this checkpoint was not trained with an FRP dynamic channel."
+}

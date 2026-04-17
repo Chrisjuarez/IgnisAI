@@ -62,6 +62,7 @@ tryMount('/api', './routes/fireData');
 tryMount('/api/weather', './routes/weather');
 tryMount('/api/topography', './routes/topography');
 tryMount('/api/ndvi', './routes/ndvi');
+tryMount('/api/fire-perimeters', './routes/firePerimeters');
 tryMount('/api/predict-fire-spread', './routes/predictFireSpread');
 
 // Export app for tests (your existing code - unchanged)

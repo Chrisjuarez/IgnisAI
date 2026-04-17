@@ -6,6 +6,14 @@ const WildfireSchema = new mongoose.Schema({
   brightness: { type: Number, required: true },
   confidence: { type: Number, required: true },  // ← number 0..100
   satellite:  { type: String, required: true },
+  instrument: { type: String },
+  product: { type: String },
+  scan: { type: Number },
+  track: { type: Number },
+  frp: { type: Number },
+  daynight: { type: String },
+  version: { type: String },
+  brightTi5: { type: Number },
   timestamp: { type: Date, required: true, index: true }
 }, { timestamps: false });
 module.exports = mongoose.model('Wildfire', WildfireSchema);
