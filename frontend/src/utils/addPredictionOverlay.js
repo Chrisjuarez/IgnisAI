@@ -108,12 +108,26 @@ async function colorizeGrayscalePngToHeatmapDataUrl(base64Png, opts = {}) {
   } = opts;
 
   const img = new Image();
-  img.crossOrigin = 'anonymous';
+  // Note: do NOT set crossOrigin on a data: URL — some browsers reject the
+  // load and silently never fire onload, leaving the colorize promise hung.
   img.src = `data:image/png;base64,${base64Png}`;
 
   await new Promise((resolve, reject) => {
-    img.onload = resolve;
-    img.onerror = () => reject(new Error('failed to decode PNG image'));
+    let settled = false;
+    const onSettle = (fn, arg) => {
+      if (settled) return;
+      settled = true;
+      fn(arg);
+    };
+    // 8s is plenty for any browser to decode a PNG from a data URL; if it
+    // hasn't fired by then the load is stuck (common on memory pressure)
+    // and the caller deserves a real error rather than a silent hang.
+    const timer = setTimeout(
+      () => onSettle(reject, new Error('PNG decode timed out (8s)')),
+      8000,
+    );
+    img.onload = () => { clearTimeout(timer); onSettle(resolve); };
+    img.onerror = () => { clearTimeout(timer); onSettle(reject, new Error('failed to decode PNG image')); };
   });
 
   // Base draw
@@ -329,37 +343,39 @@ export async function prepareMultistepRasterFrames(payload, opts = {}) {
     throw new Error('Multistep payload did not include any steps');
   }
 
-  const frames = await Promise.all(
-    steps.map(async step => {
-      if (!step?.image_base64 || typeof step.image_base64 !== 'string') {
-        throw new Error('Multistep step missing image_base64');
-      }
-      const heatmapUrl = await colorizeGrayscalePngToHeatmapDataUrl(step.image_base64, {
-        gamma: opts.gamma ?? GAMMA_MULTISTEP,
-        opacity: opts.opacity ?? 0.85,
-        smooth: opts.smooth ?? true,
-      });
-      return {
-        ...step,
-        bounds,
-        coordinates: payload?.coordinates,
-        heatmapUrl,
-        meta: {
-          threshold: payload?.threshold,
-          display_floor: step?.display_floor ?? payload?.display_floor,
-          step_hours: payload?.step_hours,
-          prob_min: step?.prob_min,
-          prob_mean: step?.prob_mean,
-          prob_max: step?.prob_max,
-          area_fraction: step?.area_fraction,
-          display_area_fraction: step?.display_area_fraction,
-          probability_scale: payload?.probability_scale,
-          model_meta: payload?.model_meta,
-          input_summary: payload?.input_summary,
-        },
-      };
-    })
-  );
+  // Colorize one frame at a time. Promise.all here used to allocate every
+  // frame's intermediate canvases concurrently, which was enough to stall
+  // (or OOM) the browser tab on big PNGs and made the overlay never appear.
+  const frames = [];
+  for (const step of steps) {
+    if (!step?.image_base64 || typeof step.image_base64 !== 'string') {
+      throw new Error('Multistep step missing image_base64');
+    }
+    const heatmapUrl = await colorizeGrayscalePngToHeatmapDataUrl(step.image_base64, {
+      gamma: opts.gamma ?? GAMMA_MULTISTEP,
+      opacity: opts.opacity ?? 0.85,
+      smooth: opts.smooth ?? true,
+    });
+    frames.push({
+      ...step,
+      bounds,
+      coordinates: payload?.coordinates,
+      heatmapUrl,
+      meta: {
+        threshold: payload?.threshold,
+        display_floor: step?.display_floor ?? payload?.display_floor,
+        step_hours: payload?.step_hours,
+        prob_min: step?.prob_min,
+        prob_mean: step?.prob_mean,
+        prob_max: step?.prob_max,
+        area_fraction: step?.area_fraction,
+        display_area_fraction: step?.display_area_fraction,
+        probability_scale: payload?.probability_scale,
+        model_meta: payload?.model_meta,
+        input_summary: payload?.input_summary,
+      },
+    });
+  }
 
   return {
     bounds,
