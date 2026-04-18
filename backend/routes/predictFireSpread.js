@@ -48,10 +48,21 @@ function pickModelFields(payload = {}) {
   };
 }
 
+// Normalize the optional `ignition` query param. Defaults to true so live
+// clicks always seed a starting fire — FIRMS has lag and misses small fires,
+// so without ignition the model is handed an empty fire channel and produces
+// a blank forecast. Callers can still opt out with `ignition=false`.
+function resolveIgnition(raw) {
+  if (raw == null) return true;
+  const v = String(raw).trim().toLowerCase();
+  if (["0", "false", "no", "off"].includes(v)) return false;
+  return true;
+}
+
 // GET /api/predict-fire-spread/raster?lat=&lon=&Tseq=&thr=&date=
 router.get("/raster", async (req, res) => {
   try {
-    const { lat, lon, Tseq, thr, display_floor, crop_frac, date } = req.query;
+    const { lat, lon, Tseq, thr, display_floor, crop_frac, date, ignition } = req.query;
     if (lat == null || lon == null) {
       return res.status(400).json({ error: "lat and lon are required" });
     }
@@ -63,7 +74,8 @@ router.get("/raster", async (req, res) => {
       ...(thr ? { thr } : {}),
       ...(display_floor ? { display_floor } : {}),
       crop_frac: crop_frac != null ? crop_frac : 0.5,
-      ...(date ? { date, ignition: true } : {}),
+      ...(date ? { date } : {}),
+      ignition: resolveIgnition(ignition),
     };
 
     // tilesvc returns base64 PNG + bounds; crop centers the output on the fire point
@@ -97,25 +109,28 @@ router.get("/raster", async (req, res) => {
 // GET /api/predict-fire-spread/vector?lat=&lon=&Tseq=&thr=&date=
 router.get("/vector", async (req, res) => {
   try {
-    const { lat, lon, Tseq, thr, crop_frac, date } = req.query;
+    const { lat, lon, Tseq, thr, crop_frac, date, ignition } = req.query;
     if (lat == null || lon == null) {
       return res.status(400).json({ error: "lat and lon are required" });
     }
 
     const crop = crop_frac != null ? crop_frac : 0.5;
-    const dateParams = date ? { date, ignition: true } : {};
+    const sharedParams = {
+      ...(date ? { date } : {}),
+      ignition: resolveIgnition(ignition),
+    };
 
     // 1) GeoJSON polygons from tilesvc (honor thr!)
     const geojson = await getJSON(
       `${TILE_SVC}/predict_geojson`,
-      { lat, lon, ...(Tseq ? { Tseq } : {}), ...(thr ? { thr } : {}), crop_frac: crop, ...dateParams },
+      { lat, lon, ...(Tseq ? { Tseq } : {}), ...(thr ? { thr } : {}), crop_frac: crop, ...sharedParams },
       20000
     );
 
     // 2) Meta (area_fraction + threshold + bounds) from tilesvc
     const meta = await getJSON(
       `${TILE_SVC}/predict`,
-      { lat, lon, ...(Tseq ? { Tseq } : {}), png: false, ...(thr ? { thr } : {}), crop_frac: crop, ...dateParams },
+      { lat, lon, ...(Tseq ? { Tseq } : {}), png: false, ...(thr ? { thr } : {}), crop_frac: crop, ...sharedParams },
       80000
     );
 
@@ -185,7 +200,7 @@ router.get("/vector", async (req, res) => {
 // GET /api/predict-fire-spread/multistep?lat=&lon=&steps=&step_hours=&Tseq=&thr=&date=&debug=
 router.get("/multistep", async (req, res) => {
   try {
-    const { lat, lon, steps, step_hours, Tseq, thr, display_floor, crop_frac, date, debug } = req.query;
+    const { lat, lon, steps, step_hours, Tseq, thr, display_floor, crop_frac, date, debug, ignition } = req.query;
     if (lat == null || lon == null) {
       return res.status(400).json({ error: "lat and lon are required" });
     }
@@ -199,7 +214,8 @@ router.get("/multistep", async (req, res) => {
       ...(thr ? { thr } : {}),
       ...(display_floor ? { display_floor } : {}),
       crop_frac: crop_frac != null ? crop_frac : 0.5,
-      ...(date ? { date, ignition: true } : {}),
+      ...(date ? { date } : {}),
+      ignition: resolveIgnition(ignition),
       // Forward diagnostic modes (e.g. "solid", "dump", "solid,dump")
       // so we can exercise the tilesvc debug harness through the normal
       // stack without hitting the python service directly.
@@ -241,7 +257,8 @@ router.get("/input-audit", async (req, res) => {
         lat,
         lon,
         ...(Tseq ? { Tseq } : {}),
-        ...(date ? { date, ignition: ignition ?? true } : (ignition != null ? { ignition } : {})),
+        ...(date ? { date } : {}),
+        ignition: resolveIgnition(ignition),
         ...(step_hours ? { step_hours } : {}),
       },
       80000
