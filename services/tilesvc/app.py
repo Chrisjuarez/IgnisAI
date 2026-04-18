@@ -53,10 +53,10 @@ MODEL_THRESHOLD = float(os.getenv("MODEL_THRESHOLD", "0.01"))
 MODEL_CD = int(os.getenv("MODEL_CD", "7"))
 MODEL_CS = int(os.getenv("MODEL_CS", "15"))
 MODEL_HIDDEN = int(os.getenv("MODEL_HIDDEN", "128"))
-MODEL_LSTM_LAYERS = int(os.getenv("MODEL_LSTM_LAYERS", "1"))
+MODEL_LSTM_LAYERS = int(os.getenv("MODEL_LSTM_LAYERS", "2"))
 MODEL_CONFIG_PATH = os.getenv("MODEL_CONFIG_PATH") or str(Path(__file__).with_name("model_config.default.json"))
 PRED_SMOOTH_SIGMA = float(os.getenv("PRED_SMOOTH_SIGMA", "1.5"))
-PRED_UPSCALE = int(os.getenv("PRED_UPSCALE", "6"))
+PRED_UPSCALE = int(os.getenv("PRED_UPSCALE", "1"))
 PRED_DISPLAY_FLOOR = float(os.getenv("PRED_DISPLAY_FLOOR", "0.02"))
 
 _model = None

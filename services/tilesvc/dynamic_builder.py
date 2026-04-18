@@ -3,6 +3,8 @@ import os
 import io
 import csv
 import math
+import time
+import threading
 import datetime as dt
 import numpy as np
 import requests
@@ -14,6 +16,41 @@ from ignis_ml.src.data.transforms import wind_to_uv, rh_to_q, fire_boost
 
 NASA_KEY   = (os.getenv("NASA_API_KEY") or "").strip()  # FIRMS “area” API key
 OPEN_METEO = "https://api.open-meteo.com/v1/forecast"
+
+# ---------------- Tiny TTL caches ----------------
+# Multistep predictions call FIRMS once per request but the weather fetch runs
+# T_seq times per request, and users often click the same tile repeatedly.
+# Share results between calls for a short window to avoid duplicating external
+# HTTP round trips (which were a root cause of tilesvc OOMs under bursty load).
+_FIRMS_TTL_SEC    = int(os.getenv("FIRMS_CACHE_TTL",   "300"))  # 5 min
+_WEATHER_TTL_SEC  = int(os.getenv("WEATHER_CACHE_TTL", "600"))  # 10 min
+_CACHE_MAX_ENTRIES = 256
+
+_firms_cache: dict = {}
+_weather_cache: dict = {}
+_cache_lock = threading.Lock()
+
+
+def _cache_get(store: dict, key, ttl: int):
+    with _cache_lock:
+        entry = store.get(key)
+    if not entry:
+        return None
+    ts, val = entry
+    if ttl > 0 and (time.time() - ts) > ttl:
+        with _cache_lock:
+            store.pop(key, None)
+        return None
+    return val
+
+
+def _cache_set(store: dict, key, value):
+    with _cache_lock:
+        if len(store) >= _CACHE_MAX_ENTRIES:
+            # Drop the oldest entry to keep memory bounded.
+            oldest_key = min(store, key=lambda k: store[k][0])
+            store.pop(oldest_key, None)
+        store[key] = (time.time(), value)
 
 # Products to merge for better coverage (NRT = near‑real‑time)
 FIRMS_PRODUCTS = [
@@ -45,6 +82,10 @@ def _fetch_firms_csv(bbox, days=None) -> str:
     """
     bbox=(W,S,E,N). Merge multiple FIRMS NRT products. Returns CSV text.
     FIRMS “area” API expects days in [1..5]; we clamp to that range.
+
+    Cached by (rounded bbox, days) for FIRMS_CACHE_TTL seconds so a storm of
+    clicks on the same tile doesn't hammer the NASA API (and burn tilesvc RAM
+    on redundant CSV parses).
     """
     if not NASA_KEY:
         return ""
@@ -57,6 +98,15 @@ def _fetch_firms_csv(bbox, days=None) -> str:
     s -= FIRMS_PAD_DEG
     e += FIRMS_PAD_DEG
     n += FIRMS_PAD_DEG
+
+    # Round to ~1 km so re-clicks on the same tile hit the cache.
+    cache_key = (
+        round(w, 3), round(s, 3), round(e, 3), round(n, 3), int(days),
+    )
+    cached = _cache_get(_firms_cache, cache_key, _FIRMS_TTL_SEC)
+    if cached is not None:
+        return cached
+
     header_line = None
     bodies = []
     for prod in FIRMS_PRODUCTS:
@@ -76,9 +126,13 @@ def _fetch_firms_csv(bbox, days=None) -> str:
             print(f"⚠️  FIRMS fetch failed for {prod}: {e}")
 
     if not bodies:
-        return ""
-    header_line = header_line or "latitude,longitude,acq_date,acq_time"
-    return header_line + "\n" + "\n".join(bodies)
+        result = ""
+    else:
+        header_line = header_line or "latitude,longitude,acq_date,acq_time"
+        result = header_line + "\n" + "\n".join(bodies)
+
+    _cache_set(_firms_cache, cache_key, result)
+    return result
 
 
 def _parse_firms_points(csv_text: str):
@@ -175,9 +229,30 @@ def fetch_weather_grids(lat: float, lon: float, ref_time: dt.datetime = None):
     Fetch weather and expand to per-pixel constant grids.
     If ref_time is provided and in the past (>24h ago), use the Open-Meteo Archive API.
     Otherwise use the current/forecast API.
+
+    Cached by (rounded lat/lon, ref hour, archive vs forecast) for
+    WEATHER_CACHE_TTL seconds. Each multistep prediction calls this once per
+    timestep (T=6), so this alone removes ~5 duplicate HTTP round trips per
+    request.
     """
     now = dt.datetime.now(dt.timezone.utc)
     use_archive = (ref_time is not None and (now - ref_time).total_seconds() > 86400)
+
+    # Cache key: nearest 0.05° (~5 km) and hour bucket. Open-Meteo archive is
+    # stable; forecast rotates hourly, so hour bucket gives us a natural TTL
+    # without pinning to `ref_time` to the minute.
+    lat_q = round(float(lat), 2)
+    lon_q = round(float(lon), 2)
+    if ref_time is not None:
+        hour_bucket = ref_time.replace(minute=0, second=0, microsecond=0).isoformat()
+    else:
+        hour_bucket = now.replace(minute=0, second=0, microsecond=0).isoformat()
+    cache_key = (lat_q, lon_q, hour_bucket, bool(use_archive))
+
+    cached = _cache_get(_weather_cache, cache_key, _WEATHER_TTL_SEC)
+    if cached is not None:
+        # Return defensive copies so callers can't mutate cached arrays.
+        return {k: v.copy() for k, v in cached.items()}
 
     cur = {}
 
@@ -249,7 +324,7 @@ def fetch_weather_grids(lat: float, lon: float, ref_time: dt.datetime = None):
     q = rh_to_q(np.array(RH, np.float32), np.array(T, np.float32))
 
     H = W = SIZE
-    return {
+    grids = {
         "u":      np.full((H, W), u, np.float32),
         "v":      np.full((H, W), v, np.float32),
         "gust":   np.full((H, W), G, np.float32),
@@ -260,6 +335,8 @@ def fetch_weather_grids(lat: float, lon: float, ref_time: dt.datetime = None):
         "prcp":   np.full((H, W), P, np.float32),
         "precip": np.full((H, W), P, np.float32),
     }
+    _cache_set(_weather_cache, cache_key, {k: v.copy() for k, v in grids.items()})
+    return grids
 
 
 # ---------------- Public API ----------------

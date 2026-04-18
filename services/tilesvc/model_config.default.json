@@ -3,7 +3,7 @@
   "cd": 7,
   "cs": 15,
   "hidden": 96,
-  "lstm_layers": 1,
+  "lstm_layers": 2,
   "seq_len": 6,
   "step_hours": 24,
   "threshold": 0.85,
