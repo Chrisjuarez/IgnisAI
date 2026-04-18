@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 # ---- toggles ----
 USE_GROUPNORM = True     # GN tends to be more stable than BN on small batches/MPS
@@ -119,12 +120,24 @@ class UNetDecoder(nn.Module):
         self.c2 = block(base // 4, base // 4, drop)
         self.out = nn.Conv2d(base // 4, 1, 1)  # logits
 
-    def forward(self, z):
+    def forward(self, z, out_size=None):
         z = self.up1(z)
         z = self.c1(z)
         z = self.up2(z)
         z = self.c2(z)
-        return self.out(z)
+        logits = self.out(z)
+        # The two ConvTranspose2d(stride=2) stages upsample 4x unconditionally,
+        # but the encoder does not downsample. Resample back to the caller's
+        # input resolution so the model output matches the input grid (and we
+        # don't pay 16x the memory/compute the training tiles never needed).
+        if out_size is not None and tuple(logits.shape[-2:]) != tuple(out_size):
+            logits = F.interpolate(
+                logits,
+                size=tuple(out_size),
+                mode="bilinear",
+                align_corners=False,
+            )
+        return logits
 
 
 class ConvLSTMUNet(nn.Module):
@@ -184,4 +197,6 @@ class ConvLSTMUNet(nn.Module):
         z = torch.cat([rnn, stat], dim=1)
         z = self.act(self.fuse_bn(self.fuse(z)))
         z = self.aspp(z)
-        return self.dec(z)
+        # Tell the decoder what spatial size to land on so its 4x upsample
+        # doesn't blow output dimensions past the input grid.
+        return self.dec(z, out_size=(H, W))

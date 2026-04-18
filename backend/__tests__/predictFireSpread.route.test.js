@@ -158,6 +158,81 @@ describe('GET /api/predict-fire-spread routes', () => {
     );
   });
 
+  it('always sends ignition=true on live multistep requests (no date)', async () => {
+    axios.get.mockResolvedValue({
+      data: {
+        bounds: [-118.6, 34.0, -118.1, 34.4],
+        threshold: 0.85,
+        step_hours: 6,
+        steps: [
+          { index: 0, lead_hours: 6, label: '6 hours', image_base64: 'frame-1' },
+        ],
+      }
+    });
+
+    await request(app)
+      .get('/api/predict-fire-spread/multistep')
+      .query({ lat: 34.05, lon: -118.25 })
+      .expect(200);
+
+    expect(axios.get).toHaveBeenCalledWith(
+      expect.stringContaining('/predict_multistep'),
+      expect.objectContaining({
+        params: expect.objectContaining({
+          lat: '34.05',
+          lon: '-118.25',
+          ignition: true,
+        }),
+      })
+    );
+    // Dateless request should not forward a date param.
+    expect(axios.get.mock.calls[0][1].params).not.toHaveProperty('date');
+  });
+
+  it('honors explicit ignition=false opt-out for multistep requests', async () => {
+    axios.get.mockResolvedValue({
+      data: {
+        bounds: [-118.6, 34.0, -118.1, 34.4],
+        threshold: 0.85,
+        step_hours: 6,
+        steps: [
+          { index: 0, lead_hours: 6, label: '6 hours', image_base64: 'frame-1' },
+        ],
+      }
+    });
+
+    await request(app)
+      .get('/api/predict-fire-spread/multistep')
+      .query({ lat: 34.05, lon: -118.25, ignition: 'false' })
+      .expect(200);
+
+    expect(axios.get.mock.calls[0][1].params).toMatchObject({ ignition: false });
+  });
+
+  it('sends ignition=true on live raster requests (no date)', async () => {
+    axios.get.mockResolvedValue({
+      data: {
+        bounds: [-118.6, 34.0, -118.1, 34.4],
+        coordinates: [
+          [-118.6, 34.4],
+          [-118.1, 34.4],
+          [-118.1, 34.0],
+          [-118.6, 34.0],
+        ],
+        image_base64: 'abc123',
+        threshold: 0.85,
+      },
+    });
+
+    await request(app)
+      .get('/api/predict-fire-spread/raster')
+      .query({ lat: 34.05, lon: -118.25 })
+      .expect(200);
+
+    expect(axios.get.mock.calls[0][1].params).toMatchObject({ ignition: true });
+    expect(axios.get.mock.calls[0][1].params).not.toHaveProperty('date');
+  });
+
   it('propagates multistep tilesvc failures as structured 5xx json', async () => {
     axios.get.mockRejectedValue(new Error('tilesvc down'));
 

@@ -40,6 +40,11 @@ const R_EARTH = 3958.8; // miles
 const OBSERVED_CELL_MAX_KM = 0.42;
 const OBSERVED_CELL_MIN_KM = 0.18;
 const DEFAULT_DISPLAY_FLOOR = 0.02;
+// Matches the checkpoint's training cadence (model_config.default.json ->
+// step_hours: 24). Forwarding explicitly keeps the autoregressive rollout in
+// the training distribution; tilesvc will otherwise fall back to its own
+// default which may drift if re-tuned.
+const DEFAULT_STEP_HOURS = 24;
 
 const FOOTPRINT_FILL_COLOR = [
   'match', ['get', 'brightnessCat'],
@@ -331,6 +336,11 @@ const MapComponent = forwardRef(({
   const [wildfireFootprints, setWildfireFootprints] = useState(emptyFeatureCollection);
   const [firePerimeters, setFirePerimeters] = useState(emptyFeatureCollection);
   const [isPredicting, setIsPredicting] = useState(false);
+  // Synchronous re-entry guard so rapid double-clicks on the "predict" action
+  // can't fire two concurrent tilesvc rollouts before React re-renders the
+  // state flag. This is what was showing up in the tilesvc logs as duplicate
+  // step 1..6 lines for the same (lat, lon).
+  const isPredictingRef = useRef(false);
   const [activePopup, setActivePopup]   = useState(null);
   const [forecastFrames, setForecastFrames] = useState([]);
   const [activeForecastIndex, setActiveForecastIndex] = useState(0);
@@ -344,6 +354,9 @@ const MapComponent = forwardRef(({
   const [showHistPanel, setShowHistPanel] = useState(false);
   const [histDate, setHistDate]           = useState('');
   const [histRunning, setHistRunning]     = useState(false);
+  // Same story as isPredictingRef — guard the historical preset clicks
+  // against double-fire while React state is still flushing.
+  const histRunningRef = useRef(false);
 
   // NDVI overlay state
   const [ndviOn, setNdviOn] = useState(false);
@@ -577,19 +590,6 @@ const MapComponent = forwardRef(({
     setObservedLayerMode('normal');
   }, []);
 
-  const retryPrediction = useCallback(async (label, task, retries = 3) => {
-    let lastErr = null;
-    for (let attempt = 0; attempt < retries; attempt++) {
-      try {
-        return await task();
-      } catch (err) {
-        lastErr = err;
-        console.warn(`${label} attempt ${attempt + 1} failed, retrying...`, err.message);
-      }
-    }
-    throw lastErr;
-  }, []);
-
   const loadForecastTimeline = useCallback(async ({
     lat,
     lon,
@@ -602,16 +602,16 @@ const MapComponent = forwardRef(({
     setIsForecastLoading(true);
     setForecastError(null);
     try {
-      const response = await retryPrediction('Forecast timeline', () =>
-        predictFireSpreadMultistep({
-          lat,
-          lon,
-          date,
-          steps,
-          displayFloor: DEFAULT_DISPLAY_FLOOR,
-          ...(stepHours ? { stepHours } : {}),
-        })
-      );
+      // Express proxy already retries upstream; don't double up from the
+      // browser or tilesvc queues up redundant expensive predictions.
+      const response = await predictFireSpreadMultistep({
+        lat,
+        lon,
+        date,
+        steps,
+        displayFloor: DEFAULT_DISPLAY_FLOOR,
+        ...(stepHours ? { stepHours } : {}),
+      });
       const payload = response?.data ?? response;
 
       const prepared = await prepareMultistepRasterFrames(payload, {
@@ -636,11 +636,14 @@ const MapComponent = forwardRef(({
     } finally {
       setIsForecastLoading(false);
     }
-  }, [retryPrediction]);
+  }, []);
 
   // ---------- Prediction ----------
   const handlePredictFireSpread = async (fireProps) => {
-    if (isPredicting) return;
+    // Synchronous check + set on the ref blocks a second click that fires
+    // before React flushes the isPredicting state update from a first click.
+    if (isPredictingRef.current) return;
+    isPredictingRef.current = true;
     setIsPredicting(true);
     try {
       if (activePopup) activePopup.remove();
@@ -650,6 +653,7 @@ const MapComponent = forwardRef(({
         lat: fireProps.latitude,
         lon: fireProps.longitude,
         title: 'Ignis Forecast Timeline',
+        stepHours: DEFAULT_STEP_HOURS,
       });
       showPredictionPopup(fireProps, forecastSummaryFromPrepared(prepared));
     } catch (error) {
@@ -670,6 +674,7 @@ const MapComponent = forwardRef(({
         setActivePopup(popup);
       }
     } finally {
+      isPredictingRef.current = false;
       setIsPredicting(false);
     }
   };
@@ -841,7 +846,10 @@ const MapComponent = forwardRef(({
   // ---------- Historical fire test ----------
   const runHistoricalPrediction = async (preset) => {
     const map = mapRef.current;
-    if (!map || histRunning) return;
+    // Synchronous check + set on the ref blocks a second click that fires
+    // before React flushes the histRunning state update from a first click.
+    if (!map || histRunningRef.current) return;
+    histRunningRef.current = true;
     setHistRunning(true);
     try {
       const { lat, lon, date, zoom, name, incidentName, displayDate } = preset;
@@ -861,6 +869,7 @@ const MapComponent = forwardRef(({
         lon,
         date,
         title: `${name} Forecast Timeline`,
+        stepHours: DEFAULT_STEP_HOURS,
       });
 
       // Show info popup
@@ -893,6 +902,7 @@ const MapComponent = forwardRef(({
       setObservedLayerMode('normal');
       setForecastError(e?.message || 'Historical forecast failed. Please try again.');
     } finally {
+      histRunningRef.current = false;
       setHistRunning(false);
     }
   };
