@@ -39,7 +39,16 @@ const API_BASE =
 const R_EARTH = 3958.8; // miles
 const OBSERVED_CELL_MAX_KM = 0.42;
 const OBSERVED_CELL_MIN_KM = 0.18;
-const DEFAULT_DISPLAY_FLOOR = 0.02;
+// Lowered from 0.02 so weak forecasts (common when static channels like NDVI/
+// BI/ERC are still placeholders) still show *something* on the map instead of
+// a fully-transparent PNG. Raise again once the model is fed real static
+// channel data.
+const DEFAULT_DISPLAY_FLOOR = 0.001;
+// Hard ceiling on how long we'll wait for a multistep forecast before giving
+// up and clearing the loading spinner. tilesvc cold-starts + FIRMS/weather
+// fetches + rollout can legitimately take ~45s, so 90s leaves headroom while
+// still guaranteeing the UI never spins forever.
+const FORECAST_TIMEOUT_MS = 90_000;
 // Matches the checkpoint's training cadence (model_config.default.json ->
 // step_hours: 24). Forwarding explicitly keeps the autoregressive rollout in
 // the training distribution; tilesvc will otherwise fall back to its own
@@ -601,7 +610,19 @@ const MapComponent = forwardRef(({
   }) => {
     setIsForecastLoading(true);
     setForecastError(null);
-    try {
+
+    // Safety net: if anything in the pipeline (axios, image decode, map render)
+    // hangs, force-clear the spinner after FORECAST_TIMEOUT_MS and surface an
+    // error. Without this the UI can get stuck on "LOADING FORECAST…" forever
+    // even after the network request completes.
+    let timeoutHandle = null;
+    const timeoutPromise = new Promise((_, reject) => {
+      timeoutHandle = setTimeout(() => {
+        reject(new Error(`Forecast timed out after ${Math.round(FORECAST_TIMEOUT_MS / 1000)}s`));
+      }, FORECAST_TIMEOUT_MS);
+    });
+
+    const work = (async () => {
       // Express proxy already retries upstream; don't double up from the
       // browser or tilesvc queues up redundant expensive predictions.
       const response = await predictFireSpreadMultistep({
@@ -633,7 +654,12 @@ const MapComponent = forwardRef(({
       setIsForecastPlaying(false);
       setForecastVisible(true);
       return prepared;
+    })();
+
+    try {
+      return await Promise.race([work, timeoutPromise]);
     } finally {
+      if (timeoutHandle) clearTimeout(timeoutHandle);
       setIsForecastLoading(false);
     }
   }, []);
