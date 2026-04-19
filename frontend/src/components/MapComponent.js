@@ -45,10 +45,12 @@ const OBSERVED_CELL_MIN_KM = 0.18;
 // channel data.
 const DEFAULT_DISPLAY_FLOOR = 0.001;
 // Hard ceiling on how long we'll wait for a multistep forecast before giving
-// up and clearing the loading spinner. tilesvc cold-starts + FIRMS/weather
-// fetches + rollout can legitimately take ~45s, so 90s leaves headroom while
-// still guaranteeing the UI never spins forever.
-const FORECAST_TIMEOUT_MS = 90_000;
+// up and clearing the loading spinner. tilesvc cold-starts on Render (boot +
+// FIRMS + weather + model load) + the 6-step rollout can legitimately take
+// 3-4 minutes, so this has to be *looser* than axios (300s) — otherwise the
+// spinner claims a timeout before the request actually aborts. 360s gives
+// axios a chance to surface its own error first for clearer logs.
+const FORECAST_TIMEOUT_MS = 360_000;
 // Matches the checkpoint's training cadence (model_config.default.json ->
 // step_hours: 24). Forwarding explicitly keeps the autoregressive rollout in
 // the training distribution; tilesvc will otherwise fall back to its own
