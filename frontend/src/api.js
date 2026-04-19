@@ -7,9 +7,19 @@ const API_BASE =
   "/api";
 
 // Axios client
+// 80s was too tight: on Render cold-starts tilesvc needs ~1-2 min to boot
+// (FIRMS + weather + model load) before it even starts the 6-step rollout,
+// so the browser would abort ~halfway through the first attempt and leave
+// Express retrying from step 1 forever. 300s gives enough headroom for a
+// full cold-start + rollout while still bounding hangs.
+const DEFAULT_TIMEOUT_MS = 300_000;
+// Multistep rollout specifically can legitimately take 3-4 minutes on a
+// cold tilesvc instance. Callers can still override.
+const MULTISTEP_TIMEOUT_MS = 300_000;
+
 const api = axios.create({
   baseURL: API_BASE,
-  timeout: 80000,
+  timeout: DEFAULT_TIMEOUT_MS,
 });
 
 const rawDefaultThreshold =
@@ -114,6 +124,9 @@ export const predictFireSpreadMultistep = async ({
   const threshold = thr == null ? DEFAULT_THR : Number(thr);
 
   const { data } = await api.get("/predict-fire-spread/multistep", {
+    // Cold-start tilesvc + 6-step rollout can take 3-4 minutes; explicit
+    // override so a future lower default on `api` doesn't silently regress.
+    timeout: MULTISTEP_TIMEOUT_MS,
     params: {
       lat: latitude,
       lon: longitude,
