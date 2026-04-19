@@ -153,7 +153,9 @@ describe('GET /api/predict-fire-spread routes', () => {
           date: '2021-08-14',
           ignition: true,
         }),
-        timeout: 80000,
+        // Multistep uses a longer ceiling (default 240s) because tilesvc
+        // cold-start + 6-step rollout exceeds the 80s used by other routes.
+        timeout: 240000,
       })
     );
   });

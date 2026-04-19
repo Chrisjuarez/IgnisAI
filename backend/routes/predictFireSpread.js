@@ -26,7 +26,11 @@ async function getJSON(url, params = {}, timeout = 80000, retries = 2) {
     } catch (err) {
       lastErr = err;
       const status = err?.response?.status;
-      // Retry on connection errors or 502/504 (tilesvc cold start)
+      // Retry on connection errors or 502/504 (tilesvc cold start).
+      // NOTE: for long-running endpoints (e.g. /predict_multistep) pass
+      // retries=0 — each retry restarts the rollout from step 1 and
+      // wastes minutes of compute. Use a generous single-attempt timeout
+      // instead.
       if (i < retries && (!status || status === 502 || status === 504)) {
         console.warn(`getJSON attempt ${i + 1} failed (${status || err.code}), retrying...`);
         if (PREDICT_RETRY_BACKOFF_MS > 0) {
@@ -39,6 +43,11 @@ async function getJSON(url, params = {}, timeout = 80000, retries = 2) {
   }
   throw lastErr;
 }
+
+// tilesvc cold-start (boot + FIRMS + weather + model load) + 6-step rollout
+// can take 3-4 minutes. A shorter timeout aborts the client before the model
+// finishes and forces a full restart from step 1.
+const MULTISTEP_TIMEOUT_MS = Number(process.env.MULTISTEP_TIMEOUT_MS || 240000);
 
 function pickModelFields(payload = {}) {
   return {
@@ -222,7 +231,10 @@ router.get("/multistep", async (req, res) => {
       ...(debug ? { debug } : {}),
     };
 
-    const forecast = await getJSON(`${TILE_SVC}/predict_multistep`, params, 80000);
+    // retries=0: a multistep retry restarts the whole rollout on tilesvc's
+    // side, which usually guarantees the next attempt also times out. One
+    // generous attempt is strictly better.
+    const forecast = await getJSON(`${TILE_SVC}/predict_multistep`, params, MULTISTEP_TIMEOUT_MS, 0);
     if (!Array.isArray(forecast?.bounds) || forecast.bounds.length !== 4 || !Array.isArray(forecast?.steps)) {
       throw new Error(`tilesvc multistep missing bounds/steps: ${JSON.stringify(forecast)?.slice(0, 200)}`);
     }
