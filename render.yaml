@@ -17,7 +17,7 @@ services:
     staticPublishPath: build
     envVars:
       - key: REACT_APP_API_URL
-        sync: false # Set to https://ignisai-backend.onrender.com/api after backend deploys
+        value: https://ignisai-backend.onrender.com/api
       - key: REACT_APP_MAPBOX_TOKEN
         sync: false # Your Mapbox access token
       - key: NODE_VERSION
@@ -46,7 +46,7 @@ services:
       - key: TILE_SVC
         sync: false # Set to https://ignisai-tilesvc.onrender.com after tilesvc deploys
       - key: CORS_ORIGIN
-        sync: false # Set to https://ignisai-frontend.onrender.com after frontend deploys
+        value: https://ignisai-frontend.onrender.com
 
   # ---- Python/FastAPI Tile Service (Starter $7/mo) ----
   - type: web
