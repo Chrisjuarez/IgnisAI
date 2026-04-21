@@ -72,7 +72,8 @@ router.get('/', async (req, res) => {
     health.status = 'DEGRADED';
   }
 
-  const statusCode = health.status === 'OK' ? 200 : 503;
+  const strict = req.query.strict === '1' || req.query.strict === 'true';
+  const statusCode = strict && health.status !== 'OK' ? 503 : 200;
   res.status(statusCode).json(health);
 });
 
