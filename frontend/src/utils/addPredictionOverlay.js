@@ -270,7 +270,8 @@ export async function renderPredictionRasterFrame(map, frame, opts = {}) {
   await waitForMapLoad(map);
 
   const bounds = frame?.bounds;
-  const imageUrl = frame?.heatmapUrl;
+  const layerMode = opts.layerMode || 'new_burn';
+  const imageUrl = frame?.layerHeatmapUrls?.[layerMode] || frame?.heatmapUrl;
   const coordinates = resolveRasterCoordinates(frame);
   if (!Array.isArray(bounds) || bounds.length !== 4) {
     throw new Error(`Bad raster bounds: ${JSON.stringify(bounds)}`);
@@ -347,20 +348,42 @@ export async function prepareMultistepRasterFrames(payload, opts = {}) {
   // frame's intermediate canvases concurrently, which was enough to stall
   // (or OOM) the browser tab on big PNGs and made the overlay never appear.
   const frames = [];
-  for (const step of steps) {
+  for (let stepIdx = 0; stepIdx < steps.length; stepIdx++) {
+    const step = steps[stepIdx];
     if (!step?.image_base64 || typeof step.image_base64 !== 'string') {
       throw new Error('Multistep step missing image_base64');
     }
+    console.info(`[forecast] colorize step ${stepIdx + 1}/${steps.length} starting`, {
+      b64Length: step.image_base64.length,
+      prob_max: step.prob_max,
+    });
     const heatmapUrl = await colorizeGrayscalePngToHeatmapDataUrl(step.image_base64, {
       gamma: opts.gamma ?? GAMMA_MULTISTEP,
       opacity: opts.opacity ?? 0.85,
       smooth: opts.smooth ?? true,
+    });
+    const layerHeatmapUrls = { new_burn: heatmapUrl, p_new_burn: heatmapUrl };
+    const layerImages = step?.layer_images || {};
+    for (const [layerName, base64Png] of Object.entries(layerImages)) {
+      if (!base64Png || typeof base64Png !== 'string' || layerName === 'new_burn' || layerName === 'p_new_burn') {
+        continue;
+      }
+      layerHeatmapUrls[layerName] = await colorizeGrayscalePngToHeatmapDataUrl(base64Png, {
+        gamma: opts.gamma ?? GAMMA_MULTISTEP,
+        opacity: opts.opacity ?? 0.85,
+        smooth: opts.smooth ?? true,
+      });
+    }
+    console.info(`[forecast] colorize step ${stepIdx + 1}/${steps.length} done`, {
+      heatmapLen: heatmapUrl?.length,
+      layers: Object.keys(layerHeatmapUrls),
     });
     frames.push({
       ...step,
       bounds,
       coordinates: payload?.coordinates,
       heatmapUrl,
+      layerHeatmapUrls,
       meta: {
         threshold: payload?.threshold,
         display_floor: step?.display_floor ?? payload?.display_floor,
@@ -373,6 +396,13 @@ export async function prepareMultistepRasterFrames(payload, opts = {}) {
         probability_scale: payload?.probability_scale,
         model_meta: payload?.model_meta,
         input_summary: payload?.input_summary,
+        quality: step?.quality ?? payload?.quality,
+        data_sources: step?.data_sources ?? payload?.data_sources,
+        p_new_burn: step?.p_new_burn,
+        p_next_fire: step?.p_next_fire,
+        observed_fire: step?.observed_fire,
+        display_score: step?.display_score,
+        risk_class: step?.risk_class,
       },
     });
   }
@@ -385,6 +415,8 @@ export async function prepareMultistepRasterFrames(payload, opts = {}) {
     probabilityScale: payload?.probability_scale,
     modelMeta: payload?.model_meta,
     inputSummary: payload?.input_summary,
+    quality: payload?.quality,
+    dataSources: payload?.data_sources,
     frames,
   };
 }

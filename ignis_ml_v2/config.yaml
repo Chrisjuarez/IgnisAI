@@ -1,0 +1,67 @@
+# ignis_ml/config.yaml - STAGE 2: TRUE U-NET + FULL TEMPORAL CONTEXT
+#
+# Changes vs. Stage 1:
+#   - seq_len 1 -> 6   (use the full 6-frame context the dataset already carries;
+#                       ConvLSTM was previously being fed a single frame, making
+#                       the recurrent stack a no-op).
+#   - focal relaxed    (gamma 3.0 -> 2.0, alpha 0.95 -> 0.75). The old settings
+#                       taught the model to fire only when it was >90% sure,
+#                       which is why live demo probabilities hug zero.
+#   - threshold 0.5    (was 0.90). Used as the eval starting point; the per-epoch
+#                       search now sweeps 0.3..0.7 instead of 0.70..0.97.
+#
+# Also paired with a new architecture in src/models/convlstm_unet.py that
+# actually has encoder-skip connections and a matching encoder/decoder pyramid.
+
+data_root: data
+
+datasets:
+  mndws:
+    raw_dir: data/mNDWS_raw/ndws_western_dataset
+    tiles_dir: data/mNDWS_500m_T6
+
+checkpoints:
+  model: checkpoints/convlstm_unet_temporal.pt
+  onnx:  checkpoints/convlstm_unet_temporal.onnx
+
+grid:
+  crs: "EPSG:5070"
+  tile_km: 32
+  res_m: 500
+
+channels:
+  dynamic_order: [fire_t, u, v, gust, tempC, q, precip]
+  static_order:  [elev, slope, aspect_cos, aspect_sin, ndvi, bi, erc, pdsi, chili, impervious, water, population, fuel1, fuel2, fuel3]
+
+training:
+  # STAGE 2: FULL TEMPORAL CONTEXT + TRUE U-NET SKIPS
+  seq_len: 6              # Use the full 6-frame window the dataset carries.
+  batch_size: 20          # Lower than 36 because the new U-Net is heavier at
+                          # H/4 bottleneck (4x hidden). Tune up if GPU permits.
+  hidden_channels: 96     # Base U-Net width. Bottleneck will be 4*hidden.
+  num_workers: 4
+  epochs: 40              # Slightly longer: deeper model + richer temporal input.
+  lr: 0.0008              # Nudged down for the deeper decoder.
+  weight_decay: 0.0001
+  optimizer: adamw
+  scheduler: cosine
+  warmup_epochs: 5
+  grad_clip: 1.0
+  early_stop: 12
+  mixed_precision: true
+  seed: 42
+
+  loss:
+    dice_weight: 0.6
+    dice_dilate_px: 2
+    focal: { enable: true, gamma: 2.0, alpha: 0.75 }
+
+  metrics:
+    threshold: 0.5
+    tta: true
+
+augmentation:
+  hflip_p: 0.5
+  vflip_p: 0.5
+  rot90_p: 1.0
+  translate_px: 0

@@ -26,22 +26,42 @@ services:
     ports:
       - "8008:8008"
     environment:
-      # point to YOUR model filename
-      MODEL_PATH: /models/convlstm_unet_Cd7_Cs15_H96_T6_nautilus.pt
+      # v3 delta checkpoint can be baked into ./models or downloaded from GitHub Releases.
+      MODEL_PATH: /models/convlstm_unet_v3_delta_Cd13_Cs15_H64_T6_nautilus.pt
+      MODEL_URL: ${MODEL_URL:-}
+      MODEL_SHA256: ${MODEL_SHA256:-}
       MODEL_CONFIG_PATH: /app/services/tilesvc/model_config.default.json
       TORCH_DEVICE: cpu
-       # optional but recommended: make config explicit
-      MODEL_CD: "7"
+      IGNIS_ML_SOURCE_PATH: /app/ignis_ml_source
+      INSTALL_IGNIS_ML: "1"
+      REQUIRED_ARCH_VERSION: v3
+      REQUIRED_TARGET_MODE: delta
+      STATIC_CATALOG_PATH: ${STATIC_CATALOG_PATH:-}
+      CALIBRATION_PATH: ${CALIBRATION_PATH:-}
+      CALIBRATION_REQUIRED: ${CALIBRATION_REQUIRED:-1}
+      NOAA_GRIB_ENABLED: ${NOAA_GRIB_ENABLED:-0}
+      NOAA_GRID_CACHE_DIR: ${NOAA_GRID_CACHE_DIR:-/data/noaa_grid_cache}
+      FIRMS_SNAPSHOT_DIR: ${FIRMS_SNAPSHOT_DIR:-/data/firms_snapshots}
+      FIRMS_SNAPSHOT_REQUIRED: ${FIRMS_SNAPSHOT_REQUIRED:-0}
+      PREDICTION_CACHE_DIR: ${PREDICTION_CACHE_DIR:-/data/prediction_cache}
+      PREDICTIONS_ENABLED: ${PREDICTIONS_ENABLED:-true}
+      # optional but recommended: make config explicit; checkpoint metadata wins.
+      MODEL_CD: "13"
       MODEL_CS: "15"
-      MODEL_HIDDEN: "96"
-      MODEL_LSTM_LAYERS: "1"
+      MODEL_HIDDEN: "64"
+      MODEL_LSTM_LAYERS: "2"
       MODEL_TSEQ: "6"
       MODEL_STEP_HOURS: "24"
       MODEL_DYNAMIC_ORDER: "fire_t,u,v,gust,tempC,q,precip"
       MODEL_STATIC_ORDER: "elev,slope,aspect_cos,aspect_sin,ndvi,bi,erc,pdsi,chili,impervious,water,population,fuel1,fuel2,fuel3"
-      MODEL_THRESHOLD: "0.85"
+      MODEL_DERIVED_FEATURES_ENABLE: "true"
+      MODEL_THRESHOLD: "0.5"
     volumes:
       - ./models:/models
+      - ../ignis_ml_nautilus:/app/ignis_ml_source:ro
+      - ./data/firms_snapshots:/data/firms_snapshots
+      - ./data/noaa_grid_cache:/data/noaa_grid_cache
+      - ./data/prediction_cache:/data/prediction_cache
     restart: unless-stopped
     networks:
       - ignisai-network

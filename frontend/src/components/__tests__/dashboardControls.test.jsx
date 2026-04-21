@@ -328,6 +328,11 @@ describe('Dashboard controls', () => {
 
     expect(await screen.findByTestId('forecast-panel')).toBeInTheDocument();
     expect(screen.getByText('6 hours')).toBeInTheDocument();
+    expect(screen.getByText(/Fire-spread risk/i)).toBeInTheDocument();
+    expect(screen.getByText(/not an observed or predicted official perimeter/i)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /Observed/i })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /New Burn Risk/i })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /Next Fire/i })).toBeInTheDocument();
 
     fireEvent.change(screen.getByLabelText(/forecast timeline slider/i), { target: { value: '1' } });
 
