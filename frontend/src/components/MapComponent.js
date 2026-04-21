@@ -45,12 +45,13 @@ const OBSERVED_CELL_MIN_KM = 0.18;
 // channel data.
 const DEFAULT_DISPLAY_FLOOR = 0.001;
 // Hard ceiling on how long we'll wait for a multistep forecast before giving
-// up and clearing the loading spinner. tilesvc cold-starts on Render (boot +
-// FIRMS + weather + model load) + the 6-step rollout can legitimately take
-// 3-4 minutes, so this has to be *looser* than axios (300s) — otherwise the
-// spinner claims a timeout before the request actually aborts. 360s gives
-// axios a chance to surface its own error first for clearer logs.
-const FORECAST_TIMEOUT_MS = 360_000;
+// up and clearing the loading spinner. 180s matches a generous warm-path
+// rollout (~45s) + render pipeline (~10s) with headroom, but stops short of
+// axios's 300s so a UI-side hang after the response returns is surfaced
+// before the user thinks the app is dead. If you see "Forecast timed out"
+// *after* the '[forecast] 2/5 HTTP response received' breadcrumb, the bug
+// is in colorize / render — not the network.
+const FORECAST_TIMEOUT_MS = 180_000;
 // Matches the checkpoint's training cadence (model_config.default.json ->
 // step_hours: 24). Forwarding explicitly keeps the autoregressive rollout in
 // the training distribution; tilesvc will otherwise fall back to its own
@@ -360,6 +361,8 @@ const MapComponent = forwardRef(({
   const [forecastTitle, setForecastTitle] = useState('Ignis Forecast Timeline');
   const [isForecastLoading, setIsForecastLoading] = useState(false);
   const [forecastError, setForecastError] = useState(null);
+  const [observedLayersVisible, setObservedLayersVisibleState] = useState(true);
+  const [forecastLayerMode, setForecastLayerMode] = useState('new_burn');
 
   // Historical fire testing state
   const [showHistPanel, setShowHistPanel] = useState(false);
@@ -510,6 +513,25 @@ const MapComponent = forwardRef(({
     });
   }
 
+  function setObservedLayersVisible(visible) {
+    const map = mapRef.current;
+    setObservedLayersVisibleState(Boolean(visible));
+    if (!map) return;
+    [
+      'observed-fire-cells-fill',
+      'observed-fire-cells-outline',
+      'wildfire-footprints-fill',
+      'wildfire-footprints-outline',
+      'wildfires-layer',
+      'fire-perimeters-fill',
+      'fire-perimeters-outline',
+    ].forEach(layerId => {
+      if (map.getLayer(layerId)) {
+        try { map.setLayoutProperty(layerId, 'visibility', visible ? 'visible' : 'none'); } catch (_) {}
+      }
+    });
+  }
+
   function updateUserSource() {
     const map = mapRef.current;
     if (!map) return;
@@ -597,6 +619,7 @@ const MapComponent = forwardRef(({
     setForecastVisible(false);
     setForecastFrames([]);
     setActiveForecastIndex(0);
+    setForecastLayerMode('new_burn');
     removePredictionOverlays(mapRef.current);
     setObservedLayerMode('normal');
   }, []);
@@ -620,11 +643,16 @@ const MapComponent = forwardRef(({
     let timeoutHandle = null;
     const timeoutPromise = new Promise((_, reject) => {
       timeoutHandle = setTimeout(() => {
+        console.warn('[forecast] safety-net timeout fired — pipeline stalled past FORECAST_TIMEOUT_MS');
         reject(new Error(`Forecast timed out after ${Math.round(FORECAST_TIMEOUT_MS / 1000)}s`));
       }, FORECAST_TIMEOUT_MS);
     });
 
     const work = (async () => {
+      // Breadcrumbs so the console pinpoints which await is hanging. Keep
+      // these until the forecast render pipeline is provably reliable —
+      // silent hangs are the expensive bug here, not log noise.
+      console.info('[forecast] 1/5 calling predictFireSpreadMultistep', { lat, lon, date, steps, stepHours });
       // Express proxy already retries upstream; don't double up from the
       // browser or tilesvc queues up redundant expensive predictions.
       const response = await predictFireSpreadMultistep({
@@ -636,15 +664,25 @@ const MapComponent = forwardRef(({
         ...(stepHours ? { stepHours } : {}),
       });
       const payload = response?.data ?? response;
+      console.info('[forecast] 2/5 HTTP response received', {
+        stepCount: payload?.steps?.length,
+        hasBounds: Array.isArray(payload?.bounds),
+        firstStepHasImage: !!payload?.steps?.[0]?.image_base64,
+      });
 
       const prepared = await prepareMultistepRasterFrames(payload, {
         opacity: 0.75,
         smooth: true,
       });
+      console.info('[forecast] 3/5 frames prepared', {
+        frames: prepared?.frames?.length,
+        firstHeatmapUrlLen: prepared?.frames?.[0]?.heatmapUrl?.length,
+      });
 
       const firstFrame = prepared.frames[0];
       setObservedLayerMode('forecast');
-      await renderPredictionRasterFrame(mapRef.current, firstFrame);
+      await renderPredictionRasterFrame(mapRef.current, firstFrame, { layerMode: forecastLayerMode });
+      console.info('[forecast] 4/5 first frame rendered on map');
       if (fitBounds && firstFrame?.bounds) {
         const [w, s, e, n] = firstFrame.bounds;
         mapRef.current?.fitBounds?.([[w, s], [e, n]], { padding: 40, duration: 800 });
@@ -655,6 +693,7 @@ const MapComponent = forwardRef(({
       setActiveForecastIndex(0);
       setIsForecastPlaying(false);
       setForecastVisible(true);
+      console.info('[forecast] 5/5 timeline state flushed, returning prepared');
       return prepared;
     })();
 
@@ -780,8 +819,9 @@ const MapComponent = forwardRef(({
         <div class="wildfire-popup">
           <h4>${getSeverityIcon(fireProps.brightnessCat)} ${fireProps.brightnessCat} Fire</h4>
           <div class="prediction-results">
-            <h5>Ignis Prediction</h5>
-            <p><strong>Will spread:</strong> ${willSpread}</p>
+            <h5>Ignis Advisory Risk</h5>
+            <p style="font-size:0.88em;color:#666;">Modeled fire-spread risk, not an official perimeter.</p>
+            <p><strong>Spread risk:</strong> ${willSpread}</p>
             <p><strong>Peak probability:</strong> ${pctStr(maxPct)}</p>
             <p><strong>Mean probability:</strong> ${meanPct}%</p>
             ${Number.isFinite(threshold) ? `<p><strong>Decision threshold:</strong> ${(threshold * 100).toFixed(0)}%</p>` : ''}
@@ -1264,8 +1304,9 @@ const MapComponent = forwardRef(({
       updatePerimeterSource();
       updateUserSource();
       setObservedLayerMode(forecastVisible ? 'forecast' : 'normal');
+      setObservedLayersVisible(observedLayersVisible);
       if (forecastVisible && forecastFrames[activeForecastIndex]) {
-        renderPredictionRasterFrame(map, forecastFrames[activeForecastIndex]).catch(err => {
+        renderPredictionRasterFrame(map, forecastFrames[activeForecastIndex], { layerMode: forecastLayerMode }).catch(err => {
           console.error('Forecast frame render error:', err);
         });
       }
@@ -1282,10 +1323,10 @@ const MapComponent = forwardRef(({
     if (!forecastVisible || !forecastFrames.length) return;
     const frame = forecastFrames[activeForecastIndex];
     if (!frame) return;
-    renderPredictionRasterFrame(mapRef.current, frame).catch(err => {
+    renderPredictionRasterFrame(mapRef.current, frame, { layerMode: forecastLayerMode }).catch(err => {
       console.error('Forecast frame render error:', err);
     });
-  }, [forecastVisible, forecastFrames, activeForecastIndex]);
+  }, [forecastVisible, forecastFrames, activeForecastIndex, forecastLayerMode]);
 
   useEffect(() => {
     if (!forecastVisible || !isForecastPlaying || forecastFrames.length < 2) return undefined;
@@ -1379,7 +1420,7 @@ const MapComponent = forwardRef(({
         position: absolute; left: 50%; bottom: 18px; transform: translateX(-50%);
         z-index: 12; min-width: 360px; max-width: calc(100% - 32px);
         background: rgba(22, 24, 27, 0.94); color: #f7f3ea;
-        border-radius: 12px; padding: 14px 16px; box-shadow: 0 10px 30px rgba(0,0,0,0.35);
+        border-radius: 8px; padding: 14px 16px; box-shadow: 0 10px 30px rgba(0,0,0,0.35);
         border: 1px solid rgba(255,255,255,0.08);
       }
       .forecast-header {
@@ -1416,6 +1457,30 @@ const MapComponent = forwardRef(({
         font-size: 11px; color: rgba(247,243,234,0.72); margin-bottom: 10px;
       }
       .forecast-status.warn { color: #ffcf70; }
+      .forecast-status.unavailable { color: #ff6b6b; }
+      .forecast-advisory {
+        font-size: 12px; line-height: 1.35; color: rgba(247,243,234,0.78);
+        margin: 4px 0 10px;
+      }
+      .forecast-badges {
+        display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 10px;
+      }
+      .forecast-badge {
+        font-size: 11px; font-weight: 700; border-radius: 8px;
+        padding: 4px 8px; background: rgba(255,255,255,0.08); color: #f7f3ea;
+        border: 1px solid rgba(255,255,255,0.12);
+      }
+      .forecast-badge.warn { color: #111; background: #ffcf70; border-color: transparent; }
+      .forecast-badge.good { color: #111; background: #91f0b7; border-color: transparent; }
+      .forecast-layer-controls {
+        display: flex; flex-wrap: wrap; gap: 6px; margin: 0 0 10px;
+      }
+      .forecast-layer-btn {
+        border: 1px solid rgba(255,255,255,0.14); border-radius: 8px;
+        background: transparent; color: #f7f3ea; padding: 6px 9px;
+        font-size: 11px; font-weight: 700; cursor: pointer;
+      }
+      .forecast-layer-btn.active { background: #ff7b2f; color: #111; border-color: #ff7b2f; }
       .forecast-slider {
         width: 100%;
         accent-color: #ff7b2f;
@@ -1468,6 +1533,15 @@ const MapComponent = forwardRef(({
   const activeStepHours = activeForecastMeta.step_hours ?? activeForecastFrame?.step_hours;
   const activeScaleMode = activeForecastMeta.probability_scale?.mode || 'absolute';
   const activeModelStatus = activeForecastMeta.model_meta?.config_status || activeForecastMeta.model_meta?.metadata_source || 'model metadata unavailable';
+  const activeQuality = activeForecastMeta.quality || {};
+  const activeQualityStatus = activeQuality.status || 'unknown';
+  const activeQualityReasons = Array.isArray(activeQuality.reasons) ? activeQuality.reasons : [];
+  const activeTargetMode = activeForecastMeta.model_meta?.target_mode || 'unknown';
+  const activeRiskFractions = activeForecastMeta.risk_class?.fractions || {};
+  const activeNewBurn = activeForecastMeta.p_new_burn || {};
+  const activeNextFire = activeForecastMeta.p_next_fire || {};
+  const activeObservedFire = activeForecastMeta.observed_fire || {};
+  const qualityBadgeClass = activeQualityStatus === 'ok' ? 'good' : (activeQualityStatus === 'unavailable' ? 'warn' : 'warn');
 
   return (
     <div style={{ width: '100%', height: '100%', position: 'relative' }}>
@@ -1543,7 +1617,7 @@ const MapComponent = forwardRef(({
         <div className="forecast-panel" data-testid="forecast-panel">
           <div className="forecast-header">
             <div>
-              <div className="forecast-title">{forecastTitle}</div>
+              <div className="forecast-title">Fire-spread risk — advisory, not a perimeter</div>
               <div className="forecast-label">{activeForecastFrame.label}</div>
             </div>
             <button
@@ -1554,9 +1628,41 @@ const MapComponent = forwardRef(({
               Clear
             </button>
           </div>
+          <div className="forecast-advisory">
+            This heatmap shows modeled relative risk of new fire spread. It is not an observed or predicted official perimeter.
+          </div>
+          <div className="forecast-badges">
+            <span className={`forecast-badge ${qualityBadgeClass}`}>
+              {activeQualityStatus === 'ok' ? 'NOAA gridded' : activeQualityStatus === 'unavailable' ? 'Unavailable' : 'Fallback weather'}
+            </span>
+            <span className="forecast-badge">Model: {activeTargetMode}</span>
+            {activeQualityReasons.slice(0, 2).map(reason => (
+              <span key={reason} className="forecast-badge warn">{reason.replace(/_/g, ' ')}</span>
+            ))}
+          </div>
+          <div className="forecast-layer-controls" aria-label="Forecast layer controls">
+            <button
+              className={`forecast-layer-btn ${observedLayersVisible ? 'active' : ''}`}
+              onClick={() => setObservedLayersVisible(!observedLayersVisible)}
+            >
+              Observed
+            </button>
+            <button
+              className={`forecast-layer-btn ${forecastLayerMode === 'new_burn' ? 'active' : ''}`}
+              onClick={() => setForecastLayerMode('new_burn')}
+            >
+              New Burn Risk
+            </button>
+            <button
+              className={`forecast-layer-btn ${forecastLayerMode === 'next_fire' ? 'active' : ''}`}
+              onClick={() => setForecastLayerMode('next_fire')}
+            >
+              Next Fire
+            </button>
+          </div>
           <div className="forecast-meta">
             Frame {activeForecastIndex + 1} of {forecastFrames.length}
-            {activeForecastFrame?.prob_max != null ? ` · Peak ${(activeForecastFrame.prob_max * 100).toFixed(1)}%` : ''}
+            {activeNewBurn?.prob_max != null ? ` · New-burn peak ${(activeNewBurn.prob_max * 100).toFixed(1)}%` : activeForecastFrame?.prob_max != null ? ` · Peak ${(activeForecastFrame.prob_max * 100).toFixed(1)}%` : ''}
             {activeStepHours ? ` · ${activeStepHours}h cadence` : ''}
           </div>
           <div className="forecast-ramp" aria-hidden="true" />
@@ -1566,24 +1672,25 @@ const MapComponent = forwardRef(({
               Threshold
             </div>
             <div className="forecast-metric">
-              <strong>{activeForecastFrame?.prob_max != null ? `${(activeForecastFrame.prob_max * 100).toFixed(1)}%` : '--'}</strong>
-              Max prob
+              <strong>{activeNewBurn?.prob_max != null ? `${(activeNewBurn.prob_max * 100).toFixed(1)}%` : activeForecastFrame?.prob_max != null ? `${(activeForecastFrame.prob_max * 100).toFixed(1)}%` : '--'}</strong>
+              New-burn peak
             </div>
             <div className="forecast-metric">
-              <strong>{activeForecastFrame?.prob_mean != null ? `${(activeForecastFrame.prob_mean * 100).toFixed(2)}%` : '--'}</strong>
-              Mean prob
+              <strong>{activeRiskFractions.extreme != null ? `${(activeRiskFractions.extreme * 100).toFixed(1)}%` : '--'}</strong>
+              Extreme risk
             </div>
             <div className="forecast-metric">
-              <strong>{activeForecastFrame?.area_fraction != null ? `${(activeForecastFrame.area_fraction * 100).toFixed(1)}%` : '--'}</strong>
-              Area over threshold
+              <strong>{activeNextFire?.area_fraction != null ? `${(activeNextFire.area_fraction * 100).toFixed(1)}%` : activeForecastFrame?.area_fraction != null ? `${(activeForecastFrame.area_fraction * 100).toFixed(1)}%` : '--'}</strong>
+              Next-fire area
             </div>
           </div>
           <div className={`forecast-status ${missingStaticChannels.length ? 'warn' : ''}`}>
             Scale: {activeScaleMode} 0-1.
             {activeDisplayFloor != null ? ` Display floor ${(activeDisplayFloor * 100).toFixed(0)}%.` : ''}
             {activeDisplayArea != null ? ` Visible cells ${(activeDisplayArea * 100).toFixed(1)}%.` : ''}
+            {activeObservedFire?.area_fraction != null ? ` Observed ${(activeObservedFire.area_fraction * 100).toFixed(1)}%.` : ''}
             {' '}
-            Contours: threshold and 50%.
+            Layer: {forecastLayerMode === 'next_fire' ? 'reconstructed next-fire context' : 'new-burn risk'}.
             {' '}
             {missingStaticChannels.length
               ? `Static placeholders: ${missingStaticChannels.slice(0, 5).join(', ')}${missingStaticChannels.length > 5 ? '...' : ''}`

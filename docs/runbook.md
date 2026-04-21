@@ -5,6 +5,7 @@
 IgnisAI consists of three main services:
 - **Backend API** (Node.js/Express on port 3001)
 - **Frontend Web App** (React on port 3000)  
+- **Tilesvc ML API** (FastAPI on port 8008)
 - **Database** (MongoDB on port 27017)
 
 ## Local Development
@@ -44,6 +45,13 @@ curl -I http://localhost:3000
 # MongoDB connection
 mongosh --eval "db.runCommand('ping')"
 # Expected: { ok: 1 }
+
+# Tilesvc model/input health
+curl http://localhost:8008/healthz
+# Expected: modelExists=true, staticCatalog.ok=true, calibration.ok=true
+
+# Tilesvc Prometheus-style metrics
+curl http://localhost:8008/metrics
 ```
 
 ## Environment Configuration
@@ -146,6 +154,24 @@ services:
 # Redeploy
 docker-compose up -d
 ```
+
+### Prediction Rollback
+
+If NOAA, FIRMS snapshots, static rasters, calibration, or the model release are unhealthy, disable model calls without taking the map down:
+
+```bash
+PREDICTIONS_ENABLED=false docker-compose up -d tilesvc backend
+```
+
+The backend returns `predictions_disabled` for prediction routes while observed FIRMS/perimeter layers remain available.
+
+### Model Release Procedure
+
+1. Upload `convlstm_unet_v3_delta_Cd13_Cs15_H64_T6_nautilus.pt` to GitHub Releases.
+2. Compute the SHA256 of the release asset and set `MODEL_SHA256`.
+3. Set `MODEL_URL` to the exact release asset URL.
+4. Keep `MODEL_CONFIG_PATH`, `STATIC_CATALOG_PATH`, and `CALIBRATION_PATH` pinned to artifacts built for the same v3 model.
+5. Verify `/healthz` exposes the resolved `modelSha256`, ML package source commit, static catalog version, and calibration status.
 
 ## Monitoring & Alerting
 

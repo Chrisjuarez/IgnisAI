@@ -54,7 +54,31 @@ function pickModelFields(payload = {}) {
     ...(payload?.model_meta ? { model_meta: payload.model_meta } : {}),
     ...(payload?.input_summary ? { input_summary: payload.input_summary } : {}),
     ...(payload?.probability_scale ? { probability_scale: payload.probability_scale } : {}),
+    ...(payload?.quality ? { quality: payload.quality } : {}),
+    ...(payload?.data_sources ? { data_sources: payload.data_sources } : {}),
+    ...(payload?.p_new_burn ? { p_new_burn: payload.p_new_burn } : {}),
+    ...(payload?.p_next_fire ? { p_next_fire: payload.p_next_fire } : {}),
+    ...(payload?.observed_fire ? { observed_fire: payload.observed_fire } : {}),
+    ...(payload?.display_score ? { display_score: payload.display_score } : {}),
+    ...(payload?.risk_class ? { risk_class: payload.risk_class } : {}),
+    ...(payload?.layer_images ? { layer_images: payload.layer_images } : {}),
   };
+}
+
+function predictionsEnabled() {
+  return !["0", "false", "no", "off"].includes(String(process.env.PREDICTIONS_ENABLED ?? "true").trim().toLowerCase());
+}
+
+function sendPredictionsDisabled(res) {
+  return res.status(503).json({
+    error: "predictions_disabled",
+    detail: "Model predictions are disabled; observed FIRMS/perimeter layers remain available.",
+    quality: {
+      status: "unavailable",
+      degraded: false,
+      reasons: ["predictions_disabled"],
+    },
+  });
 }
 
 // Normalize the optional `ignition` query param. Defaults to true so live
@@ -71,6 +95,7 @@ function resolveIgnition(raw) {
 // GET /api/predict-fire-spread/raster?lat=&lon=&Tseq=&thr=&date=
 router.get("/raster", async (req, res) => {
   try {
+    if (!predictionsEnabled()) return sendPredictionsDisabled(res);
     const { lat, lon, Tseq, thr, display_floor, crop_frac, date, ignition } = req.query;
     if (lat == null || lon == null) {
       return res.status(400).json({ error: "lat and lon are required" });
@@ -118,6 +143,7 @@ router.get("/raster", async (req, res) => {
 // GET /api/predict-fire-spread/vector?lat=&lon=&Tseq=&thr=&date=
 router.get("/vector", async (req, res) => {
   try {
+    if (!predictionsEnabled()) return sendPredictionsDisabled(res);
     const { lat, lon, Tseq, thr, crop_frac, date, ignition } = req.query;
     if (lat == null || lon == null) {
       return res.status(400).json({ error: "lat and lon are required" });
@@ -209,6 +235,7 @@ router.get("/vector", async (req, res) => {
 // GET /api/predict-fire-spread/multistep?lat=&lon=&steps=&step_hours=&Tseq=&thr=&date=&debug=
 router.get("/multistep", async (req, res) => {
   try {
+    if (!predictionsEnabled()) return sendPredictionsDisabled(res);
     const { lat, lon, steps, step_hours, Tseq, thr, display_floor, crop_frac, date, debug, ignition } = req.query;
     if (lat == null || lon == null) {
       return res.status(400).json({ error: "lat and lon are required" });
@@ -258,7 +285,8 @@ router.get("/multistep", async (req, res) => {
 // GET /api/predict-fire-spread/input-audit?lat=&lon=&date=&Tseq=&step_hours=
 router.get("/input-audit", async (req, res) => {
   try {
-    const { lat, lon, Tseq, date, step_hours, ignition } = req.query;
+    if (!predictionsEnabled()) return sendPredictionsDisabled(res);
+    const { lat, lon, Tseq, date, step_hours, ignition, include_npz } = req.query;
     if (lat == null || lon == null) {
       return res.status(400).json({ error: "lat and lon are required" });
     }
@@ -272,6 +300,7 @@ router.get("/input-audit", async (req, res) => {
         ...(date ? { date } : {}),
         ignition: resolveIgnition(ignition),
         ...(step_hours ? { step_hours } : {}),
+        ...(include_npz ? { include_npz } : {}),
       },
       80000
     );

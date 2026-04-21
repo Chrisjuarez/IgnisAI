@@ -6,12 +6,14 @@ import math
 import time
 import threading
 import datetime as dt
+from pathlib import Path
 import numpy as np
 import requests
 from shapely.geometry import Point
 from rasterio.features import rasterize
 
 from .grid import SIZE, lonlat_to_tile, tile_affine, tile_bounds_lonlat, lonlat_to_xy_m
+from .static_catalog import InputUnavailable
 from ignis_ml.src.data.transforms import wind_to_uv, rh_to_q, fire_boost
 
 NASA_KEY   = (os.getenv("NASA_API_KEY") or "").strip()  # FIRMS “area” API key
@@ -29,6 +31,23 @@ _CACHE_MAX_ENTRIES = 256
 _firms_cache: dict = {}
 _weather_cache: dict = {}
 _cache_lock = threading.Lock()
+_LAST_WEATHER_SOURCE = "unknown"
+_LAST_WEATHER_REASON = "not_requested"
+
+
+def _set_weather_source(source: str, reason: str = ""):
+    global _LAST_WEATHER_SOURCE, _LAST_WEATHER_REASON
+    _LAST_WEATHER_SOURCE = source
+    _LAST_WEATHER_REASON = reason
+
+
+def weather_quality_status():
+    ok = _LAST_WEATHER_SOURCE == "noaa_gridded"
+    return {
+        "status": "ok" if ok else "degraded",
+        "source": _LAST_WEATHER_SOURCE,
+        "reason": _LAST_WEATHER_REASON,
+    }
 
 
 def _cache_get(store: dict, key, ttl: int):
@@ -52,6 +71,61 @@ def _cache_set(store: dict, key, value):
             store.pop(oldest_key, None)
         store[key] = (time.time(), value)
 
+
+def _as_grid(value, *, name: str):
+    arr = np.asarray(value, dtype=np.float32)
+    if arr.ndim == 3:
+        arr = arr[0]
+    if arr.shape != (SIZE, SIZE):
+        raise ValueError(f"NOAA cache channel {name!r} has shape {arr.shape}, expected {(SIZE, SIZE)}")
+    return arr.astype(np.float32)
+
+
+def _noaa_cache_path(lat: float, lon: float, ref_time: dt.datetime | None) -> Path | None:
+    cache_dir = os.getenv("NOAA_GRID_CACHE_DIR")
+    template = os.getenv("NOAA_GRID_CACHE_TEMPLATE")
+    if not cache_dir and not template:
+        return None
+    t = ref_time or dt.datetime.now(dt.timezone.utc).replace(minute=0, second=0, microsecond=0)
+    values = {
+        "date": t.strftime("%Y%m%d"),
+        "hour": f"{t.hour:02d}",
+        "iso_hour": t.strftime("%Y%m%dT%H"),
+        "lat": f"{float(lat):.2f}",
+        "lon": f"{float(lon):.2f}",
+    }
+    if template:
+        return Path(template.format(**values))
+    return Path(cache_dir) / f"{values['iso_hour']}.npz"
+
+
+def _fetch_noaa_cached_weather_grids(lat: float, lon: float, ref_time: dt.datetime | None):
+    if os.getenv("NOAA_GRIB_ENABLED", "0").strip().lower() not in {"1", "true", "yes", "on"}:
+        return None
+    path = _noaa_cache_path(lat, lon, ref_time)
+    if not path or not path.exists():
+        _set_weather_source("open_meteo_fallback", f"noaa_cache_missing:{path}")
+        return None
+    try:
+        with np.load(path, allow_pickle=False) as data:
+            grids = {
+                "u": _as_grid(data["u"], name="u"),
+                "v": _as_grid(data["v"], name="v"),
+                "gust": _as_grid(data["gust"], name="gust"),
+                "temp": _as_grid(data["tempC"], name="tempC"),
+                "tempC": _as_grid(data["tempC"], name="tempC"),
+                "q": _as_grid(data["q"], name="q"),
+                "precip": _as_grid(data["precip"], name="precip"),
+            }
+            grids["rh"] = np.full((SIZE, SIZE), np.nan, np.float32)
+            grids["prcp"] = grids["precip"]
+        _set_weather_source("noaa_gridded", str(path))
+        return grids
+    except Exception as exc:
+        _set_weather_source("open_meteo_fallback", f"noaa_cache_invalid:{exc}")
+        print(f"⚠️  NOAA weather cache failed ({path}): {exc}")
+        return None
+
 # Products to merge for better coverage (NRT = near‑real‑time)
 FIRMS_PRODUCTS = [
     "VIIRS_NOAA21_NRT",
@@ -62,6 +136,21 @@ FIRMS_PRODUCTS = [
 # FIRMS “area” API accepts days=1..5 (not hours). Default to 2 days (~48h) to catch late posts.
 FIRMS_DAYS_DEFAULT = int(os.getenv("FIRMS_DAYS", "2"))  # clamp to 1..5 later
 FIRMS_PAD_DEG = float(os.getenv("FIRMS_PAD_DEG", "0.25"))  # expand bbox to catch edge detections
+FIRMS_SNAPSHOT_DIR = os.getenv("FIRMS_SNAPSHOT_DIR")
+FIRMS_SNAPSHOT_REQUIRED = os.getenv("FIRMS_SNAPSHOT_REQUIRED", "0").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _firms_snapshot_dir() -> str:
+    return os.getenv("FIRMS_SNAPSHOT_DIR") or FIRMS_SNAPSHOT_DIR or ""
+
+
+def _firms_snapshot_required() -> bool:
+    return (os.getenv("FIRMS_SNAPSHOT_REQUIRED") or str(FIRMS_SNAPSHOT_REQUIRED)).strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
 
 
 # ---------------- FIRMS helpers ----------------
@@ -169,6 +258,59 @@ def _parse_firms_points(csv_text: str):
     return list(uniq.values())
 
 
+def _daily_snapshot_path(day: dt.date) -> Path | None:
+    snapshot_dir = _firms_snapshot_dir()
+    if not snapshot_dir:
+        return None
+    root = Path(snapshot_dir)
+    for suffix in (".csv", ".CSV"):
+        candidate = root / f"{day.isoformat()}{suffix}"
+        if candidate.exists():
+            return candidate
+    return root / f"{day.isoformat()}.csv"
+
+
+def _load_firms_points_from_snapshots(bbox, t_start: dt.datetime, t_end: dt.datetime):
+    snapshot_dir = _firms_snapshot_dir()
+    if not snapshot_dir:
+        return None
+
+    points = []
+    missing = []
+    day = t_start.date()
+    while day <= t_end.date():
+        path = _daily_snapshot_path(day)
+        if not path or not path.exists():
+            missing.append(day.isoformat())
+        else:
+            try:
+                points.extend(_parse_firms_points(path.read_text(encoding="utf-8")))
+            except Exception as exc:
+                raise InputUnavailable(
+                    f"Failed to read FIRMS snapshot {path}: {exc}",
+                    reason="firms_snapshot_read_failed",
+                    details={"path": str(path), "error": str(exc)},
+                ) from exc
+        day = day + dt.timedelta(days=1)
+
+    if missing and _firms_snapshot_required():
+        raise InputUnavailable(
+            "Persisted FIRMS daily snapshots are missing for the requested window",
+            reason="firms_snapshot_missing",
+            details={"missing_dates": missing, "snapshot_dir": snapshot_dir},
+        )
+    if missing:
+        print(f"⚠️  FIRMS snapshots missing dates {missing}; falling back to live FIRMS API")
+        return None
+
+    w, s, e, n = bbox
+    filtered = [
+        pt for pt in points
+        if w <= pt["lon"] <= e and s <= pt["lat"] <= n and t_start <= pt["ts"] <= t_end
+    ]
+    return filtered
+
+
 def _points_in_window(points, t_start, t_end):
     return [pt for pt in points if t_start <= pt["ts"] < t_end]
 
@@ -235,6 +377,10 @@ def fetch_weather_grids(lat: float, lon: float, ref_time: dt.datetime = None):
     timestep (T=6), so this alone removes ~5 duplicate HTTP round trips per
     request.
     """
+    noaa_grids = _fetch_noaa_cached_weather_grids(lat, lon, ref_time)
+    if noaa_grids is not None:
+        return {k: v.copy() for k, v in noaa_grids.items()}
+
     now = dt.datetime.now(dt.timezone.utc)
     use_archive = (ref_time is not None and (now - ref_time).total_seconds() > 86400)
 
@@ -251,6 +397,10 @@ def fetch_weather_grids(lat: float, lon: float, ref_time: dt.datetime = None):
 
     cached = _cache_get(_weather_cache, cache_key, _WEATHER_TTL_SEC)
     if cached is not None:
+        _set_weather_source(
+            "open_meteo_fallback",
+            "archive_cache" if use_archive else "forecast_current_cache",
+        )
         # Return defensive copies so callers can't mutate cached arrays.
         return {k: v.copy() for k, v in cached.items()}
 
@@ -335,6 +485,10 @@ def fetch_weather_grids(lat: float, lon: float, ref_time: dt.datetime = None):
         "prcp":   np.full((H, W), P, np.float32),
         "precip": np.full((H, W), P, np.float32),
     }
+    _set_weather_source(
+        "open_meteo_fallback",
+        "archive" if use_archive else "forecast_current",
+    )
     _cache_set(_weather_cache, cache_key, {k: v.copy() for k, v in grids.items()})
     return grids
 
@@ -365,18 +519,23 @@ def build_dynamic_for_tile(
     tile = lonlat_to_tile(lon, lat)
     A    = tile_affine(tile)
     bbox = tile_bounds_lonlat(tile)
-
-    # FIRMS points over the full [T_seq * hours_step] window
-    window_hours = T_seq * hours_step
-    days = math.ceil(window_hours / 24.0)
-    csv_text = _fetch_firms_csv(bbox, days=days)
-    points   = _parse_firms_points(csv_text)
-    print(f"[tilesvc] FIRMS points for tile {tile}: {len(points)} over {days}d window")
-
-    # Build T slices: newest last
     now = ref_time or dt.datetime.now(dt.timezone.utc).replace(minute=0, second=0, microsecond=0)
     if ref_time:
         print(f"[tilesvc] Using historical ref_time: {ref_time.isoformat()}")
+
+    # FIRMS points over the full [T_seq * hours_step] window
+    window_hours = T_seq * hours_step
+    window_start = now - dt.timedelta(hours=window_hours)
+    days = math.ceil(window_hours / 24.0)
+    points = _load_firms_points_from_snapshots(bbox, window_start, now)
+    if points is None:
+        csv_text = _fetch_firms_csv(bbox, days=days)
+        points = _parse_firms_points(csv_text)
+        print(f"[tilesvc] FIRMS points for tile {tile}: {len(points)} over {days}d live/API window")
+    else:
+        print(f"[tilesvc] FIRMS points for tile {tile}: {len(points)} from persisted daily snapshots")
+
+    # Build T slices: newest last
     fire_stack = []
     frp_stack = []
     for k in range(T_seq, 0, -1):
