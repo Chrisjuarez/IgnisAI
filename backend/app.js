@@ -20,9 +20,24 @@ app.use((req, res, next) => {
 });
 
 // CORS
-const FRONTEND_ORIGIN = process.env.CORS_ORIGIN || 'http://localhost:3000';
+const DEFAULT_CORS_ORIGINS = [
+  'https://ignisai-frontend.onrender.com',
+  'http://localhost:3000',
+  'http://127.0.0.1:3000'
+];
+const CONFIGURED_CORS_ORIGINS = (process.env.CORS_ORIGIN || '')
+  .split(',')
+  .map((origin) => origin.trim())
+  .filter(Boolean);
+const CORS_ORIGINS = [...new Set([...DEFAULT_CORS_ORIGINS, ...CONFIGURED_CORS_ORIGINS])];
+
 app.use(cors({
-  origin: FRONTEND_ORIGIN,
+  origin(origin, callback) {
+    if (!origin || CORS_ORIGINS.includes(origin)) {
+      return callback(null, true);
+    }
+    return callback(new Error(`CORS origin not allowed: ${origin}`));
+  },
   methods: ['GET','POST','PUT','DELETE','OPTIONS'],
   allowedHeaders: ['Content-Type','Authorization'],
   credentials: true
