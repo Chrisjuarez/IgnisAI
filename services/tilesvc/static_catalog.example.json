@@ -1,0 +1,24 @@
+{
+  "version": "replace-with-static-catalog-version",
+  "generated_at": "2026-04-21T00:00:00Z",
+  "description": "Template only. Replace every uri with a real COG/S3 raster before enabling production predictions.",
+  "channels": {
+    "elev":        { "uri": "s3://bucket/elev_5070_500m.tif",        "units": "m",       "nodata": -9999, "valid_range": [0, 4000],  "crs": "EPSG:5070", "resampling": "bilinear" },
+    "ndvi":        { "uri": "s3://bucket/ndvi_5070_500m.tif",        "units": "0..1",    "nodata": -9999, "valid_range": [0, 1],     "crs": "EPSG:5070", "resampling": "bilinear" },
+    "bi":          { "uri": "s3://bucket/bi_5070_500m.tif",          "units": "index",   "nodata": -9999, "valid_range": [0, 200],   "crs": "EPSG:5070", "resampling": "bilinear" },
+    "erc":         { "uri": "s3://bucket/erc_5070_500m.tif",         "units": "index",   "nodata": -9999, "valid_range": [0, 100],   "crs": "EPSG:5070", "resampling": "bilinear" },
+    "pdsi":        { "uri": "s3://bucket/pdsi_5070_500m.tif",        "units": "index",   "nodata": -9999, "valid_range": [-10, 10],  "crs": "EPSG:5070", "resampling": "bilinear" },
+    "chili":       { "uri": "s3://bucket/chili_5070_500m.tif",       "units": "index",   "nodata": -9999, "valid_range": [0, 255],   "crs": "EPSG:5070", "resampling": "bilinear" },
+    "impervious":  { "uri": "s3://bucket/impervious_5070_500m.tif",  "units": "percent", "nodata": 255,   "valid_range": [0, 100],   "crs": "EPSG:5070", "resampling": "nearest" },
+    "water":       { "uri": "s3://bucket/water_5070_500m.tif",       "units": "percent", "nodata": 255,   "valid_range": [0, 100],   "crs": "EPSG:5070", "resampling": "nearest" },
+    "population":  { "uri": "s3://bucket/population_5070_500m.tif",  "units": "count",   "nodata": -9999, "valid_range": [0, 100000],"crs": "EPSG:5070", "resampling": "bilinear" },
+    "fuel1":       { "uri": "s3://bucket/fuel1_5070_500m.tif",       "units": "pca",     "nodata": -9999, "valid_range": [-3, 3],    "crs": "EPSG:5070", "resampling": "bilinear" },
+    "fuel2":       { "uri": "s3://bucket/fuel2_5070_500m.tif",       "units": "pca",     "nodata": -9999, "valid_range": [-3, 3],    "crs": "EPSG:5070", "resampling": "bilinear" },
+    "fuel3":       { "uri": "s3://bucket/fuel3_5070_500m.tif",       "units": "pca",     "nodata": -9999, "valid_range": [-8, 3],    "crs": "EPSG:5070", "resampling": "bilinear" }
+  },
+  "attribution": [
+    "NASA FIRMS",
+    "NOAA/NCEP NOMADS",
+    "Open-Meteo fallback weather when quality.degraded=true"
+  ]
+}

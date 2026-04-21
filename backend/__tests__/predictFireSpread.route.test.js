@@ -5,8 +5,22 @@ const axios = require('axios');
 const app = require('../app');
 
 describe('GET /api/predict-fire-spread routes', () => {
+  const originalPredictionsEnabled = process.env.PREDICTIONS_ENABLED;
+  const restorePredictionsFlag = () => {
+    if (originalPredictionsEnabled === undefined) {
+      delete process.env.PREDICTIONS_ENABLED;
+    } else {
+      process.env.PREDICTIONS_ENABLED = originalPredictionsEnabled;
+    }
+  };
+
   beforeEach(() => {
     jest.clearAllMocks();
+    restorePredictionsFlag();
+  });
+
+  afterAll(() => {
+    restorePredictionsFlag();
   });
 
   it('uses crop_frac=0.5 by default for raster requests', async () => {
@@ -28,6 +42,14 @@ describe('GET /api/predict-fire-spread routes', () => {
         area_fraction: 0.00,
         display_area_fraction: 0.13,
         probability_scale: { mode: 'absolute', min: 0, max: 1, display_floor: 0.02 },
+        quality: { status: 'degraded', reasons: ['open_meteo_weather_fallback'] },
+        data_sources: { weather: 'Open-Meteo fallback' },
+        p_new_burn: { prob_max: 0.21, area_fraction: 0.0 },
+        p_next_fire: { area_fraction: 0.02 },
+        observed_fire: { area_fraction: 0.01 },
+        display_score: { max: 0.3 },
+        risk_class: { fractions: { extreme: 0.01 } },
+        layer_images: { new_burn: 'abc123', next_fire: 'def456', observed_fire: 'ghi789' },
         model_meta: {
           Tseq: 6,
           step_hours: 24,
@@ -54,6 +76,14 @@ describe('GET /api/predict-fire-spread routes', () => {
       display_floor: 0.02,
       display_area_fraction: 0.13,
       probability_scale: { mode: 'absolute', min: 0, max: 1, display_floor: 0.02 },
+      quality: { status: 'degraded', reasons: ['open_meteo_weather_fallback'] },
+      data_sources: { weather: 'Open-Meteo fallback' },
+      p_new_burn: { prob_max: 0.21, area_fraction: 0.0 },
+      p_next_fire: { area_fraction: 0.02 },
+      observed_fire: { area_fraction: 0.01 },
+      display_score: { max: 0.3 },
+      risk_class: { fractions: { extreme: 0.01 } },
+      layer_images: { new_burn: 'abc123', next_fire: 'def456', observed_fire: 'ghi789' },
       model_meta: {
         Tseq: 6,
         step_hours: 24,
@@ -68,6 +98,24 @@ describe('GET /api/predict-fire-spread routes', () => {
       crop_frac: 0.5,
     });
     expect(params).not.toHaveProperty('Tseq');
+  });
+
+  it('returns observed-only unavailable contract when predictions are disabled', async () => {
+    process.env.PREDICTIONS_ENABLED = 'false';
+
+    const res = await request(app)
+      .get('/api/predict-fire-spread/raster')
+      .query({ lat: 34.05, lon: -118.25 })
+      .expect(503);
+
+    expect(res.body).toMatchObject({
+      error: 'predictions_disabled',
+      quality: {
+        status: 'unavailable',
+        reasons: ['predictions_disabled'],
+      },
+    });
+    expect(axios.get).not.toHaveBeenCalled();
   });
 
   it('forwards multistep params and sets ignition for dated requests', async () => {

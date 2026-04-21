@@ -1,0 +1,20 @@
+{
+  "method": "isotonic",
+  "model_sha256": "replace-with-sha256-of-release-checkpoint",
+  "created_at": "2026-04-21T00:00:00Z",
+  "source": "Build from validation predictions in Model_Eval.ipynb or an equivalent calibration script.",
+  "points": [
+    [0.0, 0.0],
+    [0.05, 0.02],
+    [0.2, 0.10],
+    [0.5, 0.35],
+    [0.8, 0.70],
+    [1.0, 1.0]
+  ],
+  "risk_breaks": [
+    { "class": "low", "upper": 0.05 },
+    { "class": "medium", "upper": 0.2 },
+    { "class": "high", "upper": 0.5 },
+    { "class": "extreme", "upper": 1.01 }
+  ]
+}

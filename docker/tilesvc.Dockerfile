@@ -37,7 +37,9 @@ RUN pip install --no-cache-dir --index-url https://download.pytorch.org/whl/cpu 
 RUN pip install --no-cache-dir -r /app/requirements.txt \
  && pip check
 
-# Application code
+# Application code. The production ML package is mounted or installed through
+# IGNIS_ML_SOURCE_PATH/MODEL_URL at runtime; the local ignis_ml tree remains only
+# for legacy utility modules used outside the v3 serving path.
 COPY ignis_ml /app/ignis_ml
 COPY services/tilesvc /app/services/tilesvc
 

@@ -10,3 +10,4 @@ pyproj
 boto3
 torch==2.1.1
 scipy
+pytest

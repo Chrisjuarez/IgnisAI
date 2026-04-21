@@ -17,6 +17,8 @@ describe('GET /health', () => {
     
     // Verify checks object
     expect(res.body.checks).toHaveProperty('database');
+    expect(res.body.checks).toHaveProperty('tilesvc');
+    expect(res.body.checks).toHaveProperty('predictions');
     expect(res.body.checks).toHaveProperty('memory');
     expect(res.body.checks).toHaveProperty('cpu');
     
@@ -29,8 +31,14 @@ describe('GET /health', () => {
       expect(res.statusCode).toBe(503);
     }
     
-    // If DB connected, status should be OK
-    if (res.body.checks.database === 'connected') {
+    // If DB and tilesvc are connected, status should be OK unless one of the
+    // production model checks reports degraded.
+    if (
+      res.body.checks.database === 'connected' &&
+      res.body.checks.tilesvc?.status === 'connected' &&
+      res.body.checks.tilesvc?.staticCatalog?.ok !== false &&
+      res.body.checks.tilesvc?.calibration?.ok !== false
+    ) {
       expect(res.body.status).toBe('OK');
       expect(res.statusCode).toBe(200);
     }

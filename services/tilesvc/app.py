@@ -5,11 +5,12 @@ import json
 import math
 import base64
 import datetime as dt
+import time
 from pathlib import Path
 from typing import Optional, Tuple, Dict, Any, List
 
 import numpy as np
-from fastapi import FastAPI, Query
+from fastapi import FastAPI, Query, Request
 from fastapi.responses import Response, JSONResponse
 from scipy.ndimage import gaussian_filter
 from pyproj import Transformer
@@ -23,17 +24,104 @@ from .grid import (
     lonlat_to_xy_m,
     PIX,
 )
-from .dynamic_builder import DEFAULT_DYNAMIC_ORDER, build_dynamic_for_tile, fetch_weather_grids
-from .static_builder import load_static_for_tile, CHANNEL_ORDER
+from .dynamic_builder import DEFAULT_DYNAMIC_ORDER, build_dynamic_for_tile, fetch_weather_grids, weather_quality_status
+from .static_builder import CHANNEL_ORDER
+from .calibration import calibrate_probability, calibration_status
+from .ml_runtime import file_sha256, runtime_imports, source_version_info
+from .prediction_contract import next_fire_from_delta, risk_class_summary
+from .static_catalog import InputUnavailable, load_static_tensor_for_model
 
 import rasterio
 from rasterio.features import shapes as rio_shapes
 
 import torch
-from ignis_ml.src.models.convlstm_unet import ConvLSTMUNet
+
+ConvLSTMUNet, RUNTIME_ARCH_VERSION, MODEL_MODULE, append_derived_features, DERIVED_FEATURE_NAMES, FEATURE_MODULE = runtime_imports()
 
 
 app = FastAPI(title="Ignis Tilesvc", version="1.0")
+
+
+_METRIC_COUNTERS: Dict[str, float] = {}
+_METRIC_SUMS: Dict[str, float] = {}
+_METRIC_COUNTS: Dict[str, float] = {}
+
+
+def _metric_inc(name: str, value: float = 1.0) -> None:
+    _METRIC_COUNTERS[name] = _METRIC_COUNTERS.get(name, 0.0) + float(value)
+
+
+def _metric_observe(name: str, value: float) -> None:
+    _METRIC_SUMS[name] = _METRIC_SUMS.get(name, 0.0) + float(value)
+    _METRIC_COUNTS[name] = _METRIC_COUNTS.get(name, 0.0) + 1.0
+
+
+def _metrics_text() -> str:
+    lines: List[str] = []
+    for name in sorted(_METRIC_COUNTERS):
+        lines.append(f"# TYPE {name} counter")
+        lines.append(f"{name} {_METRIC_COUNTERS[name]:.6f}")
+    for name in sorted(_METRIC_SUMS):
+        lines.append(f"# TYPE {name} summary")
+        lines.append(f"{name}_sum {_METRIC_SUMS[name]:.6f}")
+        lines.append(f"{name}_count {_METRIC_COUNTS.get(name, 0.0):.0f}")
+    return "\n".join(lines) + "\n"
+
+
+def _latest_file_age(path: str | None, patterns: Tuple[str, ...] = ("*",)) -> Dict[str, Any]:
+    if not path:
+        return {"configured": False}
+    root = Path(path)
+    if not root.exists():
+        return {"configured": True, "ok": False, "path": str(root), "error": "missing"}
+    files = []
+    for pattern in patterns:
+        files.extend([p for p in root.glob(pattern) if p.is_file()])
+    if not files:
+        return {"configured": True, "ok": False, "path": str(root), "error": "empty"}
+    latest = max(files, key=lambda p: p.stat().st_mtime)
+    age_seconds = max(0.0, time.time() - latest.stat().st_mtime)
+    return {
+        "configured": True,
+        "ok": True,
+        "path": str(root),
+        "latest_file": latest.name,
+        "age_seconds": age_seconds,
+    }
+
+
+@app.middleware("http")
+async def prediction_metrics_middleware(request: Request, call_next):
+    start = time.perf_counter()
+    try:
+        response = await call_next(request)
+        return response
+    finally:
+        elapsed_ms = (time.perf_counter() - start) * 1000.0
+        if request.url.path.startswith("/predict") or request.url.path.startswith("/input_audit"):
+            _metric_observe("ignis_prediction_request_latency_ms", elapsed_ms)
+
+
+@app.exception_handler(InputUnavailable)
+async def input_unavailable_handler(_request: Request, exc: InputUnavailable):
+    _metric_inc("ignis_unavailable_predictions_total")
+    if exc.reason.startswith("static_"):
+        _metric_inc("ignis_missing_static_total")
+    return JSONResponse(
+        status_code=422,
+        content={
+            "ok": False,
+            "error": "input_unavailable",
+            "reason": exc.reason,
+            "detail": str(exc),
+            "quality": {
+                "status": "unavailable",
+                "degraded": False,
+                "reasons": [exc.reason],
+            },
+            "details": exc.details,
+        },
+    )
 
 _TO_WGS84 = Transformer.from_crs("EPSG:5070", "EPSG:4326", always_xy=True)
 
@@ -49,6 +137,9 @@ def _get_torch_device() -> torch.device:
 DEVICE = _get_torch_device()
 MODEL_PATH = os.getenv("MODEL_PATH", "/models/model.pt")
 MODEL_THRESHOLD = float(os.getenv("MODEL_THRESHOLD", "0.01"))
+PREDICTIONS_ENABLED = os.getenv("PREDICTIONS_ENABLED", "true").strip().lower() not in {"0", "false", "no", "off"}
+REQUIRED_ARCH_VERSION = os.getenv("REQUIRED_ARCH_VERSION", "v3")
+REQUIRED_TARGET_MODE = os.getenv("REQUIRED_TARGET_MODE", "delta")
 
 MODEL_CD = int(os.getenv("MODEL_CD", "7"))
 MODEL_CS = int(os.getenv("MODEL_CS", "15"))
@@ -61,6 +152,7 @@ PRED_DISPLAY_FLOOR = float(os.getenv("PRED_DISPLAY_FLOOR", "0.02"))
 
 _model = None
 _model_meta = None
+_model_sha256 = None
 
 
 def _csv_env(name: str, default: List[str]) -> List[str]:
@@ -75,6 +167,18 @@ MODEL_TSEQ = int(os.getenv("MODEL_TSEQ", "1"))
 MODEL_STEP_HOURS = int(os.getenv("MODEL_STEP_HOURS", "24"))
 MODEL_DYNAMIC_ORDER = _csv_env("MODEL_DYNAMIC_ORDER", DEFAULT_DYNAMIC_ORDER)
 MODEL_STATIC_ORDER = _csv_env("MODEL_STATIC_ORDER", CHANNEL_ORDER)
+MODEL_TARGET_MODE = os.getenv("MODEL_TARGET_MODE", "mask")
+MODEL_DERIVED_FEATURES_ENABLE = os.getenv("MODEL_DERIVED_FEATURES_ENABLE", "false").strip().lower() in {"1", "true", "yes", "on"}
+MODEL_DERIVED_FEATURES_INCLUDE = None
+MODEL_DAYS_SINCE_FIRE_CAP = None
+if os.getenv("MODEL_DERIVED_FEATURES_INCLUDE"):
+    MODEL_DERIVED_FEATURES_INCLUDE = [
+        part.strip()
+        for part in os.getenv("MODEL_DERIVED_FEATURES_INCLUDE", "").split(",")
+        if part.strip()
+    ]
+if os.getenv("MODEL_DAYS_SINCE_FIRE_CAP"):
+    MODEL_DAYS_SINCE_FIRE_CAP = int(os.getenv("MODEL_DAYS_SINCE_FIRE_CAP"))
 
 
 def _try_parse_from_filename(path: str) -> Tuple[Optional[int], Optional[int], Optional[int], Optional[int]]:
@@ -154,6 +258,8 @@ def _list_from_meta(meta: Dict[str, Any], *keys: str) -> Optional[List[str]]:
 def _apply_model_metadata(meta: Dict[str, Any], source: str) -> None:
     global MODEL_CD, MODEL_CS, MODEL_HIDDEN, MODEL_LSTM_LAYERS, MODEL_THRESHOLD
     global MODEL_TSEQ, MODEL_STEP_HOURS, MODEL_DYNAMIC_ORDER, MODEL_STATIC_ORDER
+    global MODEL_TARGET_MODE, MODEL_DERIVED_FEATURES_ENABLE, MODEL_DERIVED_FEATURES_INCLUDE
+    global MODEL_DAYS_SINCE_FIRE_CAP
 
     if not isinstance(meta, dict) or not meta:
         return
@@ -188,6 +294,26 @@ def _apply_model_metadata(meta: Dict[str, Any], source: str) -> None:
     if stat_order and (checkpoint_wins or os.getenv("MODEL_STATIC_ORDER") is None):
         MODEL_STATIC_ORDER = stat_order
 
+    target_mode = meta.get("target_mode")
+    if target_mode is not None and (checkpoint_wins or os.getenv("MODEL_TARGET_MODE") is None):
+        MODEL_TARGET_MODE = str(target_mode)
+
+    if meta.get("derived_features_enable") is not None and (
+        checkpoint_wins or os.getenv("MODEL_DERIVED_FEATURES_ENABLE") is None
+    ):
+        MODEL_DERIVED_FEATURES_ENABLE = bool(meta.get("derived_features_enable"))
+
+    if "derived_features_include" in meta and (
+        checkpoint_wins or os.getenv("MODEL_DERIVED_FEATURES_INCLUDE") is None
+    ):
+        value = meta.get("derived_features_include")
+        MODEL_DERIVED_FEATURES_INCLUDE = list(value) if value is not None else None
+
+    if meta.get("days_since_fire_cap") is not None and (
+        checkpoint_wins or os.getenv("MODEL_DAYS_SINCE_FIRE_CAP") is None
+    ):
+        MODEL_DAYS_SINCE_FIRE_CAP = int(meta["days_since_fire_cap"])
+
     print(f"[tilesvc] Applied model metadata from {source}")
 
 
@@ -207,6 +333,7 @@ def _model_metadata(config_status: str = None) -> Dict[str, Any]:
     meta = {
         "model_path": MODEL_PATH,
         "model_exists": os.path.exists(MODEL_PATH),
+        "model_sha256": _model_sha256 or file_sha256(MODEL_PATH),
         "device": str(DEVICE),
         "Cd": MODEL_CD,
         "Cs": MODEL_CS,
@@ -216,12 +343,23 @@ def _model_metadata(config_status: str = None) -> Dict[str, Any]:
         "display_floor": PRED_DISPLAY_FLOOR,
         "Tseq": MODEL_TSEQ,
         "step_hours": MODEL_STEP_HOURS,
+        "arch_version": extra.get("arch_version"),
+        "runtime_arch_version": RUNTIME_ARCH_VERSION,
+        "target_mode": MODEL_TARGET_MODE,
+        "derived_features_enable": MODEL_DERIVED_FEATURES_ENABLE,
+        "derived_features_include": MODEL_DERIVED_FEATURES_INCLUDE,
+        "days_since_fire_cap": MODEL_DAYS_SINCE_FIRE_CAP,
         "dynamic_order": list(MODEL_DYNAMIC_ORDER),
         "static_order": list(MODEL_STATIC_ORDER),
+        "derived_feature_names": list(DERIVED_FEATURE_NAMES),
+        "model_module": MODEL_MODULE,
+        "feature_module": FEATURE_MODULE,
+        "ml_source": source_version_info(),
         "metadata_source": extra.get("config_source"),
         "config_status": config_status or (
             "explicit_or_checkpoint" if (_model_meta or MODEL_CONFIG_PATH) else "environment_or_filename_defaults"
         ),
+        "predictions_enabled": PREDICTIONS_ENABLED,
     }
     for key in ("model_name", "production_valid", "static_placeholders", "normalization", "metadata_notes"):
         if key in extra and extra[key] is not None:
@@ -254,6 +392,7 @@ def _ensure_model_metadata_loaded(load_checkpoint: bool = True) -> None:
         "config_source": status,
         "checkpoint_meta_keys": sorted(checkpoint_meta.keys()),
         "config_meta_keys": sorted(config_meta.keys()),
+        "arch_version": merged_meta.get("arch_version"),
         "model_name": merged_meta.get("model_name") or merged_meta.get("name"),
         "production_valid": merged_meta.get("production_valid"),
         "static_placeholders": _list_from_meta(
@@ -267,13 +406,45 @@ def _ensure_model_metadata_loaded(load_checkpoint: bool = True) -> None:
     }
 
 
+def _expected_dynamic_cd() -> int:
+    if not MODEL_DERIVED_FEATURES_ENABLE:
+        return len(MODEL_DYNAMIC_ORDER)
+    include = MODEL_DERIVED_FEATURES_INCLUDE
+    return len(MODEL_DYNAMIC_ORDER) + (len(DERIVED_FEATURE_NAMES) if include is None else len(include))
+
+
+def _validate_model_contract(checkpoint_meta: Dict[str, Any]) -> None:
+    arch = checkpoint_meta.get("arch_version")
+    if REQUIRED_ARCH_VERSION and arch != REQUIRED_ARCH_VERSION:
+        raise RuntimeError(f"checkpoint arch_version={arch!r} does not match required {REQUIRED_ARCH_VERSION!r}")
+    target_mode = str(checkpoint_meta.get("target_mode", MODEL_TARGET_MODE))
+    if REQUIRED_TARGET_MODE and target_mode != REQUIRED_TARGET_MODE:
+        raise RuntimeError(f"checkpoint target_mode={target_mode!r} does not match required {REQUIRED_TARGET_MODE!r}")
+    expected_cd = _expected_dynamic_cd()
+    if int(MODEL_CD) != expected_cd:
+        raise RuntimeError(
+            f"model dynamic channel count mismatch: checkpoint Cd={MODEL_CD}, "
+            f"but base+derived order implies {expected_cd}"
+        )
+    if int(MODEL_CS) != len(MODEL_STATIC_ORDER):
+        raise RuntimeError(
+            f"model static channel count mismatch: checkpoint Cs={MODEL_CS}, "
+            f"static_order has {len(MODEL_STATIC_ORDER)} channels"
+        )
+    if RUNTIME_ARCH_VERSION != "unknown" and arch and RUNTIME_ARCH_VERSION != arch:
+        raise RuntimeError(
+            f"runtime model code arch={RUNTIME_ARCH_VERSION!r} does not match checkpoint arch={arch!r}; "
+            "mount/install the matching ignis_ml_nautilus package"
+        )
+
+
 _initial_config_meta = _load_model_config_file()
 if _initial_config_meta:
     _apply_model_metadata(_initial_config_meta, MODEL_CONFIG_PATH or "MODEL_CONFIG_PATH")
 
 
 def _load_model_once():
-    global _model, MODEL_CD, MODEL_CS, MODEL_HIDDEN, MODEL_LSTM_LAYERS
+    global _model, _model_sha256, MODEL_CD, MODEL_CS, MODEL_HIDDEN, MODEL_LSTM_LAYERS
 
     if _model is not None:
         return _model
@@ -281,9 +452,12 @@ def _load_model_once():
     _ensure_model_metadata_loaded(load_checkpoint=True)
 
     if not os.path.exists(MODEL_PATH):
-        print(f"⚠️  MODEL_PATH does not exist: {MODEL_PATH}")
-        _model = None
-        return None
+        raise InputUnavailable(
+            f"MODEL_PATH does not exist: {MODEL_PATH}",
+            reason="model_missing",
+            details={"model_path": MODEL_PATH},
+        )
+    _model_sha256 = file_sha256(MODEL_PATH)
 
     cd, cs, h, t = _try_parse_from_filename(MODEL_PATH)
     if cd and os.getenv("MODEL_CD") is None:
@@ -311,6 +485,7 @@ def _load_model_once():
     checkpoint_meta = _checkpoint_metadata_from_obj(ckpt)
     if checkpoint_meta:
         _apply_model_metadata(checkpoint_meta, MODEL_PATH)
+        _validate_model_contract(checkpoint_meta)
 
     if isinstance(ckpt, torch.nn.Module):
         model = ckpt
@@ -321,8 +496,9 @@ def _load_model_once():
         for k, v in state.items():
             nk = k[7:] if isinstance(k, str) and k.startswith("module.") else k
             cleaned[nk] = v
-        incompat = model.load_state_dict(cleaned, strict=False)
-        if getattr(incompat, "missing_keys", None) or getattr(incompat, "unexpected_keys", None):
+        strict_load = os.getenv("ALLOW_PARTIAL_MODEL_LOAD", "0").strip().lower() not in {"1", "true", "yes", "on"}
+        incompat = model.load_state_dict(cleaned, strict=strict_load)
+        if (getattr(incompat, "missing_keys", None) or getattr(incompat, "unexpected_keys", None)):
             print(
                 "⚠️  Model state_dict loaded with mismatches: "
                 f"missing={getattr(incompat, 'missing_keys', [])}, "
@@ -361,32 +537,12 @@ def _resolve_prediction_time(ref_time: Optional[dt.datetime]) -> dt.datetime:
 
 
 def _load_static_tensor(tile: Any) -> np.ndarray:
-    stat_dict = load_static_for_tile(tile)
-    aliases = {
-        "NDVI": "ndvi",
-        "BI": "bli",
-        "BLI": "bli",
-        "ERC": "erc",
-        "PDSI": "pdsi",
-        "CHILI": "chili",
-    }
-    arrays = []
-    missing = []
-    for key in MODEL_STATIC_ORDER:
-        value = stat_dict.get(key)
-        if value is None and aliases.get(key) is not None:
-            value = stat_dict.get(aliases[key])
-        if value is None:
-            missing.append(key)
-            continue
-        arrays.append(np.asarray(value, np.float32))
-    if missing:
-        raise RuntimeError(f"Static channel missing: {missing}; have keys={list(stat_dict.keys())}")
-    try:
-        return np.stack(arrays, axis=0)
-    except KeyError as e:
-        missing = str(e)
-        raise RuntimeError(f"Static channel missing: {missing}; have keys={list(stat_dict.keys())}")
+    stat, _summary = load_static_tensor_for_model(tile, MODEL_STATIC_ORDER)
+    return stat
+
+
+def _load_static_tensor_with_summary(tile: Any) -> Tuple[np.ndarray, Dict[str, Any]]:
+    return load_static_tensor_for_model(tile, MODEL_STATIC_ORDER)
 
 
 def _channel_stats(arr: np.ndarray) -> Dict[str, Any]:
@@ -404,12 +560,63 @@ def _channel_stats(arr: np.ndarray) -> Dict[str, Any]:
     }
 
 
+_DYN_RANGES: Dict[str, Tuple[float, float]] = {
+    "fire_t": (0.0, 1.0),
+    "u": (-15.0, 15.0),
+    "v": (-15.0, 15.0),
+    "gust": (0.0, 25.0),
+    "tempC": (-10.0, 45.0),
+    "q": (0.0, 0.02),
+    "precip": (0.0, 50.0),
+}
+
+
+def _to01_dynamic(arr: np.ndarray, lo: float, hi: float) -> np.ndarray:
+    return np.clip((arr - lo) / (hi - lo + 1e-8), 0.0, 1.0).astype(np.float32)
+
+
+def _prepare_dynamic_for_model(dyn_phys: np.ndarray) -> Tuple[np.ndarray, Dict[str, Any]]:
+    base_order = list(MODEL_DYNAMIC_ORDER)
+    if dyn_phys.shape[1] != len(base_order):
+        raise RuntimeError(
+            f"base dynamic tensor has {dyn_phys.shape[1]} channels but dynamic_order has {len(base_order)}"
+        )
+    x = np.empty_like(dyn_phys, dtype=np.float32)
+    for idx, name in enumerate(base_order):
+        lo, hi = _DYN_RANGES.get(name, (0.0, 1.0))
+        x[:, idx] = _to01_dynamic(dyn_phys[:, idx], lo, hi)
+    if base_order and base_order[0] == "fire_t":
+        x[:, 0] = np.clip(x[:, 0] * 5.0, 0.0, 1.0)
+
+    out_order = list(base_order)
+    if MODEL_DERIVED_FEATURES_ENABLE:
+        x, out_order = append_derived_features(
+            x,
+            dyn_order=base_order,
+            include=MODEL_DERIVED_FEATURES_INCLUDE,
+            days_since_fire_cap=MODEL_DAYS_SINCE_FIRE_CAP,
+        )
+    if x.shape[1] != MODEL_CD:
+        raise RuntimeError(f"model dynamic tensor has Cd={x.shape[1]} but checkpoint expects Cd={MODEL_CD}")
+    return x.astype(np.float32), {
+        "base_dynamic_order": base_order,
+        "model_dynamic_order": out_order,
+        "base_dyn_shape": list(dyn_phys.shape),
+        "model_dyn_shape": list(x.shape),
+        "derived_features_enable": MODEL_DERIVED_FEATURES_ENABLE,
+        "derived_features_include": MODEL_DERIVED_FEATURES_INCLUDE,
+    }
+
+
 def _tensor_input_summary(
     dyn: np.ndarray,
     stat: np.ndarray,
     *,
     bounds: Tuple[float, float, float, float],
     base_time: dt.datetime,
+    dyn_model: Optional[np.ndarray] = None,
+    dynamic_preparation: Optional[Dict[str, Any]] = None,
+    static_summary: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     critical_static = {
         "NDVI", "BI", "ERC", "PDSI", "CHILI",
@@ -431,17 +638,21 @@ def _tensor_input_summary(
     }
     return {
         "dyn_shape": list(dyn.shape),
+        "model_dyn_shape": list(dyn_model.shape) if dyn_model is not None else None,
         "stat_shape": list(stat.shape),
         "bounds": [float(v) for v in bounds],
         "base_time": base_time.isoformat(),
         "dynamic_order": list(MODEL_DYNAMIC_ORDER),
+        "model_dynamic_order": dynamic_preparation.get("model_dynamic_order") if dynamic_preparation else None,
         "static_order": list(MODEL_STATIC_ORDER),
         "dynamic_channels": dynamic_channels,
         "static_channels": static_channels,
+        "static_catalog": static_summary.get("catalog") if static_summary else None,
         "missing_or_placeholder_static": [
             name for name, stats in static_channels.items()
             if stats.get("placeholder_or_missing")
         ],
+        "dynamic_preparation": dynamic_preparation or {},
     }
 
 
@@ -528,27 +739,31 @@ def _window_coordinates(
 
 
 def _predict_probability_from_inputs(dyn: np.ndarray, stat: np.ndarray, *, log_label: str = "Prediction") -> np.ndarray:
+    if not PREDICTIONS_ENABLED:
+        raise InputUnavailable(
+            "Predictions are disabled by PREDICTIONS_ENABLED=false",
+            reason="predictions_disabled",
+        )
     model = _load_model_once()
 
-    if dyn.shape[1] != MODEL_CD:
-        raise RuntimeError(f"Dynamic channels mismatch: got {dyn.shape[1]} expected {MODEL_CD}")
+    dyn_model, _prep = _prepare_dynamic_for_model(dyn)
+    if dyn_model.shape[1] != MODEL_CD:
+        raise RuntimeError(f"Dynamic channels mismatch: got {dyn_model.shape[1]} expected {MODEL_CD}")
     if stat.shape[0] != MODEL_CS:
         raise RuntimeError(f"Static channels mismatch: got {stat.shape[0]} expected {MODEL_CS}")
 
-    if model is None:
-        H, W = dyn.shape[-2], dyn.shape[-1]
-        prob = np.zeros((H, W), dtype=np.float32)
-    else:
-        x_dyn = torch.from_numpy(dyn).unsqueeze(0).to(DEVICE)    # (1, T, Cd, H, W)
-        x_stat = torch.from_numpy(stat).unsqueeze(0).to(DEVICE)  # (1, Cs, H, W)
-        with torch.no_grad():
-            logits = model(x_dyn, x_stat)  # (1,1,H,W)
-            prob = torch.sigmoid(logits)[0, 0].detach().cpu().numpy().astype(np.float32)
+    x_dyn = torch.from_numpy(dyn_model).unsqueeze(0).to(DEVICE)    # (1, T, Cd, H, W)
+    x_stat = torch.from_numpy(stat).unsqueeze(0).to(DEVICE)  # (1, Cs, H, W)
+    infer_start = time.perf_counter()
+    with torch.no_grad():
+        logits = model(x_dyn, x_stat)  # (1,1,H,W)
+        prob = torch.sigmoid(logits)[0, 0].detach().cpu().numpy().astype(np.float32)
+    _metric_observe("ignis_model_inference_ms", (time.perf_counter() - infer_start) * 1000.0)
 
     prob = _postprocess_probability(prob)
     print(
         f"🔮 {log_label}: min={prob.min():.6f}, max={prob.max():.6f}, "
-        f"mean={prob.mean():.6f}, shape={prob.shape}, Tseq={dyn.shape[0]}"
+        f"mean={prob.mean():.6f}, shape={prob.shape}, Tseq={dyn.shape[0]}, target_mode={MODEL_TARGET_MODE}"
     )
     return prob
 
@@ -575,6 +790,30 @@ def _prepare_prediction_inputs(
     )
     stat = _load_static_tensor(tile)
     return dyn, stat, bounds, _resolve_prediction_time(ref_time)
+
+
+def _prepare_prediction_inputs_with_summary(
+    lat: float,
+    lon: float,
+    Tseq: int,
+    *,
+    ignition: bool = False,
+    ref_time: Optional[dt.datetime] = None,
+    hours_step: int = 24,
+) -> Tuple[np.ndarray, np.ndarray, Tuple[float, float, float, float], dt.datetime, Dict[str, Any]]:
+    _ensure_model_metadata_loaded(load_checkpoint=True)
+    tile, _, bounds = build_grid(lat, lon)
+    dyn = build_dynamic_for_tile(
+        lat,
+        lon,
+        T_seq=Tseq,
+        hours_step=hours_step,
+        ignition=ignition,
+        ref_time=ref_time,
+        channel_order=MODEL_DYNAMIC_ORDER,
+    )
+    stat, static_summary = _load_static_tensor_with_summary(tile)
+    return dyn, stat, bounds, _resolve_prediction_time(ref_time), static_summary
 
 
 def _predict_probability(
@@ -808,6 +1047,96 @@ def _prob_to_display_png(prob: np.ndarray, threshold: float, anchor_px: Tuple[in
     return _encode_png_from_channels(gray, alpha=alpha)
 
 
+def _layer_image_base64(
+    layer: np.ndarray,
+    *,
+    threshold: float,
+    anchor_px: Tuple[int, int],
+) -> str:
+    png = _prob_to_display_png(layer.astype(np.float32), threshold=threshold, anchor_px=anchor_px)
+    return base64.b64encode(png).decode("ascii")
+
+
+def _observed_fire_from_dyn(dyn: np.ndarray) -> np.ndarray:
+    try:
+        fire_idx = list(MODEL_DYNAMIC_ORDER).index("fire_t")
+    except ValueError:
+        fire_idx = 0
+    return (dyn[-1, fire_idx] >= 0.5).astype(np.float32)
+
+
+def _next_fire_from_delta(prob_new_burn: np.ndarray, observed_fire: np.ndarray, threshold: float) -> np.ndarray:
+    return next_fire_from_delta(
+        prob_new_burn,
+        observed_fire,
+        threshold,
+        target_mode=MODEL_TARGET_MODE,
+    )
+
+
+def _risk_class_summary(risk: np.ndarray) -> Dict[str, float]:
+    return risk_class_summary(risk)
+
+
+def _probability_contract(
+    *,
+    prob_new_burn: np.ndarray,
+    observed_fire: np.ndarray,
+    threshold: float,
+    display_score: np.ndarray,
+    risk_class: np.ndarray,
+    calibration_meta: Dict[str, Any],
+) -> Dict[str, Any]:
+    p_next_fire = _next_fire_from_delta(prob_new_burn, observed_fire, threshold)
+    weather_quality = weather_quality_status()
+    quality_status = weather_quality.get("status", "degraded")
+    quality_reasons = [] if quality_status == "ok" else [weather_quality.get("reason") or "open_meteo_weather_fallback"]
+    if quality_status == "ok":
+        _metric_inc("ignis_noaa_weather_predictions_total")
+    else:
+        _metric_inc("ignis_open_meteo_fallback_total")
+        _metric_inc("ignis_degraded_predictions_total")
+    return {
+        "p_new_burn": {
+            "description": "Raw v3 delta probability for new burn/spread pixels",
+            "prob_min": float(prob_new_burn.min()),
+            "prob_mean": float(prob_new_burn.mean()),
+            "prob_max": float(prob_new_burn.max()),
+            "area_fraction": float((prob_new_burn >= threshold).mean()),
+        },
+        "p_next_fire": {
+            "description": "Reconstructed next-fire mask/probability proxy: observed_or_persisted_fire OR thresholded new burn",
+            "area_fraction": float(p_next_fire.mean()),
+        },
+        "observed_fire": {
+            "description": "Current observed/persisted FIRMS fire channel used as model input",
+            "area_fraction": float((observed_fire >= 0.5).mean()),
+        },
+        "display_score": {
+            "description": "Calibrated display score used for heatmap rendering",
+            "min": float(display_score.min()),
+            "mean": float(display_score.mean()),
+            "max": float(display_score.max()),
+            "calibration": calibration_meta,
+        },
+        "risk_class": {
+            "description": "Calibrated advisory risk classes for display",
+            "fractions": _risk_class_summary(risk_class),
+        },
+        "quality": {
+            "status": quality_status,
+            "degraded": not noaa_enabled,
+            "reasons": quality_reasons,
+        },
+        "data_sources": {
+            "fire": "NASA FIRMS live/archive window plus optional click ignition",
+            "weather": "NOAA gridded" if quality_status == "ok" else "Open-Meteo fallback",
+            "weather_source": weather_quality.get("source"),
+            "static": "STATIC_CATALOG_PATH COG/S3 manifest",
+        },
+    }
+
+
 def _step_label(lead_hours: int) -> str:
     if lead_hours % 24 == 0:
         days = lead_hours // 24
@@ -924,9 +1253,10 @@ def _rollout_multistep_predictions(
     crop_frac: float,
     ignition: bool,
     ref_time: Optional[dt.datetime],
+    threshold: float,
     debug_sink: Optional[Dict[str, Any]] = None,
 ) -> Tuple[Tuple[float, float, float, float], Dict[str, Any], list]:
-    dyn, stat, bounds, base_time = _prepare_prediction_inputs(
+    dyn, stat, bounds, base_time, static_summary = _prepare_prediction_inputs_with_summary(
         lat,
         lon,
         Tseq,
@@ -941,6 +1271,7 @@ def _rollout_multistep_predictions(
         debug_sink["dyn"] = dyn
         debug_sink["stat"] = stat
         debug_sink["base_time"] = base_time
+        debug_sink["static_summary"] = static_summary
     normalized_steps = max(1, int(steps))
     crop_window = None
     rollout = []
@@ -963,7 +1294,15 @@ def _rollout_multistep_predictions(
 
         next_time = base_time + dt.timedelta(hours=lead_hours)
         wx = fetch_weather_grids(lat, lon, ref_time=next_time)
-        next_fire = _resize_prob_to_shape(prob, current_dyn.shape[-2:])
+        try:
+            fire_idx = list(MODEL_DYNAMIC_ORDER).index("fire_t")
+        except ValueError:
+            fire_idx = 0
+        prev_fire = (current_dyn[-1, fire_idx] >= 0.5).astype(np.float32)
+        if MODEL_TARGET_MODE == "delta":
+            next_fire = np.maximum(prev_fire, (prob >= float(threshold)).astype(np.float32))
+        else:
+            next_fire = _resize_prob_to_shape(prob, current_dyn.shape[-2:])
         zero = np.zeros_like(next_fire, dtype=np.float32)
         channels = {
             "fire_t": np.clip(next_fire, 0.0, 1.0),
@@ -995,14 +1334,30 @@ def health():
     return {"status": "ok"}
 
 
+@app.get("/metrics")
+def metrics():
+    return Response(content=_metrics_text(), media_type="text/plain; version=0.0.4")
+
+
 @app.get("/healthz")
 def healthz():
     _ensure_model_metadata_loaded(load_checkpoint=False)
     model_exists = os.path.exists(MODEL_PATH)
+    try:
+        from .static_catalog import load_catalog
+        static_catalog_ok = True
+        static_catalog_error = None
+        static_catalog_meta = load_catalog()
+    except Exception as exc:
+        static_catalog_ok = False
+        static_catalog_error = str(exc)
+        static_catalog_meta = {}
     return {
         "ok": True,
+        "predictionsEnabled": PREDICTIONS_ENABLED,
         "modelPath": MODEL_PATH,
         "modelExists": model_exists,
+        "modelSha256": file_sha256(MODEL_PATH),
         "device": str(DEVICE),
         "Cd": MODEL_CD,
         "Cs": MODEL_CS,
@@ -1012,8 +1367,21 @@ def healthz():
         "display_floor": PRED_DISPLAY_FLOOR,
         "Tseq": MODEL_TSEQ,
         "step_hours": MODEL_STEP_HOURS,
+        "target_mode": MODEL_TARGET_MODE,
+        "runtime_arch_version": RUNTIME_ARCH_VERSION,
         "dynamic_order": MODEL_DYNAMIC_ORDER,
         "static_order": MODEL_STATIC_ORDER,
+        "staticCatalog": {
+            "ok": static_catalog_ok,
+            "error": static_catalog_error,
+            "version": static_catalog_meta.get("version"),
+            "path": static_catalog_meta.get("_path"),
+        },
+        "calibration": calibration_status(model_sha256=file_sha256(MODEL_PATH)),
+        "firmsSnapshot": _latest_file_age(os.getenv("FIRMS_SNAPSHOT_DIR"), ("*.csv", "*.CSV")),
+        "noaaCycle": _latest_file_age(os.getenv("NOAA_GRID_CACHE_DIR"), ("*.npz", "*.grib2", "*.grb2")),
+        "weatherQuality": weather_quality_status(),
+        "mlSource": source_version_info(),
     }
 
 
@@ -1032,9 +1400,10 @@ def input_audit(
     step_hours: int = Query(MODEL_STEP_HOURS),
     ignition: bool = Query(False),
     date: str = Query(None),
+    include_npz: bool = Query(False),
 ):
     ref_time = _parse_date_param(date)
-    dyn, stat, bounds, base_time = _prepare_prediction_inputs(
+    dyn, stat, bounds, base_time, static_summary = _prepare_prediction_inputs_with_summary(
         lat,
         lon,
         Tseq,
@@ -1042,11 +1411,35 @@ def input_audit(
         ref_time=ref_time,
         hours_step=step_hours,
     )
-    return {
+    dyn_model, dyn_prep = _prepare_dynamic_for_model(dyn)
+    payload = {
         "ok": True,
         "model_meta": _model_metadata(),
-        "input_summary": _tensor_input_summary(dyn, stat, bounds=bounds, base_time=base_time),
+        "calibration": calibration_status(model_sha256=_model_sha256 or file_sha256(MODEL_PATH)),
+        "input_summary": _tensor_input_summary(
+            dyn,
+            stat,
+            bounds=bounds,
+            base_time=base_time,
+            dyn_model=dyn_model,
+            dynamic_preparation=dyn_prep,
+            static_summary=static_summary,
+        ),
     }
+    if include_npz:
+        buf = io.BytesIO()
+        np.savez_compressed(
+            buf,
+            x_dyn=dyn_model.astype(np.float32),
+            x_stat=stat.astype(np.float32),
+            bounds=np.asarray(bounds, dtype=np.float32),
+            dynamic_order=np.asarray(dyn_prep.get("model_dynamic_order") or [], dtype=object),
+            static_order=np.asarray(MODEL_STATIC_ORDER, dtype=object),
+            model_meta=np.asarray(json.dumps(payload["model_meta"], default=str), dtype=object),
+        )
+        payload["audit_npz_base64"] = base64.b64encode(buf.getvalue()).decode("ascii")
+        payload["audit_npz_filename"] = "ignis_input_audit.npz"
+    return payload
 
 
 @app.get("/predict")
@@ -1104,29 +1497,63 @@ def predict_raster_json(
     date: str = Query(None),
 ):
     ref_time = _parse_date_param(date)
-    dyn, stat, bounds, base_time = _prepare_prediction_inputs(lat, lon, Tseq, ignition=ignition, ref_time=ref_time)
-    input_summary = _tensor_input_summary(dyn, stat, bounds=bounds, base_time=base_time)
+    dyn, stat, bounds, base_time, static_summary = _prepare_prediction_inputs_with_summary(
+        lat, lon, Tseq, ignition=ignition, ref_time=ref_time
+    )
+    dyn_model, dyn_prep = _prepare_dynamic_for_model(dyn)
+    input_summary = _tensor_input_summary(
+        dyn,
+        stat,
+        bounds=bounds,
+        base_time=base_time,
+        dyn_model=dyn_model,
+        dynamic_preparation=dyn_prep,
+        static_summary=static_summary,
+    )
     prob = _predict_probability_from_inputs(dyn, stat)
     crop_window = _build_crop_window(prob.shape, bounds, lat, lon, crop_frac)
     prob, bounds, anchor_px = _apply_crop_window(prob, crop_window)
+    observed_fire_full = _observed_fire_from_dyn(dyn)
+    observed_fire, _, _ = _apply_crop_window(observed_fire_full, crop_window)
     threshold = float(thr) if thr is not None else MODEL_THRESHOLD
     resolved_display_floor = _resolve_display_floor(display_floor)
-    png = _prob_to_display_png(prob, threshold=resolved_display_floor, anchor_px=anchor_px)
+    display_score, risk_class, calibration_meta = calibrate_probability(prob, model_sha256=_model_sha256 or file_sha256(MODEL_PATH))
+    render_start = time.perf_counter()
+    png = _prob_to_display_png(display_score, threshold=resolved_display_floor, anchor_px=anchor_px)
+    _metric_observe("ignis_png_render_ms", (time.perf_counter() - render_start) * 1000.0)
+    p_next_fire = _next_fire_from_delta(prob, observed_fire, threshold)
+    layer_images = {
+        "new_burn": base64.b64encode(png).decode("ascii"),
+        "p_new_burn": base64.b64encode(png).decode("ascii"),
+        "next_fire": _layer_image_base64(p_next_fire, threshold=0.5, anchor_px=anchor_px),
+        "p_next_fire": _layer_image_base64(p_next_fire, threshold=0.5, anchor_px=anchor_px),
+        "observed_fire": _layer_image_base64(observed_fire, threshold=0.5, anchor_px=anchor_px),
+    }
+    contract = _probability_contract(
+        prob_new_burn=prob,
+        observed_fire=observed_fire,
+        threshold=threshold,
+        display_score=display_score,
+        risk_class=risk_class,
+        calibration_meta=calibration_meta,
+    )
 
     return {
         "bounds": list(map(float, bounds)),
         "coordinates": crop_window["coordinates"],
-        "image_base64": base64.b64encode(png).decode("ascii"),
+        "image_base64": layer_images["new_burn"],
+        "layer_images": layer_images,
         "threshold": threshold,
         "display_floor": resolved_display_floor,
         "prob_min": float(prob.min()),
         "prob_mean": float(prob.mean()),
         "prob_max": float(prob.max()),
         "area_fraction": float((prob >= threshold).mean()),
-        "display_area_fraction": float((prob >= resolved_display_floor).mean()),
+        "display_area_fraction": float((display_score >= resolved_display_floor).mean()),
         "probability_scale": {"mode": "absolute", "min": 0.0, "max": 1.0, "display_floor": resolved_display_floor},
         "model_meta": _model_metadata(),
         "input_summary": input_summary,
+        **contract,
     }
 
 @app.get("/predict_geojson")
@@ -1207,7 +1634,7 @@ def predict_multistep(
         # field (model / inputs / AR feedback). If the overlay is not a clean
         # rectangle (e.g. a vertical strip), the bug lives in the
         # bounds/coordinates math.
-        dyn, stat, bounds, base_time = _prepare_prediction_inputs(
+        dyn, stat, bounds, base_time, static_summary = _prepare_prediction_inputs_with_summary(
             lat, lon, Tseq, ignition=ignition, ref_time=ref_time, hours_step=step_hours,
         )
         prob_shape = tuple(int(v) for v in dyn.shape[-2:])
@@ -1224,6 +1651,7 @@ def predict_multistep(
         debug_sink["dyn"] = dyn
         debug_sink["stat"] = stat
         debug_sink["base_time"] = base_time
+        debug_sink["static_summary"] = static_summary
     else:
         bounds, crop_window, rollout = _rollout_multistep_predictions(
             lat,
@@ -1234,32 +1662,67 @@ def predict_multistep(
             crop_frac=crop_frac,
             ignition=ignition,
             ref_time=ref_time,
+            threshold=threshold,
             debug_sink=debug_sink,
         )
 
     payload_steps = []
     cropped_bounds = crop_window["bounds"]
+    observed_fire_full = _observed_fire_from_dyn(debug_sink["dyn"]) if debug_sink.get("dyn") is not None else None
     for step in rollout:
         cropped, _, anchor_px = _apply_crop_window(step["prob"], crop_window)
+        observed_crop = (
+            _apply_crop_window(observed_fire_full, crop_window)[0]
+            if observed_fire_full is not None
+            else np.zeros_like(cropped, dtype=np.float32)
+        )
         if debug_solid:
             # Solid-fill PNG bypasses the radial alpha mask and thresholding
             # so the plumbing test isn't confounded by per-pixel masking.
             png = _encode_solid_png(cropped.shape, value=0.5)
+            display_score = np.full(cropped.shape, 0.5, dtype=np.float32)
+            risk_class = np.full(cropped.shape, "medium", dtype=object)
+            calibration_meta = {"method": "debug_solid"}
         else:
-            png = _prob_to_display_png(cropped, threshold=resolved_display_floor, anchor_px=anchor_px)
+            display_score, risk_class, calibration_meta = calibrate_probability(
+                cropped,
+                model_sha256=_model_sha256 or file_sha256(MODEL_PATH),
+            )
+            render_start = time.perf_counter()
+            png = _prob_to_display_png(display_score, threshold=resolved_display_floor, anchor_px=anchor_px)
+            _metric_observe("ignis_png_render_ms", (time.perf_counter() - render_start) * 1000.0)
+        p_next_fire = _next_fire_from_delta(cropped, observed_crop, threshold)
+        image_base64 = base64.b64encode(png).decode("ascii")
+        layer_images = {
+            "new_burn": image_base64,
+            "p_new_burn": image_base64,
+            "next_fire": _layer_image_base64(p_next_fire, threshold=0.5, anchor_px=anchor_px),
+            "p_next_fire": _layer_image_base64(p_next_fire, threshold=0.5, anchor_px=anchor_px),
+            "observed_fire": _layer_image_base64(observed_crop, threshold=0.5, anchor_px=anchor_px),
+        }
+        contract = _probability_contract(
+            prob_new_burn=cropped,
+            observed_fire=observed_crop,
+            threshold=threshold,
+            display_score=display_score,
+            risk_class=risk_class,
+            calibration_meta=calibration_meta,
+        )
         payload_steps.append({
             "index": step["index"],
             "lead_hours": step["lead_hours"],
             "label": step["label"],
-            "image_base64": base64.b64encode(png).decode("ascii"),
+            "image_base64": image_base64,
+            "layer_images": layer_images,
             "prob_min": float(cropped.min()),
             "prob_mean": float(cropped.mean()),
             "prob_max": float(cropped.max()),
             "area_fraction": float((cropped >= threshold).mean()),
-            "display_area_fraction": float((cropped >= resolved_display_floor).mean()),
+            "display_area_fraction": float((display_score >= resolved_display_floor).mean()),
             "display_floor": resolved_display_floor,
             "contour": _prob_to_geojson(cropped, cropped_bounds, threshold=threshold),
             "contour_50": _prob_to_geojson(cropped, cropped_bounds, threshold=0.5),
+            **contract,
         })
 
     debug_payload: Dict[str, Any] = {}
@@ -1288,6 +1751,7 @@ def predict_multistep(
         )
         debug_payload["dump_dir"] = str(out_dir)
 
+    dyn_model, dyn_prep = _prepare_dynamic_for_model(debug_sink["dyn"])
     response: Dict[str, Any] = {
         "bounds": list(map(float, cropped_bounds)),
         "coordinates": crop_window["coordinates"],
@@ -1302,6 +1766,9 @@ def predict_multistep(
             debug_sink["stat"],
             bounds=bounds,
             base_time=debug_sink["base_time"],
+            dyn_model=dyn_model,
+            dynamic_preparation=dyn_prep,
+            static_summary=debug_sink.get("static_summary"),
         ),
     }
     if debug_modes:
