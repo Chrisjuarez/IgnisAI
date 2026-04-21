@@ -81,6 +81,45 @@ GENERATE_SOURCEMAP=true         # development only
 BUILD_PATH=build
 ```
 
+### Tilesvc ML Environment
+
+The v3 production predictor is strict by default. Missing model weights, static rasters, or calibration artifacts should return unavailable health/prediction states instead of blank heatmaps.
+
+```bash
+# v3 model weights. Keeping the checkpoint in GitHub Releases is OK when both are pinned.
+MODEL_PATH=/models/convlstm_unet_v3_delta_Cd13_Cs15_H64_T6_nautilus.pt
+MODEL_URL=https://github.com/<owner>/<repo>/releases/download/<tag>/convlstm_unet_v3_delta_Cd13_Cs15_H64_T6_nautilus.pt
+MODEL_SHA256=<sha256-of-release-asset>
+
+# Source ML package, mounted or installed so serving code does not drift from training code.
+IGNIS_ML_SOURCE_PATH=/app/ignis_ml_source
+INSTALL_IGNIS_ML=1
+
+# Strict v3 contract.
+PREDICTIONS_ENABLED=true
+REQUIRED_ARCH_VERSION=v3
+REQUIRED_TARGET_MODE=delta
+MODEL_CD=13
+MODEL_CS=15
+MODEL_HIDDEN=64
+MODEL_TSEQ=6
+MODEL_DYNAMIC_ORDER=fire_t,u,v,gust,tempC,q,precip
+MODEL_STATIC_ORDER=elev,slope,aspect_cos,aspect_sin,ndvi,bi,erc,pdsi,chili,impervious,water,population,fuel1,fuel2,fuel3
+MODEL_DERIVED_FEATURES_ENABLE=true
+
+# Production input artifacts.
+STATIC_CATALOG_PATH=/app/config/static_catalog.production.json
+CALIBRATION_PATH=/app/config/calibration_v3.json
+CALIBRATION_REQUIRED=1
+FIRMS_SNAPSHOT_DIR=/data/firms_snapshots
+FIRMS_SNAPSHOT_REQUIRED=1
+NOAA_GRIB_ENABLED=1
+NOAA_GRID_CACHE_DIR=/data/noaa_grid_cache
+
+# Rollback flag: keeps the map and observed layers alive while disabling model calls.
+PREDICTIONS_ENABLED=false
+```
+
 ## Environment-Specific Configurations
 
 ### Development Environment

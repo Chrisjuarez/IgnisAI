@@ -1,13 +1,18 @@
 {
-  "model_name": "convlstm_unet_Cd7_Cs15_H96_T6_nautilus",
-  "cd": 7,
+  "model_name": "convlstm_unet_v3_delta_Cd13_Cs15_H64_T6_nautilus",
+  "arch_version": "v3",
+  "target_mode": "delta",
+  "cd": 13,
   "cs": 15,
-  "hidden": 96,
+  "hidden": 64,
   "lstm_layers": 2,
   "seq_len": 6,
   "step_hours": 24,
-  "threshold": 0.85,
+  "threshold": 0.5,
   "dynamic_order": ["fire_t", "u", "v", "gust", "tempC", "q", "precip"],
+  "derived_features_enable": true,
+  "derived_features_include": null,
+  "days_since_fire_cap": null,
   "static_order": [
     "elev",
     "slope",
@@ -25,22 +30,18 @@
     "fuel2",
     "fuel3"
   ],
-  "static_placeholders": [
-    "ndvi",
-    "bi",
-    "erc",
-    "pdsi",
-    "chili",
-    "impervious",
-    "water",
-    "population",
-    "fuel1",
-    "fuel2",
-    "fuel3"
-  ],
-  "production_valid": false,
+  "production_valid": true,
   "normalization": {
-    "status": "checkpoint_metadata_required_for_training_parity"
+    "dynamic": {
+      "fire_t": [0, 1],
+      "u": [-15, 15],
+      "v": [-15, 15],
+      "gust": [0, 25],
+      "tempC": [-10, 45],
+      "q": [0, 0.02],
+      "precip": [0, 50]
+    },
+    "static": "services.tilesvc.static_catalog.STATIC_NORMALIZATION"
   },
-  "notes": "Default serving config copied from Model_Eval.ipynb metadata for the current T6 H96 checkpoint. Static placeholder channels make this model audit-visible but not production-valid until real rasters or a retrained checkpoint are used. FIRMS FRP is preserved for footprints/audit, but this checkpoint was not trained with an FRP dynamic channel."
+  "notes": "Serving config for the v3 delta checkpoint. Runtime checkpoint metadata wins over this file. Production predictions require STATIC_CATALOG_PATH and CALIBRATION_PATH."
 }
