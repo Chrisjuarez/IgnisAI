@@ -58,11 +58,13 @@ services:
     healthCheckPath: /healthz
     envVars:
       - key: MODEL_PATH
-        value: /app/models/Fire_Spread_convlstm_unet_Cd7_Cs15_H128_T1_nautilus.pt
+        value: /app/models/convlstm_unet_v3_delta_Cd13_Cs15_H64_T6_nautilus.pt
       - key: NASA_API_KEY
         sync: false # NASA FIRMS API key (same key as FIRMS_API_KEY above)
       - key: MODEL_URL
         sync: false # URL to download model .pt file (if not baked into Docker image)
+      - key: MODEL_SHA256
+        sync: false # Optional checksum; accepts bare hex or sha256:<hex>
       - key: TORCH_DEVICE
         value: cpu
       - key: CORS_ORIGIN
