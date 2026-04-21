@@ -59,3 +59,17 @@ def test_calibration_hash_mismatch_is_unavailable(tmp_path, monkeypatch):
 
     with pytest.raises(InputUnavailable, match="does not match"):
         calibration.load_calibration(model_sha256="actual")
+
+
+def test_calibration_hash_accepts_sha256_prefix(tmp_path, monkeypatch):
+    reset_calibration_cache()
+    path = tmp_path / "calibration.json"
+    path.write_text(
+        json.dumps({"model_sha256": "sha256:ABC123", "points": [[0, 0], [1, 1]]}),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("CALIBRATION_PATH", str(path))
+
+    cal = calibration.load_calibration(model_sha256="abc123")
+
+    assert cal["model_sha256"] == "sha256:ABC123"

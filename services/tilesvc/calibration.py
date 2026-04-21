@@ -21,6 +21,15 @@ DEFAULT_RISK_BREAKS = (
 _calibration_cache: Dict[str, Any] | None = None
 
 
+def _normalize_sha256(value: str | None) -> str | None:
+    if value is None:
+        return None
+    normalized = str(value).strip().lower()
+    if normalized.startswith("sha256:"):
+        normalized = normalized[len("sha256:") :]
+    return normalized
+
+
 def _calibration_path() -> Path | None:
     raw = os.getenv("CALIBRATION_PATH")
     return Path(raw) if raw else None
@@ -49,7 +58,9 @@ def load_calibration(*, model_sha256: str | None = None) -> Dict[str, Any]:
     with path.open("r", encoding="utf-8") as f:
         data = json.load(f)
     expected_hash = data.get("model_sha256")
-    if expected_hash and model_sha256 and expected_hash != model_sha256:
+    expected_norm = _normalize_sha256(expected_hash)
+    actual_norm = _normalize_sha256(model_sha256)
+    if expected_norm and actual_norm and expected_norm != actual_norm:
         raise InputUnavailable(
             "Calibration artifact does not match loaded model hash",
             reason="calibration_model_mismatch",

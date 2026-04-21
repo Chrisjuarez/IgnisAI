@@ -135,7 +135,8 @@ def _get_torch_device() -> torch.device:
 
 
 DEVICE = _get_torch_device()
-MODEL_PATH = os.getenv("MODEL_PATH", "/models/model.pt")
+DEFAULT_MODEL_PATH = "/app/models/convlstm_unet_v3_delta_Cd13_Cs15_H64_T6_nautilus.pt"
+MODEL_PATH = os.getenv("MODEL_PATH", DEFAULT_MODEL_PATH)
 MODEL_THRESHOLD = float(os.getenv("MODEL_THRESHOLD", "0.01"))
 PREDICTIONS_ENABLED = os.getenv("PREDICTIONS_ENABLED", "true").strip().lower() not in {"0", "false", "no", "off"}
 REQUIRED_ARCH_VERSION = os.getenv("REQUIRED_ARCH_VERSION", "v3")
