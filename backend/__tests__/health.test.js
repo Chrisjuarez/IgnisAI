@@ -5,9 +5,10 @@ const app = require('../app');
 describe('GET /health', () => {
   it('returns health status with system metrics', async () => {
     const res = await request(app).get('/health');
-    
-    // Accept either 200 (DB connected) or 503 (DB disconnected)
-    expect([200, 503]).toContain(res.statusCode);
+
+    // Render uses /health as a liveness check; dependency failures are reported
+    // in the JSON body without failing deployment.
+    expect(res.statusCode).toBe(200);
     
     // Verify response structure
     expect(res.body).toHaveProperty('status');
@@ -28,7 +29,6 @@ describe('GET /health', () => {
     // If DB disconnected, status should be DEGRADED
     if (res.body.checks.database === 'disconnected') {
       expect(res.body.status).toBe('DEGRADED');
-      expect(res.statusCode).toBe(503);
     }
     
     // If DB and tilesvc are connected, status should be OK unless one of the
@@ -41,6 +41,15 @@ describe('GET /health', () => {
     ) {
       expect(res.body.status).toBe('OK');
       expect(res.statusCode).toBe(200);
+    }
+  });
+
+  it('can return non-200 for strict readiness checks', async () => {
+    const res = await request(app).get('/health?strict=1');
+
+    expect([200, 503]).toContain(res.statusCode);
+    if (res.body.status === 'DEGRADED') {
+      expect(res.statusCode).toBe(503);
     }
   });
 });
