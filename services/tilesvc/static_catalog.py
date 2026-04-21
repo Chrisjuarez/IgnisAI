@@ -48,6 +48,24 @@ STATIC_NORMALIZATION: Dict[str, Tuple[str, Tuple[float, ...] | None]] = {
     "fuel3": ("clip_minmax", (-8, 3)),
 }
 
+DEFAULT_STATIC_PLACEHOLDERS: Dict[str, float] = {
+    "elev": 0.25,
+    "slope": 0.0,
+    "aspect_cos": 0.5,
+    "aspect_sin": 0.5,
+    "ndvi": 0.5,
+    "bi": 0.25,
+    "erc": 0.5,
+    "pdsi": 0.5,
+    "chili": 0.5,
+    "impervious": 0.0,
+    "water": 0.0,
+    "population": 0.0,
+    "fuel1": 0.5,
+    "fuel2": 0.5,
+    "fuel3": 0.5,
+}
+
 
 class InputUnavailable(RuntimeError):
     def __init__(self, message: str, *, reason: str, details: Optional[Dict[str, Any]] = None):
@@ -72,6 +90,47 @@ def _resolve_catalog_path() -> Optional[Path]:
     if not raw:
         return None
     return Path(raw)
+
+
+def _static_catalog_required() -> bool:
+    return os.getenv("STATIC_CATALOG_REQUIRED", "0").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _placeholder_static_tensor(
+    expected_order: Iterable[str],
+    *,
+    reason: str,
+    detail: str,
+) -> Tuple[np.ndarray, Dict[str, Any]]:
+    normalized = []
+    channels: Dict[str, Any] = {}
+    for name in expected_order:
+        value = float(DEFAULT_STATIC_PLACEHOLDERS.get(name, 0.5))
+        normalized.append(np.full((SIZE, SIZE), value, dtype=np.float32))
+        channels[name] = {
+            "min": value,
+            "mean": value,
+            "max": value,
+            "finite_ratio": 1.0,
+            "pct_zero": 1.0 if value == 0.0 else 0.0,
+            "placeholder_or_missing": True,
+            "reason": reason,
+        }
+    tensor = np.stack(normalized, axis=0).astype(np.float32)
+    return tensor, {
+        "catalog": {
+            "path": str(_resolve_catalog_path()) if _resolve_catalog_path() else None,
+            "version": "placeholder",
+            "generated_at": None,
+            "placeholder": True,
+            "reason": reason,
+            "detail": detail,
+        },
+        "channels": channels,
+        "derived": list(DERIVED_STATIC),
+        "stat_shape": list(tensor.shape),
+        "placeholder_or_missing": True,
+    }
 
 
 def load_catalog(path: str | Path | None = None) -> Dict[str, Any]:
@@ -260,7 +319,13 @@ def normalize_static(name: str, arr: np.ndarray) -> np.ndarray:
 
 
 def load_static_tensor_for_model(tile, expected_order: Iterable[str]) -> Tuple[np.ndarray, Dict[str, Any]]:
-    catalog = load_catalog()
+    expected_order = list(expected_order)
+    try:
+        catalog = load_catalog()
+    except InputUnavailable as exc:
+        if _static_catalog_required():
+            raise
+        return _placeholder_static_tensor(expected_order, reason=exc.reason, detail=str(exc))
     raw_channels = catalog["channels"]
     arrays: Dict[str, np.ndarray] = {}
     summary: Dict[str, Any] = {
