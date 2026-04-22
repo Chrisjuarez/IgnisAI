@@ -52,6 +52,7 @@ const DEFAULT_DISPLAY_FLOOR = 0.001;
 // *after* the '[forecast] 2/5 HTTP response received' breadcrumb, the bug
 // is in colorize / render — not the network.
 const FORECAST_TIMEOUT_MS = 180_000;
+const FORECAST_RENDER_TIMEOUT_MS = 15_000;
 // Matches the checkpoint's training cadence (model_config.default.json ->
 // step_hours: 24). Forwarding explicitly keeps the autoregressive rollout in
 // the training distribution; tilesvc will otherwise fall back to its own
@@ -169,6 +170,15 @@ const toCompass = d => {
 const msToMph = v => (v == null ? null : v * 2.23694);
 const fmt = (v, digits = 1) => (v == null || Number.isNaN(+v) ? '—' : (+v).toFixed(digits));
 const pctStr = v => (v == null || Number.isNaN(+v) ? '—' : `${Math.round(+v)}%`);
+const withTimeout = (promise, ms, message) => {
+  let timeoutHandle = null;
+  const timeout = new Promise((_, reject) => {
+    timeoutHandle = setTimeout(() => reject(new Error(message)), ms);
+  });
+  return Promise.race([promise, timeout]).finally(() => {
+    if (timeoutHandle) clearTimeout(timeoutHandle);
+  });
+};
 
 const getDirectionName = deg => toCompass(deg);
 
@@ -681,7 +691,18 @@ const MapComponent = forwardRef(({
 
       const firstFrame = prepared.frames[0];
       setObservedLayerMode('forecast');
-      await renderPredictionRasterFrame(mapRef.current, firstFrame, { layerMode: forecastLayerMode });
+      console.info('[forecast] 4/5 rendering first frame on map', {
+        hasMap: !!mapRef.current,
+        mapLoaded: typeof mapRef.current?.loaded === 'function' ? mapRef.current.loaded() : undefined,
+        styleLoaded: typeof mapRef.current?.isStyleLoaded === 'function' ? mapRef.current.isStyleLoaded() : undefined,
+        bounds: firstFrame?.bounds,
+        coordinateCount: Array.isArray(firstFrame?.coordinates) ? firstFrame.coordinates.length : 0,
+      });
+      await withTimeout(
+        renderPredictionRasterFrame(mapRef.current, firstFrame, { layerMode: forecastLayerMode }),
+        FORECAST_RENDER_TIMEOUT_MS,
+        `Forecast map render timed out after ${Math.round(FORECAST_RENDER_TIMEOUT_MS / 1000)}s`,
+      );
       console.info('[forecast] 4/5 first frame rendered on map');
       if (fitBounds && firstFrame?.bounds) {
         const [w, s, e, n] = firstFrame.bounds;
