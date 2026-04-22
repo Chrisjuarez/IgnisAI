@@ -1,17 +1,16 @@
-# ignis_ml/config.yaml - STAGE 2: TRUE U-NET + FULL TEMPORAL CONTEXT
+# ignis_ml/config.yaml - STAGE 3: REGULARIZED + IMBALANCE-AWARE LOSS
+# Default profile: 18GB Apple Silicon laptop / PyTorch MPS.
 #
-# Changes vs. Stage 1:
-#   - seq_len 1 -> 6   (use the full 6-frame context the dataset already carries;
-#                       ConvLSTM was previously being fed a single frame, making
-#                       the recurrent stack a no-op).
-#   - focal relaxed    (gamma 3.0 -> 2.0, alpha 0.95 -> 0.75). The old settings
-#                       taught the model to fire only when it was >90% sure,
-#                       which is why live demo probabilities hug zero.
-#   - threshold 0.5    (was 0.90). Used as the eval starting point; the per-epoch
-#                       search now sweeps 0.3..0.7 instead of 0.70..0.97.
-#
-# Also paired with a new architecture in src/models/convlstm_unet.py that
-# actually has encoder-skip connections and a matching encoder/decoder pyramid.
+# Changes vs. Stage 2 (after run #1 overfit at epoch 3, CSI 0.235 @ th 0.70):
+#   - weight_decay 1e-4 -> 1e-3   (10x more L2; small dataset + heavy model was overfitting)
+#   - early_stop 8 -> 3           (stop burning cycles after overfit; run #1 wasted 2.5h)
+#   - focal DISABLED               (alpha=0.75 was miscalibrated for 2.85% positive class)
+#   - Tversky ENABLED              (alpha=0.3 beta=0.7 — penalize FN 2.3x more than FP;
+#                                   designed for sparse-positive segmentation)
+#   - Threshold sweep 0.30..0.85   (was 0.30..0.70; run #1 pegged at 0.70 top-of-range)
+#   - Decoder dropout 0.15         (was 0.10 everywhere; encoder stays 0.10)
+#   - Added aug: channel_dropout, gaussian_noise, temporal_dropout
+#     (spatial-only aug was not enough regularization)
 
 data_root: data
 
@@ -34,34 +33,79 @@ channels:
   static_order:  [elev, slope, aspect_cos, aspect_sin, ndvi, bi, erc, pdsi, chili, impervious, water, population, fuel1, fuel2, fuel3]
 
 training:
-  # STAGE 2: FULL TEMPORAL CONTEXT + TRUE U-NET SKIPS
+  # STAGE 3: REGULARIZED + IMBALANCE-AWARE LOSS
   seq_len: 6              # Use the full 6-frame window the dataset carries.
-  batch_size: 20          # Lower than 36 because the new U-Net is heavier at
-                          # H/4 bottleneck (4x hidden). Tune up if GPU permits.
-  hidden_channels: 96     # Base U-Net width. Bottleneck will be 4*hidden.
-  num_workers: 4
-  epochs: 40              # Slightly longer: deeper model + richer temporal input.
+  batch_size: 8           # Laptop-safe MPS batch. Raise only if memory pressure stays green.
+  hidden_channels: 64     # Base U-Net width. H96 is better suited to a larger CUDA GPU.
+  num_workers: 1          # More workers multiply memory on macOS because each worker has its own process.
+  cache_items: 0          # Avoid per-worker tile caches; this was the main source of swap pressure.
+  persistent_workers: false
+  epochs: 30              # Early stopping still decides the actual stopping point.
   lr: 0.0008              # Nudged down for the deeper decoder.
-  weight_decay: 0.0001
+  weight_decay: 0.0005     # Run #1 overfit at epoch 3 with wd=1e-4; 10x more regularization.
   optimizer: adamw
   scheduler: cosine
   warmup_epochs: 5
   grad_clip: 1.0
-  early_stop: 12
+  early_stop: 4           # Run #1 wasted 12 epochs after overfit; 3 is plenty with our small-data regime.
   mixed_precision: true
   seed: 42
+
+  # New: decoder gets stronger dropout than encoder (sparse-segmentation U-Net trick).
+  drop_encoder: 0.10
+  drop_decoder: 0.15
+
+  # Stage 4: target reformulation.
+  #   "mask"  - predict full next-day fire mask (existing v2 behavior).
+  #   "delta" - predict only NEW burn pixels; eval ORs prediction with
+  #             persistence to recover the full mask. This forces the model
+  #             to learn actual spread rather than memorize persistence.
+  # Delta mode + derived features together constitute "Stage 4".
+  target_mode: delta
 
   loss:
     dice_weight: 0.6
     dice_dilate_px: 2
-    focal: { enable: true, gamma: 2.0, alpha: 0.75 }
+
+    # Focal was fighting itself: alpha=0.75 means 3:1 positive weighting, but
+    # the class ratio is ~34:1 (2.85% positives). It undersampled positives.
+    # Run #1 best threshold was pegged at 0.70 (top of sweep), meaning the
+    # model still wants conservative output probabilities. Disabling.
+    focal:   { enable: false, gamma: 2.0, alpha: 0.75 }
+
+    # Tversky loss: TI = TP / (TP + alpha*FP + beta*FN), loss = 1 - TI.
+    # alpha=0.3, beta=0.7 -> FN penalized 2.33x more than FP. This is the
+    # standard sparse-positive segmentation recipe (Salehi 2017, Abraham 2019).
+    # `weight` scales its contribution vs BCE+Dice.
+    tversky: { enable: true,  alpha: 0.3, beta: 0.7, weight: 0.6 }
 
   metrics:
     threshold: 0.5
-    tta: true
+    tta: false            # TTA is useful for final eval, but too expensive every epoch on a laptop.
+    # Full threshold sweep (was hardcoded 0.30..0.70 x9 in train_nautilus.py).
+    # Run #1 saturated at 0.70 — extending to 0.85 so the real optimum isn't clipped.
+    threshold_sweep:
+      lo: 0.50
+      hi: 0.95
+      n: 51            # step ~= 0.02
+
+# Stage 4: derived dynamic channels. Shared between training and inference via
+# src/data/features.py — flip `enable` to true on the run that also bumps
+# ARCH_VERSION to v3 (the input channel count changes, so old v2 checkpoints
+# will not load). `include: null` means "use all available derived features".
+features:
+  derived:
+    enable: true
+    include: null
+  days_since_fire_cap: null
 
 augmentation:
   hflip_p: 0.5
   vflip_p: 0.5
   rot90_p: 1.0
   translate_px: 0
+  # NEW — non-spatial augmentations to combat overfitting.
+  # Never touch the fire_t channel (index 0) — it's the main signal.
+  channel_dropout_p: 0.15   # Probability per non-fire dynamic channel of being zeroed for a sample.
+  gaussian_noise_std: 0.02  # Additive Gaussian noise (in [0,1] normalized space) on dynamic inputs.
+  temporal_dropout_p: 0.10  # Probability per non-last timestep of being zeroed (last frame is always kept).
