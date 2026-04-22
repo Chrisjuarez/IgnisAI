@@ -87,7 +87,15 @@ htmlcov/
 # data/
 # **/*.csv
 # **/*.xlsx
+data/source-rasters/
 models/*.pt
+data/static_pipeline/
+.cache/static_pipeline/
+*.nc
+*.zip
+*.tif
+*.tiff
+*.vrt
 .env
 backend/.env
 

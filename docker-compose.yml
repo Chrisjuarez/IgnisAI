@@ -36,7 +36,13 @@ services:
       INSTALL_IGNIS_ML: "1"
       REQUIRED_ARCH_VERSION: v3
       REQUIRED_TARGET_MODE: delta
-      STATIC_CATALOG_PATH: ${STATIC_CATALOG_PATH:-}
+      STATIC_CATALOG_PATH: ${STATIC_CATALOG_PATH:-/app/config/static_catalog.production.json}
+      STATIC_CATALOG_REQUIRED: ${STATIC_CATALOG_REQUIRED:-0}
+      AWS_REGION: ${AWS_REGION:-}
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-}
+      IGNIS_STATIC_BUCKET: ${IGNIS_STATIC_BUCKET:-}
+      IGNIS_STATIC_PREFIX: ${IGNIS_STATIC_PREFIX:-ignis/static}
       CALIBRATION_PATH: ${CALIBRATION_PATH:-}
       CALIBRATION_REQUIRED: ${CALIBRATION_REQUIRED:-1}
       NOAA_GRIB_ENABLED: ${NOAA_GRIB_ENABLED:-0}
@@ -58,6 +64,7 @@ services:
       MODEL_THRESHOLD: "0.5"
     volumes:
       - ./models:/models
+      - ./config:/app/config:ro
       - ../ignis_ml_nautilus:/app/ignis_ml_source:ro
       - ./data/firms_snapshots:/data/firms_snapshots
       - ./data/noaa_grid_cache:/data/noaa_grid_cache

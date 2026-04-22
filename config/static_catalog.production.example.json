@@ -1,0 +1,38 @@
+{
+  "version": "western_conus-v1-YYYYMMDD",
+  "generated_at": "YYYY-MM-DDTHH:MM:SSZ",
+  "pipeline_version": "v1",
+  "extent": {
+    "name": "western_conus",
+    "description": "Western CONUS bbox covering CA, OR, WA, NV, AZ, UT, ID, MT, WY, CO, NM.",
+    "lonlat_bounds": [-125.1, 31.0, -101.8, 49.5],
+    "albers_bounds": ["generated_by_pipeline"]
+  },
+  "crs": "EPSG:5070",
+  "resolution_m": 500,
+  "shape": {
+    "height": "generated_by_pipeline",
+    "width": "generated_by_pipeline"
+  },
+  "storage": {
+    "bucket_uri": "s3://REPLACE_BUCKET/ignis/static",
+    "uploaded": true
+  },
+  "fuel_channels": {
+    "status": "candidate",
+    "strict_production_blocked_until": "fuel/static parity audit passes against training tiles"
+  },
+  "channels": {
+    "elev": {
+      "uri": "s3://REPLACE_BUCKET/ignis/static/western_conus/v1/YYYYMMDD/elev.tif",
+      "units": "m",
+      "nodata": -9999.0,
+      "valid_range": [-100, 4500],
+      "crs": "EPSG:5070",
+      "resampling": "bilinear",
+      "source": {
+        "name": "USGS 3DEP / OpenTopography DEM API"
+      }
+    }
+  }
+}

@@ -1,7 +1,9 @@
 # docker/tilesvc.Dockerfile
 FROM python:3.11-slim
 
-ENV PYTHONUNBUFFERED=1 PORT=8008 PYTHONPATH=/app
+ENV PYTHONUNBUFFERED=1 PORT=8008 PYTHONPATH=/app \
+    GDAL_DISABLE_READDIR_ON_OPEN=EMPTY_DIR \
+    CPL_VSIL_CURL_ALLOWED_EXTENSIONS=.tif,.tiff,.json
 
 # Runtime deps — libexpat1, libgeos, libproj needed by rasterio/shapely/pyproj at runtime
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -42,6 +44,8 @@ RUN pip install --no-cache-dir -r /app/requirements.txt \
 # for legacy utility modules used outside the v3 serving path.
 COPY ignis_ml /app/ignis_ml
 COPY services/tilesvc /app/services/tilesvc
+COPY services/static_pipeline /app/services/static_pipeline
+COPY config /app/config
 
 # Model files: copies whatever is in models/ (at minimum .gitkeep).
 # If your .pt file is committed or present in the build context, it gets baked in.
