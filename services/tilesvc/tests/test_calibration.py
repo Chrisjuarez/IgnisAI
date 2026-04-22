@@ -20,6 +20,17 @@ def test_missing_required_calibration_refuses_production_display(monkeypatch):
         calibration.load_calibration(model_sha256="abc")
 
 
+def test_missing_optional_calibration_uses_identity(monkeypatch):
+    reset_calibration_cache()
+    monkeypatch.delenv("CALIBRATION_PATH", raising=False)
+    monkeypatch.delenv("CALIBRATION_REQUIRED", raising=False)
+
+    cal = calibration.load_calibration(model_sha256="abc")
+
+    assert cal["method"] == "identity"
+    assert cal["placeholder_or_missing"] is True
+
+
 def test_isotonic_calibration_maps_score_and_risk_classes(tmp_path, monkeypatch):
     reset_calibration_cache()
     artifact = {

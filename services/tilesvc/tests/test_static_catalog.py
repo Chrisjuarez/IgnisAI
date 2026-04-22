@@ -13,6 +13,21 @@ def test_static_catalog_path_is_required(monkeypatch):
         static_catalog.load_catalog()
 
 
+def test_missing_optional_static_catalog_uses_placeholder_tensor(monkeypatch):
+    monkeypatch.delenv("STATIC_CATALOG_PATH", raising=False)
+    monkeypatch.delenv("STATIC_CATALOG_REQUIRED", raising=False)
+
+    tensor, summary = static_catalog.load_static_tensor_for_model(
+        None,
+        ["elev", "slope", "aspect_cos", "water"],
+    )
+
+    assert tensor.shape == (4, static_catalog.SIZE, static_catalog.SIZE)
+    assert summary["catalog"]["placeholder"] is True
+    assert summary["channels"]["elev"]["placeholder_or_missing"] is True
+    assert tensor[3].max() == 0.0
+
+
 def test_static_catalog_rejects_missing_required_channels(tmp_path, monkeypatch):
     path = tmp_path / "static_catalog.json"
     path.write_text(json.dumps({"channels": {"elev": {"uri": "/tmp/elev.tif"}}}), encoding="utf-8")

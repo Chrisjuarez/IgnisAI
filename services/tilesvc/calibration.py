@@ -21,6 +21,18 @@ DEFAULT_RISK_BREAKS = (
 _calibration_cache: Dict[str, Any] | None = None
 
 
+def _identity_calibration(reason: str | None = None) -> Dict[str, Any]:
+    cal: Dict[str, Any] = {
+        "method": "identity",
+        "points": [[0.0, 0.0], [1.0, 1.0]],
+        "risk_breaks": DEFAULT_RISK_BREAKS,
+    }
+    if reason:
+        cal["placeholder_or_missing"] = True
+        cal["reason"] = reason
+    return cal
+
+
 def _normalize_sha256(value: str | None) -> str | None:
     if value is None:
         return None
@@ -40,16 +52,19 @@ def load_calibration(*, model_sha256: str | None = None) -> Dict[str, Any]:
     if _calibration_cache is not None:
         return _calibration_cache
     path = _calibration_path()
-    required = os.getenv("CALIBRATION_REQUIRED", "1").strip().lower() not in {"0", "false", "no", "off"}
+    required = os.getenv("CALIBRATION_REQUIRED", "0").strip().lower() in {"1", "true", "yes", "on"}
     if not path:
         if required:
             raise InputUnavailable(
                 "CALIBRATION_PATH is required for calibrated production display",
                 reason="calibration_missing",
             )
-        _calibration_cache = {"method": "identity", "points": [[0.0, 0.0], [1.0, 1.0]], "risk_breaks": DEFAULT_RISK_BREAKS}
+        _calibration_cache = _identity_calibration("calibration_missing")
         return _calibration_cache
     if not path.exists():
+        if not required:
+            _calibration_cache = _identity_calibration("calibration_missing")
+            return _calibration_cache
         raise InputUnavailable(
             f"Calibration artifact does not exist: {path}",
             reason="calibration_missing",

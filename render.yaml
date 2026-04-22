@@ -65,6 +65,10 @@ services:
         sync: false # URL to download model .pt file (if not baked into Docker image)
       - key: MODEL_SHA256
         sync: false # Optional checksum; accepts bare hex or sha256:<hex>
+      - key: STATIC_CATALOG_REQUIRED
+        value: "0"
+      - key: CALIBRATION_REQUIRED
+        value: "0"
       - key: TORCH_DEVICE
         value: cpu
       - key: CORS_ORIGIN
