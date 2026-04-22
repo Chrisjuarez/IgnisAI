@@ -1,0 +1,165 @@
+{
+  "description": "Template source config for the IgnisAI Western CONUS static COG pipeline. Copy to config/static_sources.western_conus.json and replace REPLACE_* URIs before running a non-dry build.",
+  "extent": "western_conus",
+  "channels": {
+    "elev": {
+      "type": "opentopography_globaldem",
+      "demtype": "SRTMGL1",
+      "units": "m",
+      "valid_range": [-100, 4500],
+      "resampling": "bilinear",
+      "runtime_resampling": "bilinear",
+      "source": {
+        "name": "USGS 3DEP / OpenTopography DEM API",
+        "url": "https://portal.opentopography.org/API/globaldem"
+      }
+    },
+    "ndvi": {
+      "type": "raster",
+      "uri": "REPLACE_WITH_VNP13A1_SEASONAL_MEDIAN_NDVI_COG",
+      "units": "unitless",
+      "valid_range": [0, 1],
+      "resampling": "bilinear",
+      "runtime_resampling": "bilinear",
+      "source": {
+        "name": "NASA VIIRS VNP13A1 NDVI seasonal/recent median",
+        "url": "https://www.earthdata.nasa.gov/es/data/catalog/lpcloud-vnp13a1-001"
+      }
+    },
+    "bi": {
+      "type": "raster",
+      "uri": "REPLACE_WITH_GRIDMET_BI_COG",
+      "units": "NFDRS index",
+      "valid_range": [0, 220],
+      "resampling": "bilinear",
+      "runtime_resampling": "bilinear",
+      "source": {
+        "name": "gridMET Burning Index",
+        "url": "https://www.climatologylab.org/gridmet.html"
+      }
+    },
+    "erc": {
+      "type": "raster",
+      "uri": "REPLACE_WITH_GRIDMET_ERC_COG",
+      "units": "NFDRS index",
+      "valid_range": [0, 140],
+      "resampling": "bilinear",
+      "runtime_resampling": "bilinear",
+      "source": {
+        "name": "gridMET Energy Release Component",
+        "url": "https://www.climatologylab.org/gridmet.html"
+      }
+    },
+    "pdsi": {
+      "type": "raster",
+      "uri": "REPLACE_WITH_GRIDMET_PDSI_COG",
+      "units": "index",
+      "valid_range": [-10, 10],
+      "resampling": "bilinear",
+      "runtime_resampling": "bilinear",
+      "source": {
+        "name": "gridMET 10-day Palmer Drought Severity Index",
+        "url": "https://www.climatologylab.org/gridmet.html"
+      }
+    },
+    "chili": {
+      "type": "raster",
+      "uri": "REPLACE_WITH_CHILI_OR_HEAT_LOAD_COG",
+      "units": "index",
+      "valid_range": [0, 255],
+      "resampling": "bilinear",
+      "runtime_resampling": "bilinear",
+      "source": {
+        "name": "CHILI / heat-load index derived from DEM",
+        "url": "https://developers.google.com/earth-engine/datasets/catalog/CSP_ERGo_1_0_Global_SRTM_CHILI"
+      }
+    },
+    "impervious": {
+      "type": "raster",
+      "uri": "REPLACE_WITH_USGS_ANNUAL_NLCD_FRACTIONAL_IMPERVIOUS_COG",
+      "units": "percent",
+      "valid_range": [0, 100],
+      "resampling": "bilinear",
+      "runtime_resampling": "bilinear",
+      "source": {
+        "name": "USGS Annual NLCD Fractional Impervious Surface",
+        "url": "https://data.usgs.gov/datacatalog/data/USGS%3A6810c151d4be022940554070"
+      }
+    },
+    "water": {
+      "type": "nlcd_water",
+      "uri": "REPLACE_WITH_USGS_ANNUAL_NLCD_LAND_COVER_COG",
+      "classes": [11],
+      "true_value": 100,
+      "false_value": 0,
+      "units": "percent",
+      "valid_range": [0, 100],
+      "resampling": "nearest",
+      "runtime_resampling": "nearest",
+      "source": {
+        "name": "USGS Annual NLCD Land Cover open-water mask",
+        "url": "https://data.usgs.gov/datacatalog/data/USGS%3A6810c1a4d4be022940554075"
+      }
+    },
+    "population": {
+      "type": "raster",
+      "uri": "REPLACE_WITH_GPWV4_POPULATION_DENSITY_COG",
+      "units": "persons/km^2",
+      "valid_range": [0, 100000],
+      "resampling": "bilinear",
+      "runtime_resampling": "bilinear",
+      "source": {
+        "name": "NASA SEDAC GPWv4 Population Density",
+        "url": "https://www.earthdata.nasa.gov/data/catalog/sedac-ciesin-sedac-gpwv4-popdens-r10-4.10"
+      }
+    },
+    "fuel1": {
+      "type": "landfire_fuel_component",
+      "uri": "REPLACE_WITH_LANDFIRE_FBFM40_COG",
+      "component": "fuel1",
+      "units": "candidate latent fuel component",
+      "valid_range": [-3, 3],
+      "resampling": "nearest",
+      "runtime_resampling": "nearest",
+      "quality": "candidate",
+      "parity_status": "pending_training_static_audit",
+      "candidate": true,
+      "source": {
+        "name": "LANDFIRE FBFM40 candidate transform",
+        "url": "https://landfire.gov/fuel/fbfm40"
+      }
+    },
+    "fuel2": {
+      "type": "landfire_fuel_component",
+      "uri": "REPLACE_WITH_LANDFIRE_FBFM40_COG",
+      "component": "fuel2",
+      "units": "candidate latent fuel component",
+      "valid_range": [-3, 3],
+      "resampling": "nearest",
+      "runtime_resampling": "nearest",
+      "quality": "candidate",
+      "parity_status": "pending_training_static_audit",
+      "candidate": true,
+      "source": {
+        "name": "LANDFIRE FBFM40 candidate transform",
+        "url": "https://landfire.gov/fuel/fbfm40"
+      }
+    },
+    "fuel3": {
+      "type": "landfire_fuel_component",
+      "uri": "REPLACE_WITH_LANDFIRE_FBFM40_COG",
+      "component": "fuel3",
+      "units": "candidate latent fuel component",
+      "valid_range": [-8, 3],
+      "resampling": "nearest",
+      "runtime_resampling": "nearest",
+      "quality": "candidate",
+      "parity_status": "pending_training_static_audit",
+      "candidate": true,
+      "source": {
+        "name": "LANDFIRE FBFM40 candidate transform",
+        "url": "https://landfire.gov/fuel/fbfm40"
+      }
+    }
+  }
+}

@@ -1,0 +1,205 @@
+{
+  "description": "Template source config for the IgnisAI Western CONUS static COG pipeline. Copy to config/static_sources.western_conus.json and replace REPLACE_* URIs before running a non-dry build.",
+  "extent": "western_conus",
+  "channels": {
+    "elev": {
+      "type": "raster",
+      "uri": "s3://ignisai-static-chrisjuarez-2026/source-data/topography/srtm_dem_western_conus_500m.tif",
+      "units": "m",
+      "valid_range": [
+        -100,
+        4500
+      ],
+      "resampling": "bilinear",
+      "runtime_resampling": "bilinear",
+      "source": {
+        "name": "NASA SRTM v3 1 arc-second DEM, Western CONUS 500 m COG",
+        "url": "https://data.naturalcapitalalliance.stanford.edu/download/global/nasa-srtm-v3-1s/srtm-v3-1s.tif",
+        "note": "Used as the buildable DEM source until a USGS 3DEP Western CONUS COG mosaic is prepared."
+      }
+    },
+    "ndvi": {
+      "type": "raster",
+      "uri": "s3://ignisai-static-chrisjuarez-2026/source-data/ndvi/noaa_star_smn_ndvi_jun_nov_2024_western_conus_500m.tif",
+      "units": "unitless",
+      "valid_range": [
+        0,
+        1
+      ],
+      "resampling": "bilinear",
+      "runtime_resampling": "bilinear",
+      "source": {
+        "name": "NOAA NESDIS STAR Blended-VHP 4km weekly smoothed NDVI, Jun-Nov 2024 mean",
+        "url": "https://www.star.nesdis.noaa.gov/data/pub0018/VHPdata4users/data/Blended_VH_4km/geo_TIFF/",
+        "note": "Temporary public NDVI source until NASA VNP13A1 Earthdata access is configured."
+      }
+    },
+    "bi": {
+      "type": "raster",
+      "uri": "s3://ignisai-static-chrisjuarez-2026/source-data/gridmet/gridmet_bi_fireseason_mean_2024_western_conus_500m.tif",
+      "units": "NFDRS index",
+      "valid_range": [
+        0,
+        220
+      ],
+      "resampling": "bilinear",
+      "runtime_resampling": "bilinear",
+      "source": {
+        "name": "gridMET Burning Index",
+        "url": "https://www.climatologylab.org/gridmet.html"
+      }
+    },
+    "erc": {
+      "type": "raster",
+      "uri": "s3://ignisai-static-chrisjuarez-2026/source-data/gridmet/gridmet_erc_fireseason_mean_2024_western_conus_500m.tif",
+      "units": "NFDRS index",
+      "valid_range": [
+        0,
+        140
+      ],
+      "resampling": "bilinear",
+      "runtime_resampling": "bilinear",
+      "source": {
+        "name": "gridMET Energy Release Component",
+        "url": "https://www.climatologylab.org/gridmet.html"
+      }
+    },
+    "pdsi": {
+      "type": "raster",
+      "uri": "s3://ignisai-static-chrisjuarez-2026/source-data/gridmet/gridmet_pdsi_fireseason_mean_2024_western_conus_500m.tif",
+      "units": "index",
+      "valid_range": [
+        -10,
+        10
+      ],
+      "resampling": "bilinear",
+      "runtime_resampling": "bilinear",
+      "source": {
+        "name": "gridMET 10-day Palmer Drought Severity Index",
+        "url": "https://www.climatologylab.org/gridmet.html"
+      }
+    },
+    "chili": {
+      "type": "raster",
+      "uri": "s3://ignisai-static-chrisjuarez-2026/source-data/topography/heatload_chili_srtm_western_conus_500m.tif",
+      "units": "index",
+      "valid_range": [
+        0,
+        255
+      ],
+      "resampling": "bilinear",
+      "runtime_resampling": "bilinear",
+      "source": {
+        "name": "CHILI / heat-load index derived from DEM",
+        "url": "https://developers.google.com/earth-engine/datasets/catalog/CSP_ERGo_1_0_Global_SRTM_CHILI"
+      }
+    },
+    "impervious": {
+      "type": "raster",
+      "uri": "s3://ignisai-static-chrisjuarez-2026/source-data/nlcd/nlcd_fctimp_western_conus_2024_500m.tif",
+      "units": "percent",
+      "valid_range": [
+        0,
+        100
+      ],
+      "resampling": "bilinear",
+      "runtime_resampling": "bilinear",
+      "source": {
+        "name": "USGS Annual NLCD Fractional Impervious Surface",
+        "url": "https://data.usgs.gov/datacatalog/data/USGS%3A6810c151d4be022940554070"
+      }
+    },
+    "water": {
+      "type": "nlcd_water",
+      "uri": "s3://ignisai-static-chrisjuarez-2026/source-data/nlcd/nlcd_lndcov_western_conus_2024_500m.tif",
+      "classes": [
+        11
+      ],
+      "true_value": 100,
+      "false_value": 0,
+      "units": "percent",
+      "valid_range": [
+        0,
+        100
+      ],
+      "resampling": "nearest",
+      "runtime_resampling": "nearest",
+      "source": {
+        "name": "USGS Annual NLCD Land Cover open-water mask",
+        "url": "https://data.usgs.gov/datacatalog/data/USGS%3A6810c1a4d4be022940554075"
+      }
+    },
+    "population": {
+      "type": "raster",
+      "uri": "s3://ignisai-static-chrisjuarez-2026/source-data/population/gpwv4_population_density_2020_western_conus_500m.tif",
+      "units": "persons/km^2",
+      "valid_range": [
+        0,
+        100000
+      ],
+      "resampling": "bilinear",
+      "runtime_resampling": "bilinear",
+      "source": {
+        "name": "NASA SEDAC GPWv4 Population Density",
+        "url": "https://www.earthdata.nasa.gov/data/catalog/sedac-ciesin-sedac-gpwv4-popdens-r10-4.10"
+      }
+    },
+    "fuel1": {
+      "type": "landfire_fuel_component",
+      "uri": "s3://ignisai-static-chrisjuarez-2026/source-data/landfire/fbfm40_western_conus_2024_500m.tif",
+      "component": "fuel1",
+      "units": "candidate latent fuel component",
+      "valid_range": [
+        -3,
+        3
+      ],
+      "resampling": "nearest",
+      "runtime_resampling": "nearest",
+      "quality": "candidate",
+      "parity_status": "pending_training_static_audit",
+      "candidate": true,
+      "source": {
+        "name": "LANDFIRE FBFM40 candidate transform",
+        "url": "https://landfire.gov/fuel/fbfm40"
+      }
+    },
+    "fuel2": {
+      "type": "landfire_fuel_component",
+      "uri": "s3://ignisai-static-chrisjuarez-2026/source-data/landfire/fbfm40_western_conus_2024_500m.tif",
+      "component": "fuel2",
+      "units": "candidate latent fuel component",
+      "valid_range": [
+        -3,
+        3
+      ],
+      "resampling": "nearest",
+      "runtime_resampling": "nearest",
+      "quality": "candidate",
+      "parity_status": "pending_training_static_audit",
+      "candidate": true,
+      "source": {
+        "name": "LANDFIRE FBFM40 candidate transform",
+        "url": "https://landfire.gov/fuel/fbfm40"
+      }
+    },
+    "fuel3": {
+      "type": "landfire_fuel_component",
+      "uri": "s3://ignisai-static-chrisjuarez-2026/source-data/landfire/fbfm40_western_conus_2024_500m.tif",
+      "component": "fuel3",
+      "units": "candidate latent fuel component",
+      "valid_range": [
+        -8,
+        3
+      ],
+      "resampling": "nearest",
+      "runtime_resampling": "nearest",
+      "quality": "candidate",
+      "parity_status": "pending_training_static_audit",
+      "candidate": true,
+      "source": {
+        "name": "LANDFIRE FBFM40 candidate transform",
+        "url": "https://landfire.gov/fuel/fbfm40"
+      }
+    }
+  }
+}

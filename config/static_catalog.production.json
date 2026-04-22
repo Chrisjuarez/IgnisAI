@@ -1,0 +1,228 @@
+{
+  "channels": {
+    "bi": {
+      "crs": "EPSG:5070",
+      "nodata": -9999.0,
+      "resampling": "bilinear",
+      "source": {
+        "name": "gridMET Burning Index",
+        "url": "https://www.climatologylab.org/gridmet.html"
+      },
+      "units": "NFDRS index",
+      "uri": "s3://ignisai-static-chrisjuarez-2026/ignis/static/western_conus/v1/20260421/bi.tif",
+      "valid_range": [
+        0,
+        220
+      ]
+    },
+    "chili": {
+      "crs": "EPSG:5070",
+      "nodata": -9999.0,
+      "resampling": "bilinear",
+      "source": {
+        "name": "CHILI / heat-load index derived from DEM",
+        "url": "https://developers.google.com/earth-engine/datasets/catalog/CSP_ERGo_1_0_Global_SRTM_CHILI"
+      },
+      "units": "index",
+      "uri": "s3://ignisai-static-chrisjuarez-2026/ignis/static/western_conus/v1/20260421/chili.tif",
+      "valid_range": [
+        0,
+        255
+      ]
+    },
+    "elev": {
+      "crs": "EPSG:5070",
+      "nodata": -9999.0,
+      "resampling": "bilinear",
+      "source": {
+        "name": "NASA SRTM v3 1 arc-second DEM, Western CONUS 500 m COG",
+        "note": "Used as the buildable DEM source until a USGS 3DEP Western CONUS COG mosaic is prepared.",
+        "url": "https://data.naturalcapitalalliance.stanford.edu/download/global/nasa-srtm-v3-1s/srtm-v3-1s.tif"
+      },
+      "units": "m",
+      "uri": "s3://ignisai-static-chrisjuarez-2026/ignis/static/western_conus/v1/20260421/elev.tif",
+      "valid_range": [
+        -100,
+        4500
+      ]
+    },
+    "erc": {
+      "crs": "EPSG:5070",
+      "nodata": -9999.0,
+      "resampling": "bilinear",
+      "source": {
+        "name": "gridMET Energy Release Component",
+        "url": "https://www.climatologylab.org/gridmet.html"
+      },
+      "units": "NFDRS index",
+      "uri": "s3://ignisai-static-chrisjuarez-2026/ignis/static/western_conus/v1/20260421/erc.tif",
+      "valid_range": [
+        0,
+        140
+      ]
+    },
+    "fuel1": {
+      "candidate": true,
+      "crs": "EPSG:5070",
+      "nodata": -9999.0,
+      "parity_status": "pending_training_static_audit",
+      "quality": "candidate",
+      "resampling": "nearest",
+      "source": {
+        "name": "LANDFIRE FBFM40 candidate transform",
+        "url": "https://landfire.gov/fuel/fbfm40"
+      },
+      "units": "candidate latent fuel component",
+      "uri": "s3://ignisai-static-chrisjuarez-2026/ignis/static/western_conus/v1/20260421/fuel1.tif",
+      "valid_range": [
+        -3,
+        3
+      ]
+    },
+    "fuel2": {
+      "candidate": true,
+      "crs": "EPSG:5070",
+      "nodata": -9999.0,
+      "parity_status": "pending_training_static_audit",
+      "quality": "candidate",
+      "resampling": "nearest",
+      "source": {
+        "name": "LANDFIRE FBFM40 candidate transform",
+        "url": "https://landfire.gov/fuel/fbfm40"
+      },
+      "units": "candidate latent fuel component",
+      "uri": "s3://ignisai-static-chrisjuarez-2026/ignis/static/western_conus/v1/20260421/fuel2.tif",
+      "valid_range": [
+        -3,
+        3
+      ]
+    },
+    "fuel3": {
+      "candidate": true,
+      "crs": "EPSG:5070",
+      "nodata": -9999.0,
+      "parity_status": "pending_training_static_audit",
+      "quality": "candidate",
+      "resampling": "nearest",
+      "source": {
+        "name": "LANDFIRE FBFM40 candidate transform",
+        "url": "https://landfire.gov/fuel/fbfm40"
+      },
+      "units": "candidate latent fuel component",
+      "uri": "s3://ignisai-static-chrisjuarez-2026/ignis/static/western_conus/v1/20260421/fuel3.tif",
+      "valid_range": [
+        -8,
+        3
+      ]
+    },
+    "impervious": {
+      "crs": "EPSG:5070",
+      "nodata": -9999.0,
+      "resampling": "bilinear",
+      "source": {
+        "name": "USGS Annual NLCD Fractional Impervious Surface",
+        "url": "https://data.usgs.gov/datacatalog/data/USGS%3A6810c151d4be022940554070"
+      },
+      "units": "percent",
+      "uri": "s3://ignisai-static-chrisjuarez-2026/ignis/static/western_conus/v1/20260421/impervious.tif",
+      "valid_range": [
+        0,
+        100
+      ]
+    },
+    "ndvi": {
+      "crs": "EPSG:5070",
+      "nodata": -9999.0,
+      "resampling": "bilinear",
+      "source": {
+        "name": "NOAA NESDIS STAR Blended-VHP 4km weekly smoothed NDVI, Jun-Nov 2024 mean",
+        "note": "Temporary public NDVI source until NASA VNP13A1 Earthdata access is configured.",
+        "url": "https://www.star.nesdis.noaa.gov/data/pub0018/VHPdata4users/data/Blended_VH_4km/geo_TIFF/"
+      },
+      "units": "unitless",
+      "uri": "s3://ignisai-static-chrisjuarez-2026/ignis/static/western_conus/v1/20260421/ndvi.tif",
+      "valid_range": [
+        0,
+        1
+      ]
+    },
+    "pdsi": {
+      "crs": "EPSG:5070",
+      "nodata": -9999.0,
+      "resampling": "bilinear",
+      "source": {
+        "name": "gridMET 10-day Palmer Drought Severity Index",
+        "url": "https://www.climatologylab.org/gridmet.html"
+      },
+      "units": "index",
+      "uri": "s3://ignisai-static-chrisjuarez-2026/ignis/static/western_conus/v1/20260421/pdsi.tif",
+      "valid_range": [
+        -10,
+        10
+      ]
+    },
+    "population": {
+      "crs": "EPSG:5070",
+      "nodata": -9999.0,
+      "resampling": "bilinear",
+      "source": {
+        "name": "NASA SEDAC GPWv4 Population Density",
+        "url": "https://www.earthdata.nasa.gov/data/catalog/sedac-ciesin-sedac-gpwv4-popdens-r10-4.10"
+      },
+      "units": "persons/km^2",
+      "uri": "s3://ignisai-static-chrisjuarez-2026/ignis/static/western_conus/v1/20260421/population.tif",
+      "valid_range": [
+        0,
+        100000
+      ]
+    },
+    "water": {
+      "crs": "EPSG:5070",
+      "nodata": -9999.0,
+      "resampling": "nearest",
+      "source": {
+        "name": "USGS Annual NLCD Land Cover open-water mask",
+        "url": "https://data.usgs.gov/datacatalog/data/USGS%3A6810c1a4d4be022940554075"
+      },
+      "units": "percent",
+      "uri": "s3://ignisai-static-chrisjuarez-2026/ignis/static/western_conus/v1/20260421/water.tif",
+      "valid_range": [
+        0,
+        100
+      ]
+    }
+  },
+  "crs": "EPSG:5070",
+  "extent": {
+    "albers_bounds": [
+      -2728000,
+      897000,
+      -426000,
+      3268500
+    ],
+    "description": "Western CONUS bbox covering CA, OR, WA, NV, AZ, UT, ID, MT, WY, CO, NM.",
+    "lonlat_bounds": [
+      -125.1,
+      31.0,
+      -101.8,
+      49.5
+    ],
+    "name": "western_conus"
+  },
+  "fuel_channels": {
+    "status": "candidate",
+    "strict_production_blocked_until": "fuel/static parity audit passes against training tiles"
+  },
+  "generated_at": "2026-04-22T02:46:21.941947+00:00",
+  "pipeline_version": "v1",
+  "resolution_m": 500,
+  "shape": {
+    "height": 4743,
+    "width": 4604
+  },
+  "storage": {
+    "bucket_uri": "s3://ignisai-static-chrisjuarez-2026/ignis/static",
+    "uploaded": true
+  },
+  "version": "western_conus-v1-20260421"
+}

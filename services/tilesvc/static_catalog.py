@@ -83,6 +83,7 @@ class StaticChannel:
     valid_range: Optional[Tuple[float, float]] = None
     crs: Optional[str] = None
     resampling: str = "bilinear"
+    metadata: Optional[Dict[str, Any]] = None
 
 
 def _resolve_catalog_path() -> Optional[Path]:
@@ -167,10 +168,30 @@ def load_catalog(path: str | Path | None = None) -> Dict[str, Any]:
 
 
 def catalog_version(catalog: Mapping[str, Any]) -> Dict[str, Any]:
+    channels = catalog.get("channels") if isinstance(catalog.get("channels"), Mapping) else {}
+    fuel_channels = {
+        name: raw
+        for name, raw in channels.items()
+        if name in {"fuel1", "fuel2", "fuel3"} and isinstance(raw, Mapping)
+    }
     return {
         "path": catalog.get("_path"),
         "version": catalog.get("version"),
         "generated_at": catalog.get("generated_at"),
+        "extent": catalog.get("extent"),
+        "crs": catalog.get("crs"),
+        "resolution_m": catalog.get("resolution_m"),
+        "shape": catalog.get("shape"),
+        "storage": catalog.get("storage"),
+        "fuel_channels": catalog.get("fuel_channels"),
+        "fuel_channel_status": {
+            name: {
+                "quality": raw.get("quality"),
+                "parity_status": raw.get("parity_status"),
+                "candidate": raw.get("candidate"),
+            }
+            for name, raw in fuel_channels.items()
+        },
     }
 
 
@@ -194,6 +215,11 @@ def _parse_channel(name: str, raw: Mapping[str, Any]) -> StaticChannel:
         valid_range=parsed_range,
         crs=raw.get("crs"),
         resampling=str(raw.get("resampling") or "bilinear").lower(),
+        metadata={
+            key: raw.get(key)
+            for key in ("source", "quality", "parity_status", "candidate", "notes")
+            if key in raw
+        },
     )
 
 
@@ -282,6 +308,11 @@ def _validate_channel(name: str, arr: np.ndarray, channel: StaticChannel) -> Dic
         "pct_zero": pct_zero,
         "units": channel.units,
         "uri": channel.uri,
+        "source": (channel.metadata or {}).get("source"),
+        "quality": (channel.metadata or {}).get("quality"),
+        "parity_status": (channel.metadata or {}).get("parity_status"),
+        "candidate": (channel.metadata or {}).get("candidate"),
+        "notes": (channel.metadata or {}).get("notes"),
     }
 
 
