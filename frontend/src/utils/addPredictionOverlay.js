@@ -34,10 +34,74 @@ const IDS = {
   contour50Line: 'ignis-pred-contour50-line',
 };
 
+const MAP_STYLE_READY_TIMEOUT_MS = 8000;
+
+function isMapStyleReady(map) {
+  if (!map) return false;
+  try {
+    if (typeof map.isStyleLoaded === 'function') {
+      return map.isStyleLoaded();
+    }
+  } catch (_) {}
+  try {
+    if (typeof map.loaded === 'function') {
+      return map.loaded();
+    }
+  } catch (_) {}
+  return true;
+}
+
 function waitForMapLoad(map) {
   if (!map) return Promise.reject(new Error('Map instance missing'));
-  if (map.loaded()) return Promise.resolve();
-  return new Promise((resolve) => map.once('load', resolve));
+  if (isMapStyleReady(map)) return Promise.resolve();
+
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    let intervalId = null;
+    let timeoutId = null;
+    const timerApi = window;
+    const events = ['load', 'styledata', 'idle'];
+
+    const cleanup = () => {
+      if (intervalId) timerApi.clearInterval(intervalId);
+      if (timeoutId) timerApi.clearTimeout(timeoutId);
+      events.forEach(eventName => {
+        try { map.off?.(eventName, checkReady); } catch (_) {}
+      });
+    };
+
+    const settle = (fn, value) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      fn(value);
+    };
+
+    const checkReady = () => {
+      if (isMapStyleReady(map)) {
+        settle(resolve);
+      }
+    };
+
+    events.forEach(eventName => {
+      try { map.on?.(eventName, checkReady); } catch (_) {}
+    });
+    intervalId = timerApi.setInterval(checkReady, 100);
+
+    timeoutId = timerApi.setTimeout(() => {
+      // `map.loaded()` can remain false while tiles/images are still active,
+      // even though the style is ready for addSource/addLayer. If a style
+      // object exists after waiting, proceed instead of deadlocking the
+      // forecast spinner forever.
+      try {
+        if (typeof map.getStyle === 'function' && map.getStyle()) {
+          settle(resolve);
+          return;
+        }
+      } catch (_) {}
+      settle(reject, new Error('Map style was not ready for prediction overlay'));
+    }, MAP_STYLE_READY_TIMEOUT_MS);
+  });
 }
 
 function sniffContentType(resp) {
