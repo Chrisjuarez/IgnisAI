@@ -65,8 +65,20 @@ services:
         sync: false # URL to download model .pt file (if not baked into Docker image)
       - key: MODEL_SHA256
         sync: false # Optional checksum; accepts bare hex or sha256:<hex>
+      - key: STATIC_CATALOG_PATH
+        value: /app/config/static_catalog.production.json
       - key: STATIC_CATALOG_REQUIRED
         value: "0"
+      - key: AWS_REGION
+        sync: false # Region for private S3 static COG reads
+      - key: AWS_ACCESS_KEY_ID
+        sync: false # IAM user/role with read access to IGNIS_STATIC_BUCKET
+      - key: AWS_SECRET_ACCESS_KEY
+        sync: false
+      - key: IGNIS_STATIC_BUCKET
+        sync: false # Bucket containing generated static COGs
+      - key: IGNIS_STATIC_PREFIX
+        value: ignis/static
       - key: CALIBRATION_REQUIRED
         value: "0"
       - key: TORCH_DEVICE

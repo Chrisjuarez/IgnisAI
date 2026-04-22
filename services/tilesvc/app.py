@@ -1126,7 +1126,7 @@ def _probability_contract(
         },
         "quality": {
             "status": quality_status,
-            "degraded": not noaa_enabled,
+            "degraded": quality_status != "ok",
             "reasons": quality_reasons,
         },
         "data_sources": {
@@ -1377,6 +1377,13 @@ def healthz():
             "error": static_catalog_error,
             "version": static_catalog_meta.get("version"),
             "path": static_catalog_meta.get("_path"),
+            "extent": static_catalog_meta.get("extent"),
+            "crs": static_catalog_meta.get("crs"),
+            "resolution_m": static_catalog_meta.get("resolution_m"),
+            "shape": static_catalog_meta.get("shape"),
+            "storage": static_catalog_meta.get("storage"),
+            "channels": sorted((static_catalog_meta.get("channels") or {}).keys()),
+            "fuel_channels": static_catalog_meta.get("fuel_channels"),
         },
         "calibration": calibration_status(model_sha256=file_sha256(MODEL_PATH)),
         "firmsSnapshot": _latest_file_age(os.getenv("FIRMS_SNAPSHOT_DIR"), ("*.csv", "*.CSV")),
