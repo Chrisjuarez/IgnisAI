@@ -460,6 +460,8 @@ export async function prepareMultistepRasterFrames(payload, opts = {}) {
         probability_scale: payload?.probability_scale,
         model_meta: payload?.model_meta,
         input_summary: payload?.input_summary,
+        threshold_override: step?.threshold_override ?? payload?.threshold_override,
+        display_mask: step?.display_mask ?? payload?.display_mask,
         quality: step?.quality ?? payload?.quality,
         data_sources: step?.data_sources ?? payload?.data_sources,
         p_new_burn: step?.p_new_burn,

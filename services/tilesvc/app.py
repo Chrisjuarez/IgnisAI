@@ -30,6 +30,7 @@ from .calibration import calibrate_probability, calibration_status
 from .ml_runtime import file_sha256, runtime_imports, source_version_info
 from .prediction_contract import next_fire_from_delta, risk_class_summary
 from .static_catalog import InputUnavailable, load_static_tensor_for_model
+from .display_quality import display_mask_from_static, is_static_placeholder_or_missing
 
 import rasterio
 from rasterio.features import shapes as rio_shapes
@@ -150,6 +151,8 @@ MODEL_CONFIG_PATH = os.getenv("MODEL_CONFIG_PATH") or str(Path(__file__).with_na
 PRED_SMOOTH_SIGMA = float(os.getenv("PRED_SMOOTH_SIGMA", "1.5"))
 PRED_UPSCALE = int(os.getenv("PRED_UPSCALE", "1"))
 PRED_DISPLAY_FLOOR = float(os.getenv("PRED_DISPLAY_FLOOR", "0.02"))
+DISPLAY_MASK_WATER_THRESHOLD = float(os.getenv("DISPLAY_MASK_WATER_THRESHOLD", "0.5"))
+DISPLAY_MASK_IMPERVIOUS_THRESHOLD = float(os.getenv("DISPLAY_MASK_IMPERVIOUS_THRESHOLD", "0.8"))
 
 _model = None
 _model_meta = None
@@ -619,11 +622,6 @@ def _tensor_input_summary(
     dynamic_preparation: Optional[Dict[str, Any]] = None,
     static_summary: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
-    critical_static = {
-        "NDVI", "BI", "ERC", "PDSI", "CHILI",
-        "ndvi", "bi", "erc", "pdsi", "chili",
-        "fuel1", "fuel2", "fuel3", "water", "impervious", "population",
-    }
     dynamic_channels = {
         name: _channel_stats(dyn[:, idx, :, :])
         for idx, name in enumerate(MODEL_DYNAMIC_ORDER)
@@ -631,9 +629,7 @@ def _tensor_input_summary(
     static_channels = {
         name: {
             **_channel_stats(stat[idx]),
-            "placeholder_or_missing": (
-                name in critical_static and float((np.asarray(stat[idx]) == 0).mean()) > 0.999
-            ),
+            "placeholder_or_missing": is_static_placeholder_or_missing(name, stat[idx]),
         }
         for idx, name in enumerate(MODEL_STATIC_ORDER)
     }
@@ -1677,6 +1673,12 @@ def predict_multistep(
     payload_steps = []
     cropped_bounds = crop_window["bounds"]
     observed_fire_full = _observed_fire_from_dyn(debug_sink["dyn"]) if debug_sink.get("dyn") is not None else None
+    display_mask_full, display_mask_summary = display_mask_from_static(
+        debug_sink.get("stat"),
+        list(MODEL_STATIC_ORDER),
+        water_threshold=DISPLAY_MASK_WATER_THRESHOLD,
+        impervious_threshold=DISPLAY_MASK_IMPERVIOUS_THRESHOLD,
+    )
     for step in rollout:
         cropped, _, anchor_px = _apply_crop_window(step["prob"], crop_window)
         observed_crop = (
@@ -1684,6 +1686,15 @@ def predict_multistep(
             if observed_fire_full is not None
             else np.zeros_like(cropped, dtype=np.float32)
         )
+        display_mask_crop = (
+            _apply_crop_window(display_mask_full, crop_window)[0]
+            if display_mask_full is not None
+            else np.ones_like(cropped, dtype=np.float32)
+        )
+        step_display_mask = {
+            **display_mask_summary,
+            "masked_fraction": float((display_mask_crop <= 0.0).mean()),
+        }
         if debug_solid:
             # Solid-fill PNG bypasses the radial alpha mask and thresholding
             # so the plumbing test isn't confounded by per-pixel masking.
@@ -1696,16 +1707,18 @@ def predict_multistep(
                 cropped,
                 model_sha256=_model_sha256 or file_sha256(MODEL_PATH),
             )
+            display_score = np.asarray(display_score, dtype=np.float32) * display_mask_crop
             render_start = time.perf_counter()
             png = _prob_to_display_png(display_score, threshold=resolved_display_floor, anchor_px=anchor_px)
             _metric_observe("ignis_png_render_ms", (time.perf_counter() - render_start) * 1000.0)
         p_next_fire = _next_fire_from_delta(cropped, observed_crop, threshold)
+        p_next_fire_display = np.maximum(observed_crop, p_next_fire * display_mask_crop).astype(np.float32)
         image_base64 = base64.b64encode(png).decode("ascii")
         layer_images = {
             "new_burn": image_base64,
             "p_new_burn": image_base64,
-            "next_fire": _layer_image_base64(p_next_fire, threshold=0.5, anchor_px=anchor_px),
-            "p_next_fire": _layer_image_base64(p_next_fire, threshold=0.5, anchor_px=anchor_px),
+            "next_fire": _layer_image_base64(p_next_fire_display, threshold=0.5, anchor_px=anchor_px),
+            "p_next_fire": _layer_image_base64(p_next_fire_display, threshold=0.5, anchor_px=anchor_px),
             "observed_fire": _layer_image_base64(observed_crop, threshold=0.5, anchor_px=anchor_px),
         }
         contract = _probability_contract(
@@ -1728,6 +1741,8 @@ def predict_multistep(
             "area_fraction": float((cropped >= threshold).mean()),
             "display_area_fraction": float((display_score >= resolved_display_floor).mean()),
             "display_floor": resolved_display_floor,
+            "display_mask": step_display_mask,
+            "threshold_override": thr is not None,
             "contour": _prob_to_geojson(cropped, cropped_bounds, threshold=threshold),
             "contour_50": _prob_to_geojson(cropped, cropped_bounds, threshold=0.5),
             **contract,
@@ -1767,6 +1782,8 @@ def predict_multistep(
         "display_floor": resolved_display_floor,
         "step_hours": int(step_hours),
         "steps": payload_steps,
+        "display_mask": display_mask_summary,
+        "threshold_override": thr is not None,
         "probability_scale": {"mode": "absolute", "min": 0.0, "max": 1.0, "display_floor": resolved_display_floor},
         "model_meta": _model_metadata(),
         "input_summary": _tensor_input_summary(
