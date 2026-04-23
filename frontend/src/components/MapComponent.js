@@ -181,7 +181,7 @@ const getDirectionName = deg => toCompass(deg);
 const HISTORICAL_FIRES = [
   { name: 'Camp/Paradise Fire',  date: '2018-11-08', lat: 39.80, lon: -121.44, zoom: 10 },
   { name: 'Eaton Fire',          date: '2025-01-07', lat: 34.19, lon: -118.06, zoom: 11 },
-  { name: 'Palisades Fire',      incidentName: 'Palisades', date: '2025-01-07T18:30:00Z', displayDate: '2025-01-07 10:30 PT', lat: 34.05, lon: -118.55, zoom: 11 },
+  { name: 'Palisades Fire',      incidentName: 'Palisades', date: '2025-01-07T18:30:00Z', displayDate: '2025-01-07 10:30 PT', lat: 34.05, lon: -118.55, zoom: 11, ignition: false },
   { name: 'Dixie Fire',         date: '2021-07-14', lat: 40.05, lon: -121.38, zoom: 10 },
   { name: 'Caldor Fire',        date: '2021-08-14', lat: 38.75, lon: -120.30, zoom: 10 },
 ];
@@ -636,6 +636,7 @@ const MapComponent = forwardRef(({
     title = 'Ignis Forecast Timeline',
     steps = 6,
     stepHours,
+    ignition,
     fitBounds = true,
   }) => {
     setIsForecastLoading(true);
@@ -657,7 +658,7 @@ const MapComponent = forwardRef(({
       // Breadcrumbs so the console pinpoints which await is hanging. Keep
       // these until the forecast render pipeline is provably reliable —
       // silent hangs are the expensive bug here, not log noise.
-      console.info('[forecast] 1/5 calling predictFireSpreadMultistep', { lat, lon, date, steps, stepHours });
+      console.info('[forecast] 1/5 calling predictFireSpreadMultistep', { lat, lon, date, steps, stepHours, ignition });
       // Express proxy already retries upstream; don't double up from the
       // browser or tilesvc queues up redundant expensive predictions.
       const response = await predictFireSpreadMultistep({
@@ -666,6 +667,7 @@ const MapComponent = forwardRef(({
         date,
         steps,
         ...(stepHours ? { stepHours } : {}),
+        ...(ignition != null ? { ignition } : {}),
       });
       const payload = response?.data ?? response;
       console.info('[forecast] 2/5 HTTP response received', {
@@ -934,7 +936,11 @@ const MapComponent = forwardRef(({
     histRunningRef.current = true;
     setHistRunning(true);
     try {
-      const { lat, lon, date, zoom, name, incidentName, displayDate } = preset;
+      const { lat, lon, date, zoom, name, incidentName, displayDate, ignition } = preset;
+      const usesIgnitionPoint = ignition == null ? true : Boolean(ignition);
+      const historicalInputNote = usesIgnitionPoint
+        ? 'Uses historical date inputs; this preset includes an ignition-point seed when persisted fire history is unavailable.'
+        : 'Uses cached historical FIRMS/weather inputs for this incident; no synthetic ignition-point seed is added.';
 
       if (activePopup) activePopup.remove();
       map.flyTo?.({ center: [lon, lat], zoom: zoom || 10, duration: 1200 });
@@ -952,6 +958,7 @@ const MapComponent = forwardRef(({
         date,
         title: `${name} Forecast Timeline`,
         stepHours: DEFAULT_STEP_HOURS,
+        ignition: usesIgnitionPoint,
       });
 
       // Show info popup
@@ -971,8 +978,7 @@ const MapComponent = forwardRef(({
               <p><strong>Timeline:</strong> every ${cadence || '--'} hours</p>
               <p><strong>Observed overlay:</strong> FIRIS/WFIGS perimeter where available, plus FIRMS footprints.</p>
               <p style="margin-top:8px;font-size:0.85em;color:#888;">
-                Uses archived weather data. FIRMS fire detections only available for recent dates;
-                older fires use ignition-point mode.
+                ${historicalInputNote}
               </p>
             </div>
           </div>
