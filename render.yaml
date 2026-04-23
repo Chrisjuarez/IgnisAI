@@ -68,7 +68,7 @@ services:
       - key: STATIC_CATALOG_PATH
         value: /app/config/static_catalog.production.json
       - key: STATIC_CATALOG_REQUIRED
-        value: "0"
+        value: "1"
       - key: AWS_REGION
         sync: false # Region for private S3 static COG reads
       - key: AWS_ACCESS_KEY_ID
@@ -79,8 +79,30 @@ services:
         sync: false # Bucket containing generated static COGs
       - key: IGNIS_STATIC_PREFIX
         value: ignis/static
+      - key: IGNIS_RUNTIME_CACHE_BUCKET
+        value: s3://ignisai-static-chrisjuarez-2026/runtime
+      - key: IGNIS_RUNTIME_CACHE_PROFILE
+        value: palisades
+      - key: IGNIS_RUNTIME_CACHE_REQUIRED
+        value: "0"
       - key: CALIBRATION_REQUIRED
         value: "0"
+      - key: NOAA_GRIB_ENABLED
+        value: "0"
+      - key: NOAA_GRID_CACHE_DIR
+        value: /data/noaa_grid_cache
+      - key: NOAA_GRID_CACHE_TEMPLATE
+        value: /data/noaa_grid_cache/{iso_hour}_{lat}_{lon}.npz
+      - key: FIRMS_SNAPSHOT_DIR
+        value: /data/firms_snapshots
+      - key: FIRMS_SNAPSHOT_REQUIRED
+        value: "0"
+      - key: PRED_DISPLAY_FLOOR
+        value: "0.10"
+      - key: PRED_SMOOTH_SIGMA
+        value: "0.5"
+      - key: PRED_UPSCALE
+        value: "8"
       - key: TORCH_DEVICE
         value: cpu
       - key: CORS_ORIGIN
