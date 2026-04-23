@@ -38,6 +38,7 @@ router.get('/current', async (req, res) => {
         'wind_gusts_10m',
         'precipitation'
       ],
+      wind_speed_unit: 'ms',
       timezone: 'UTC',
     };
 

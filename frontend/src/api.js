@@ -22,12 +22,6 @@ const api = axios.create({
   timeout: DEFAULT_TIMEOUT_MS,
 });
 
-const rawDefaultThreshold =
-  (typeof window !== "undefined" && window._env_?.REACT_APP_MODEL_THR) ||
-  process.env.REACT_APP_MODEL_THR ||
-  "";
-const DEFAULT_THR = rawDefaultThreshold !== "" ? Number(rawDefaultThreshold) : null;
-
 // -----------------------------
 // Existing calls
 // -----------------------------
@@ -54,7 +48,7 @@ export const predictFireSpreadVector = async ({ lat, lng, lon, thr, Tseq, date }
     throw new Error(`predictFireSpreadVector missing lat/lon (lat=${lat}, lng=${lng}, lon=${lon})`);
   }
 
-  const threshold = thr == null ? DEFAULT_THR : Number(thr);
+  const threshold = thr == null ? null : Number(thr);
 
   const { data } = await api.get("/predict-fire-spread/vector", {
     params: {
@@ -82,7 +76,7 @@ export const predictFireSpreadRaster = async ({ lat, lng, lon, thr, displayFloor
     throw new Error(`predictFireSpreadRaster missing lat/lon (lat=${lat}, lng=${lng}, lon=${lon})`);
   }
 
-  const threshold = thr == null ? DEFAULT_THR : Number(thr);
+  const threshold = thr == null ? null : Number(thr);
 
   const { data } = await api.get("/predict-fire-spread/raster", {
     params: {
@@ -121,7 +115,7 @@ export const predictFireSpreadMultistep = async ({
     throw new Error(`predictFireSpreadMultistep missing lat/lon (lat=${lat}, lng=${lng}, lon=${lon})`);
   }
 
-  const threshold = thr == null ? DEFAULT_THR : Number(thr);
+  const threshold = thr == null ? null : Number(thr);
 
   const { data } = await api.get("/predict-fire-spread/multistep", {
     // Cold-start tilesvc + 6-step rollout can take 3-4 minutes; explicit

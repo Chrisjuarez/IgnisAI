@@ -100,6 +100,7 @@ describe('GET /api/weather/current', () => {
         params: expect.objectContaining({
           latitude: 34,
           longitude: -118,
+          wind_speed_unit: 'ms',
         }),
       }
     );
