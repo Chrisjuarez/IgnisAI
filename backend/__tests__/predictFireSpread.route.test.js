@@ -237,6 +237,7 @@ describe('GET /api/predict-fire-spread routes', () => {
     );
     // Dateless request should not forward a date param.
     expect(axios.get.mock.calls[0][1].params).not.toHaveProperty('date');
+    expect(axios.get.mock.calls[0][1].params).not.toHaveProperty('thr');
   });
 
   it('honors explicit ignition=false opt-out for multistep requests', async () => {
