@@ -62,6 +62,8 @@ function pickModelFields(payload = {}) {
     ...(payload?.display_score ? { display_score: payload.display_score } : {}),
     ...(payload?.risk_class ? { risk_class: payload.risk_class } : {}),
     ...(payload?.layer_images ? { layer_images: payload.layer_images } : {}),
+    ...(payload?.display_mask ? { display_mask: payload.display_mask } : {}),
+    ...(payload?.threshold_override != null ? { threshold_override: payload.threshold_override } : {}),
   };
 }
 

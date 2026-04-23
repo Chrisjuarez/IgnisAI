@@ -39,11 +39,6 @@ const API_BASE =
 const R_EARTH = 3958.8; // miles
 const OBSERVED_CELL_MAX_KM = 0.42;
 const OBSERVED_CELL_MIN_KM = 0.18;
-// Lowered from 0.02 so weak forecasts (common when static channels like NDVI/
-// BI/ERC are still placeholders) still show *something* on the map instead of
-// a fully-transparent PNG. Raise again once the model is fed real static
-// channel data.
-const DEFAULT_DISPLAY_FLOOR = 0.001;
 // Hard ceiling on how long we'll wait for a multistep forecast before giving
 // up and clearing the loading spinner. 180s matches a generous warm-path
 // rollout (~45s) + render pipeline (~10s) with headroom, but stops short of
@@ -670,7 +665,6 @@ const MapComponent = forwardRef(({
         lon,
         date,
         steps,
-        displayFloor: DEFAULT_DISPLAY_FLOOR,
         ...(stepHours ? { stepHours } : {}),
       });
       const payload = response?.data ?? response;
@@ -913,13 +907,12 @@ const MapComponent = forwardRef(({
       const result = await addPredictionOverlay(map, {
         apiBase: API_BASE,
         lat: latitude,
-        lon: longitude,
-        mode,
-        gamma: 0.7,
-        displayFloor: DEFAULT_DISPLAY_FLOOR,
-        opacity: 0.75,
-        smooth: true,
-        alphaThreshold: 0.01,
+      lon: longitude,
+      mode,
+      gamma: 0.7,
+      opacity: 0.75,
+      smooth: true,
+      alphaThreshold: 0.01,
       });
 
       // Fit to tile bounds so overlay doesn’t look “random”
@@ -1558,10 +1551,21 @@ const MapComponent = forwardRef(({
   const activeQualityStatus = activeQuality.status || 'unknown';
   const activeQualityReasons = Array.isArray(activeQuality.reasons) ? activeQuality.reasons : [];
   const activeTargetMode = activeForecastMeta.model_meta?.target_mode || 'unknown';
-  const activeRiskFractions = activeForecastMeta.risk_class?.fractions || {};
   const activeNewBurn = activeForecastMeta.p_new_burn || {};
   const activeNextFire = activeForecastMeta.p_next_fire || {};
   const activeObservedFire = activeForecastMeta.observed_fire || {};
+  const activeDisplayMask = activeForecastMeta.display_mask || {};
+  const activeAboveThreshold = activeNewBurn?.area_fraction ?? activeForecastFrame?.area_fraction;
+  const activeThresholdOverride = Boolean(activeForecastMeta.threshold_override || activeForecastFrame?.threshold_override);
+  const activeQualityLabel = activeQualityStatus === 'ok'
+    ? 'NOAA gridded'
+    : activeQualityStatus === 'unavailable'
+      ? 'Unavailable'
+      : (activeQualityReasons.includes('archive') ? 'Archive weather' : 'Fallback weather');
+  const activeQualityText = [
+    activeQualityStatus,
+    ...activeQualityReasons,
+  ].filter(Boolean).join(' / ') || 'unknown';
   const qualityBadgeClass = activeQualityStatus === 'ok' ? 'good' : (activeQualityStatus === 'unavailable' ? 'warn' : 'warn');
 
   return (
@@ -1654,9 +1658,12 @@ const MapComponent = forwardRef(({
           </div>
           <div className="forecast-badges">
             <span className={`forecast-badge ${qualityBadgeClass}`}>
-              {activeQualityStatus === 'ok' ? 'NOAA gridded' : activeQualityStatus === 'unavailable' ? 'Unavailable' : 'Fallback weather'}
+              {activeQualityLabel}
             </span>
             <span className="forecast-badge">Model: {activeTargetMode}</span>
+            {activeThresholdOverride && (
+              <span className="forecast-badge warn">Threshold override active</span>
+            )}
             {activeQualityReasons.slice(0, 2).map(reason => (
               <span key={reason} className="forecast-badge warn">{reason.replace(/_/g, ' ')}</span>
             ))}
@@ -1683,22 +1690,23 @@ const MapComponent = forwardRef(({
           </div>
           <div className="forecast-meta">
             Frame {activeForecastIndex + 1} of {forecastFrames.length}
-            {activeNewBurn?.prob_max != null ? ` · New-burn peak ${(activeNewBurn.prob_max * 100).toFixed(1)}%` : activeForecastFrame?.prob_max != null ? ` · Peak ${(activeForecastFrame.prob_max * 100).toFixed(1)}%` : ''}
+            {activeNewBurn?.prob_max != null ? ` · Peak advisory probability ${(activeNewBurn.prob_max * 100).toFixed(1)}%` : activeForecastFrame?.prob_max != null ? ` · Peak advisory probability ${(activeForecastFrame.prob_max * 100).toFixed(1)}%` : ''}
+            {activeAboveThreshold != null ? ` · Above threshold ${(activeAboveThreshold * 100).toFixed(1)}%` : ''}
             {activeStepHours ? ` · ${activeStepHours}h cadence` : ''}
           </div>
           <div className="forecast-ramp" aria-hidden="true" />
           <div className="forecast-metrics">
             <div className="forecast-metric">
               <strong>{activeThreshold != null ? `${(activeThreshold * 100).toFixed(0)}%` : '--'}</strong>
-              Threshold
+              Decision threshold
             </div>
             <div className="forecast-metric">
               <strong>{activeNewBurn?.prob_max != null ? `${(activeNewBurn.prob_max * 100).toFixed(1)}%` : activeForecastFrame?.prob_max != null ? `${(activeForecastFrame.prob_max * 100).toFixed(1)}%` : '--'}</strong>
-              New-burn peak
+              Peak advisory probability
             </div>
             <div className="forecast-metric">
-              <strong>{activeRiskFractions.extreme != null ? `${(activeRiskFractions.extreme * 100).toFixed(1)}%` : '--'}</strong>
-              Extreme risk
+              <strong>{activeAboveThreshold != null ? `${(activeAboveThreshold * 100).toFixed(1)}%` : '--'}</strong>
+              Above decision threshold
             </div>
             <div className="forecast-metric">
               <strong>{activeNextFire?.area_fraction != null ? `${(activeNextFire.area_fraction * 100).toFixed(1)}%` : activeForecastFrame?.area_fraction != null ? `${(activeForecastFrame.area_fraction * 100).toFixed(1)}%` : '--'}</strong>
@@ -1710,12 +1718,13 @@ const MapComponent = forwardRef(({
             {activeDisplayFloor != null ? ` Display floor ${(activeDisplayFloor * 100).toFixed(0)}%.` : ''}
             {activeDisplayArea != null ? ` Visible cells ${(activeDisplayArea * 100).toFixed(1)}%.` : ''}
             {activeObservedFire?.area_fraction != null ? ` Observed ${(activeObservedFire.area_fraction * 100).toFixed(1)}%.` : ''}
+            {activeDisplayMask?.masked_fraction != null ? ` Masked nonburnable ${(activeDisplayMask.masked_fraction * 100).toFixed(1)}%.` : ''}
             {' '}
             Layer: {forecastLayerMode === 'next_fire' ? 'reconstructed next-fire context' : 'new-burn risk'}.
             {' '}
             {missingStaticChannels.length
               ? `Static placeholders: ${missingStaticChannels.slice(0, 5).join(', ')}${missingStaticChannels.length > 5 ? '...' : ''}`
-              : `Input status: ${activeModelStatus}`}
+              : `Input quality: ${activeQualityText}. ${activeModelStatus}`}
           </div>
           <input
             className="forecast-slider"
