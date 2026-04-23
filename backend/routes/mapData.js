@@ -383,7 +383,7 @@ async function buildBootstrap(query = {}) {
     fetchIncidents(bbox),
     fetchPerimeters(bbox),
     fetchHotspots(bbox),
-    fetchAlerts(bbox),
+    fetchAlerts(),
   ]);
 
   const rawIncidents = incidentResult.status === 'fulfilled' ? incidentResult.value : [];
