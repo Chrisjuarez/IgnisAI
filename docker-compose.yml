@@ -43,12 +43,19 @@ services:
       AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-}
       IGNIS_STATIC_BUCKET: ${IGNIS_STATIC_BUCKET:-}
       IGNIS_STATIC_PREFIX: ${IGNIS_STATIC_PREFIX:-ignis/static}
+      IGNIS_RUNTIME_CACHE_BUCKET: ${IGNIS_RUNTIME_CACHE_BUCKET:-}
+      IGNIS_RUNTIME_CACHE_PROFILE: ${IGNIS_RUNTIME_CACHE_PROFILE:-palisades}
+      IGNIS_RUNTIME_CACHE_REQUIRED: ${IGNIS_RUNTIME_CACHE_REQUIRED:-0}
       CALIBRATION_PATH: ${CALIBRATION_PATH:-}
       CALIBRATION_REQUIRED: ${CALIBRATION_REQUIRED:-1}
       NOAA_GRIB_ENABLED: ${NOAA_GRIB_ENABLED:-0}
       NOAA_GRID_CACHE_DIR: ${NOAA_GRID_CACHE_DIR:-/data/noaa_grid_cache}
+      NOAA_GRID_CACHE_TEMPLATE: ${NOAA_GRID_CACHE_TEMPLATE:-/data/noaa_grid_cache/{iso_hour}_{lat}_{lon}.npz}
       FIRMS_SNAPSHOT_DIR: ${FIRMS_SNAPSHOT_DIR:-/data/firms_snapshots}
       FIRMS_SNAPSHOT_REQUIRED: ${FIRMS_SNAPSHOT_REQUIRED:-0}
+      PRED_DISPLAY_FLOOR: ${PRED_DISPLAY_FLOOR:-0.10}
+      PRED_SMOOTH_SIGMA: ${PRED_SMOOTH_SIGMA:-0.5}
+      PRED_UPSCALE: ${PRED_UPSCALE:-8}
       PREDICTION_CACHE_DIR: ${PREDICTION_CACHE_DIR:-/data/prediction_cache}
       PREDICTIONS_ENABLED: ${PREDICTIONS_ENABLED:-true}
       # optional but recommended: make config explicit; checkpoint metadata wins.
@@ -61,7 +68,6 @@ services:
       MODEL_DYNAMIC_ORDER: "fire_t,u,v,gust,tempC,q,precip"
       MODEL_STATIC_ORDER: "elev,slope,aspect_cos,aspect_sin,ndvi,bi,erc,pdsi,chili,impervious,water,population,fuel1,fuel2,fuel3"
       MODEL_DERIVED_FEATURES_ENABLE: "true"
-      MODEL_THRESHOLD: "0.5"
     volumes:
       - ./models:/models
       - ./config:/app/config:ro
