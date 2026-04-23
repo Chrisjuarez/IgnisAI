@@ -333,6 +333,72 @@ function observedCellCollection(dataArray, brightnessFilter, confidenceFilter) {
   };
 }
 
+function incidentFeatureCollection(incidents = []) {
+  return {
+    type: 'FeatureCollection',
+    features: (Array.isArray(incidents) ? incidents : [])
+      .filter(incident => Number.isFinite(Number(incident.lat)) && Number.isFinite(Number(incident.lon)))
+      .map(incident => ({
+        type: 'Feature',
+        geometry: incident.geometry || { type: 'Point', coordinates: [Number(incident.lon), Number(incident.lat)] },
+        properties: {
+          id: incident.id,
+          name: incident.name || 'Unnamed incident',
+          status: incident.status || 'unknown',
+          type: incident.type || 'wildfire',
+          acres: Number(incident.acres || 0),
+          county: incident.county || '',
+          state: incident.state || '',
+          updatedAt: incident.updatedAt || '',
+          hasPrediction: Boolean(incident.hasPrediction),
+          hasPerimeter: Boolean(incident.hasPerimeter),
+          hasHotspots: Boolean(incident.hasHotspots),
+          lat: Number(incident.lat),
+          lon: Number(incident.lon),
+        },
+      })),
+  };
+}
+
+function alertFeatureCollection(alerts = []) {
+  return {
+    type: 'FeatureCollection',
+    features: (Array.isArray(alerts) ? alerts : [])
+      .filter(alert => alert.geometry)
+      .map(alert => ({
+        type: 'Feature',
+        geometry: alert.geometry,
+        properties: {
+          id: alert.id,
+          event: alert.event || 'Fire Weather Alert',
+          headline: alert.headline || alert.event || 'Fire Weather Alert',
+          areaDesc: alert.areaDesc || '',
+          status: alert.status || '',
+          effective: alert.effective || '',
+          expires: alert.expires || alert.ends || '',
+        },
+      })),
+  };
+}
+
+function featureCoordinateBounds(geometry) {
+  const bounds = { w: Infinity, s: Infinity, e: -Infinity, n: -Infinity };
+  const visit = coords => {
+    if (!Array.isArray(coords)) return;
+    if (typeof coords[0] === 'number' && typeof coords[1] === 'number') {
+      bounds.w = Math.min(bounds.w, coords[0]);
+      bounds.e = Math.max(bounds.e, coords[0]);
+      bounds.s = Math.min(bounds.s, coords[1]);
+      bounds.n = Math.max(bounds.n, coords[1]);
+      return;
+    }
+    coords.forEach(visit);
+  };
+  visit(geometry?.coordinates);
+  if ([bounds.w, bounds.s, bounds.e, bounds.n].some(v => !Number.isFinite(v))) return null;
+  return bounds;
+}
+
 // ---- Component --------------------------------------------------------------
 const MapComponent = forwardRef(({
   brightnessFilter,
@@ -342,12 +408,24 @@ const MapComponent = forwardRef(({
   mapStyle,
   userLocation,
   range,
-  onNearbyFiresUpdate
+  onNearbyFiresUpdate,
+  incidents = [],
+  alerts = [],
+  layerVisibility = {},
+  selectedIncident = null,
+  selectedAlert = null,
+  onIncidentSelect,
+  onAlertSelect,
+  watchShell = false
 }, ref) => {
   const mapContainerRef = useRef();
   const mapRef          = useRef();
   const clickHandlerRef = useRef();
   const perimeterClickHandlerRef = useRef();
+  const incidentClickHandlerRef = useRef();
+  const alertClickHandlerRef = useRef();
+  const incidentsRef = useRef([]);
+  const alertsRef = useRef([]);
 
   const [wildfires, setWildfires]       = useState([]);
   const [wildfireFootprints, setWildfireFootprints] = useState(emptyFeatureCollection);
@@ -498,6 +576,68 @@ const MapComponent = forwardRef(({
     src.setData(geojson);
   }
 
+  function updateIncidentSource(data = incidentsRef.current) {
+    const map = mapRef.current;
+    if (!map) return;
+    const src = map.getSource('ignis-incidents-source');
+    if (!src) return;
+    src.setData(incidentFeatureCollection(data));
+  }
+
+  function updateAlertSource(data = alertsRef.current) {
+    const map = mapRef.current;
+    if (!map) return;
+    const src = map.getSource('nws-alerts-source');
+    if (!src) return;
+    src.setData(alertFeatureCollection(data));
+  }
+
+  function updateSelectedIncidentSource(incident = selectedIncident) {
+    const map = mapRef.current;
+    if (!map) return;
+    const src = map.getSource('selected-incident-source');
+    if (!src) return;
+    if (!incident) {
+      src.setData(emptyFeatureCollection());
+      return;
+    }
+    src.setData(incidentFeatureCollection([incident]));
+  }
+
+  function applyLayerVisibility(visibility = layerVisibility) {
+    const map = mapRef.current;
+    if (!map) return;
+    const groups = {
+      hotspots: [
+        'observed-fire-cells-fill',
+        'observed-fire-cells-outline',
+        'wildfire-footprints-fill',
+        'wildfire-footprints-outline',
+        'wildfires-layer',
+      ],
+      perimeters: ['fire-perimeters-fill', 'fire-perimeters-outline'],
+      incidents: ['ignis-incidents-layer', 'ignis-incidents-label', 'selected-incident-layer'],
+      warnings: ['nws-alerts-fill', 'nws-alerts-outline'],
+      prediction: [
+        'ignis-pred-raster-layer',
+        'ignis-pred-contour-line',
+        'ignis-pred-contour50-line',
+        'ignis-pred-bounds-layer',
+        'ignis-pred-vector-fill',
+        'ignis-pred-vector-line',
+      ],
+      ndvi: [NDVI_LAYER_ID],
+    };
+    Object.entries(groups).forEach(([key, layerIds]) => {
+      const visible = visibility[key] !== false;
+      layerIds.forEach(layerId => {
+        if (map.getLayer(layerId)) {
+          try { map.setLayoutProperty(layerId, 'visibility', visible ? 'visible' : 'none'); } catch (_) {}
+        }
+      });
+    });
+  }
+
   function setObservedLayerMode(mode = 'normal') {
     const map = mapRef.current;
     if (!map) return;
@@ -612,12 +752,6 @@ const MapComponent = forwardRef(({
       setNdviOn(false);
     }
   }, [ndviOn]);
-
-  // ---------- Expose actions to parent ----------
-  useImperativeHandle(ref, () => ({
-    refreshWildfires: fetchWildfires,
-    toggleNdvi
-  }), [fetchWildfires, toggleNdvi]);
 
   const clearForecastTimeline = useCallback(() => {
     setIsForecastPlaying(false);
@@ -763,29 +897,41 @@ const MapComponent = forwardRef(({
     }
   };
 
-  const displayFirePrediction = ({ geojson }) => {
-    const map = mapRef.current;
-    if (!map || !geojson) return;
+  const runPredictionForIncident = useCallback(async (incident) => {
+    if (!incident || isPredictingRef.current) return null;
+    const lat = Number(incident.lat);
+    const lon = Number(incident.lon);
+    if (!Number.isFinite(lat) || !Number.isFinite(lon)) return null;
 
-    if (map.getSource('fire-spread-prediction')) {
-      ['fire-spread-area','fire-spread-direction','fire-spread-points'].forEach(id => {
-        if (map.getLayer(id)) map.removeLayer(id);
+    isPredictingRef.current = true;
+    setIsPredicting(true);
+    try {
+      if (activePopup) activePopup.remove();
+      clearForecastTimeline();
+      const map = mapRef.current;
+      map?.flyTo?.({ center: [lon, lat], zoom: Math.max(map.getZoom?.() || 0, 10), duration: 900 });
+      await loadFirePerimeters({
+        bbox: bboxAround(lon, lat, 1.25),
+        incidentName: incident.name,
       });
-      map.removeSource('fire-spread-prediction');
+      const useSyntheticIgnition = !(incident.hasHotspots || incident.hasPerimeter);
+      return await loadForecastTimeline({
+        lat,
+        lon,
+        title: `${incident.name || 'Incident'} Ignis Advisory`,
+        stepHours: DEFAULT_STEP_HOURS,
+        ignition: useSyntheticIgnition,
+      });
+    } catch (error) {
+      console.error('Incident forecast failed:', error);
+      setObservedLayerMode('normal');
+      setForecastError(error?.message || 'Incident forecast failed. Please try again.');
+      return null;
+    } finally {
+      isPredictingRef.current = false;
+      setIsPredicting(false);
     }
-
-    map.addSource('fire-spread-prediction', { type: 'geojson', data: geojson });
-
-    map.addLayer({
-      id: 'fire-spread-area',
-      type: 'fill',
-      source: 'fire-spread-prediction',
-      paint: {
-        'fill-color': 'rgba(255,0,0,0.35)',
-        'fill-outline-color': '#ff0000'
-      }
-    });
-  };
+  }, [activePopup, clearForecastTimeline, loadFirePerimeters, loadForecastTimeline]);
 
   const forecastSummaryFromPrepared = (prepared) => {
     const frames = Array.isArray(prepared?.frames) ? prepared.frames : [];
@@ -1008,6 +1154,32 @@ const MapComponent = forwardRef(({
     });
   };
 
+  const flyToIncident = useCallback((incident) => {
+    const map = mapRef.current;
+    const lat = Number(incident?.lat);
+    const lon = Number(incident?.lon);
+    if (!map || !Number.isFinite(lat) || !Number.isFinite(lon)) return;
+    map.flyTo({ center: [lon, lat], zoom: Math.max(map.getZoom?.() || 0, 9.5), duration: 900 });
+  }, []);
+
+  const flyToAlert = useCallback((alert) => {
+    const map = mapRef.current;
+    if (!map || !alert?.geometry) return;
+    const bounds = featureCoordinateBounds(alert.geometry);
+    if (!bounds) return;
+    map.fitBounds([[bounds.w, bounds.s], [bounds.e, bounds.n]], { padding: 60, duration: 900, maxZoom: 8 });
+  }, []);
+
+  // ---------- Expose actions to parent ----------
+  useImperativeHandle(ref, () => ({
+    refreshWildfires: fetchWildfires,
+    toggleNdvi,
+    toggleHistoryPanel: () => setShowHistPanel(v => !v),
+    runPredictionForIncident,
+    flyToIncident,
+    flyToAlert,
+  }), [fetchWildfires, toggleNdvi, runPredictionForIncident, flyToIncident, flyToAlert]);
+
   // ---------- Layers setup ----------
   function setupLayers() {
     const map = mapRef.current;
@@ -1015,6 +1187,11 @@ const MapComponent = forwardRef(({
 
     // Observed fire shape: small per-detection cells are primary; raw scan/track footprints stay subdued.
     [
+      'selected-incident-layer',
+      'ignis-incidents-label',
+      'ignis-incidents-layer',
+      'nws-alerts-outline',
+      'nws-alerts-fill',
       'wildfires-layer',
       'observed-fire-cells-outline',
       'observed-fire-cells-fill',
@@ -1025,8 +1202,41 @@ const MapComponent = forwardRef(({
     ].forEach(id => {
       if (map.getLayer(id)) map.removeLayer(id);
     });
-    ['wildfires-source', 'observed-fire-cells-source', 'wildfire-footprints-source', 'fire-perimeters-source'].forEach(id => {
+    [
+      'selected-incident-source',
+      'ignis-incidents-source',
+      'nws-alerts-source',
+      'wildfires-source',
+      'observed-fire-cells-source',
+      'wildfire-footprints-source',
+      'fire-perimeters-source',
+    ].forEach(id => {
       if (map.getSource(id)) map.removeSource(id);
+    });
+
+    map.addSource('nws-alerts-source', {
+      type: 'geojson',
+      data: emptyFeatureCollection(),
+    });
+    map.addLayer({
+      id: 'nws-alerts-fill',
+      type: 'fill',
+      source: 'nws-alerts-source',
+      paint: {
+        'fill-color': '#ff4fb3',
+        'fill-opacity': 0.16,
+      }
+    });
+    map.addLayer({
+      id: 'nws-alerts-outline',
+      type: 'line',
+      source: 'nws-alerts-source',
+      paint: {
+        'line-color': '#ff4fb3',
+        'line-width': 1.8,
+        'line-dasharray': [2, 1.5],
+        'line-opacity': 0.78,
+      }
     });
 
     map.addSource('observed-fire-cells-source', {
@@ -1148,6 +1358,68 @@ const MapComponent = forwardRef(({
       }
     });
 
+    map.addSource('ignis-incidents-source', { type: 'geojson', data: emptyFeatureCollection() });
+    map.addLayer({
+      id: 'ignis-incidents-layer',
+      type: 'circle',
+      source: 'ignis-incidents-source',
+      paint: {
+        'circle-radius': [
+          'interpolate', ['linear'], ['coalesce', ['get', 'acres'], 0],
+          0, 7,
+          100, 10,
+          1000, 14,
+          10000, 20,
+        ],
+        'circle-color': [
+          'case',
+          ['!=', ['get', 'status'], 'active'], '#8f949b',
+          ['>=', ['coalesce', ['get', 'acres'], 0], 1000], '#f04438',
+          '#ff8a2a',
+        ],
+        'circle-opacity': 0.92,
+        'circle-stroke-width': 2.2,
+        'circle-stroke-color': '#ffe3ba',
+        'circle-blur': [
+          'case',
+          ['!=', ['get', 'status'], 'active'], 0.15,
+          0.35,
+        ],
+      }
+    });
+    map.addLayer({
+      id: 'ignis-incidents-label',
+      type: 'symbol',
+      source: 'ignis-incidents-source',
+      minzoom: 5,
+      layout: {
+        'text-field': ['get', 'name'],
+        'text-size': 12,
+        'text-offset': [0, 1.25],
+        'text-anchor': 'top',
+        'text-allow-overlap': false,
+      },
+      paint: {
+        'text-color': '#ffffff',
+        'text-halo-color': '#1b1f24',
+        'text-halo-width': 1.4,
+      }
+    });
+
+    map.addSource('selected-incident-source', { type: 'geojson', data: emptyFeatureCollection() });
+    map.addLayer({
+      id: 'selected-incident-layer',
+      type: 'circle',
+      source: 'selected-incident-source',
+      paint: {
+        'circle-radius': 18,
+        'circle-color': 'rgba(0,0,0,0)',
+        'circle-stroke-color': '#fff4c7',
+        'circle-stroke-width': 3,
+        'circle-opacity': 1,
+      }
+    });
+
     // Click handler (re-bind safely)
     if (clickHandlerRef.current) {
       ['observed-fire-cells-fill', 'wildfire-footprints-fill', 'wildfires-layer'].forEach(layerId => {
@@ -1157,6 +1429,14 @@ const MapComponent = forwardRef(({
     if (perimeterClickHandlerRef.current) {
       ['fire-perimeters-fill', 'fire-perimeters-outline'].forEach(layerId => {
         try { map.off('click', layerId, perimeterClickHandlerRef.current); } catch (_) {}
+      });
+    }
+    if (incidentClickHandlerRef.current) {
+      try { map.off('click', 'ignis-incidents-layer', incidentClickHandlerRef.current); } catch (_) {}
+    }
+    if (alertClickHandlerRef.current) {
+      ['nws-alerts-fill', 'nws-alerts-outline'].forEach(layerId => {
+        try { map.off('click', layerId, alertClickHandlerRef.current); } catch (_) {}
       });
     }
     clickHandlerRef.current = async e => {
@@ -1253,12 +1533,44 @@ const MapComponent = forwardRef(({
         .addTo(map);
       setActivePopup(popup);
     };
+    incidentClickHandlerRef.current = e => {
+      const f = e.features?.[0];
+      if (!f) return;
+      const id = f.properties?.id;
+      const incident = incidentsRef.current.find(item => item.id === id) || f.properties;
+      onIncidentSelect?.(incident);
+    };
+    alertClickHandlerRef.current = e => {
+      const f = e.features?.[0];
+      if (!f) return;
+      const id = f.properties?.id;
+      const alert = alertsRef.current.find(item => item.id === id) || {
+        id,
+        event: f.properties?.event,
+        headline: f.properties?.headline,
+        areaDesc: f.properties?.areaDesc,
+        geometry: f.geometry,
+      };
+      onAlertSelect?.(alert);
+    };
     map.on('click', 'observed-fire-cells-fill', clickHandlerRef.current);
     map.on('click', 'wildfire-footprints-fill', clickHandlerRef.current);
     map.on('click', 'wildfires-layer', clickHandlerRef.current);
     map.on('click', 'fire-perimeters-fill', perimeterClickHandlerRef.current);
     map.on('click', 'fire-perimeters-outline', perimeterClickHandlerRef.current);
-    ['observed-fire-cells-fill', 'wildfire-footprints-fill', 'wildfires-layer', 'fire-perimeters-fill', 'fire-perimeters-outline'].forEach(layerId => {
+    map.on('click', 'ignis-incidents-layer', incidentClickHandlerRef.current);
+    map.on('click', 'nws-alerts-fill', alertClickHandlerRef.current);
+    map.on('click', 'nws-alerts-outline', alertClickHandlerRef.current);
+    [
+      'observed-fire-cells-fill',
+      'wildfire-footprints-fill',
+      'wildfires-layer',
+      'fire-perimeters-fill',
+      'fire-perimeters-outline',
+      'ignis-incidents-layer',
+      'nws-alerts-fill',
+      'nws-alerts-outline',
+    ].forEach(layerId => {
       map.on('mouseenter', layerId, () => {
         const canvas = map.getCanvas?.();
         if (canvas?.style) canvas.style.cursor = 'pointer';
@@ -1286,6 +1598,9 @@ const MapComponent = forwardRef(({
     });
 
     if (ndviOn) ensureNdviLayer();
+    updateIncidentSource();
+    updateAlertSource();
+    applyLayerVisibility();
   }
 
   // ---------- Lifecycle ----------
@@ -1307,6 +1622,10 @@ const MapComponent = forwardRef(({
       updateObservedFireCellsSource();
       updateWildfireFootprintsSource();
       updatePerimeterSource();
+      updateIncidentSource();
+      updateAlertSource();
+      updateSelectedIncidentSource();
+      applyLayerVisibility();
       updateUserSource();
     });
     return () => m.remove();
@@ -1322,9 +1641,13 @@ const MapComponent = forwardRef(({
       updateObservedFireCellsSource();
       updateWildfireFootprintsSource();
       updatePerimeterSource();
+      updateIncidentSource();
+      updateAlertSource();
+      updateSelectedIncidentSource();
       updateUserSource();
       setObservedLayerMode(forecastVisible ? 'forecast' : 'normal');
       setObservedLayersVisible(observedLayersVisible);
+      applyLayerVisibility();
       if (forecastVisible && forecastFrames[activeForecastIndex]) {
         renderPredictionRasterFrame(map, forecastFrames[activeForecastIndex], { layerMode: forecastLayerMode }).catch(err => {
           console.error('Forecast frame render error:', err);
@@ -1338,6 +1661,24 @@ const MapComponent = forwardRef(({
   useEffect(() => { updateWildfireFootprintsSource(); }, [wildfireFootprints, brightnessFilter, confidenceFilter]);
   useEffect(() => { updatePerimeterSource(); }, [firePerimeters]);
   useEffect(() => { updateUserSource(); }, [userLocation]);
+  useEffect(() => {
+    incidentsRef.current = incidents;
+    updateIncidentSource(incidents);
+  }, [incidents]);
+  useEffect(() => {
+    alertsRef.current = alerts;
+    updateAlertSource(alerts);
+  }, [alerts]);
+  useEffect(() => {
+    updateSelectedIncidentSource(selectedIncident);
+    if (selectedIncident) flyToIncident(selectedIncident);
+  }, [selectedIncident, flyToIncident]);
+  useEffect(() => {
+    if (selectedAlert) flyToAlert(selectedAlert);
+  }, [selectedAlert, flyToAlert]);
+  useEffect(() => {
+    applyLayerVisibility(layerVisibility);
+  }, [layerVisibility, ndviOn, forecastVisible, forecastFrames.length]);
 
   useEffect(() => {
     if (!forecastVisible || !forecastFrames.length) return;
@@ -1450,6 +1791,9 @@ const MapComponent = forwardRef(({
       .forecast-title {
         font-size: 13px; font-weight: 700; letter-spacing: 0.04em; text-transform: uppercase;
         color: #ffb347;
+      }
+      .forecast-context {
+        font-size: 11px; color: rgba(247,243,234,0.64); margin-top: 4px;
       }
       .forecast-label {
         font-size: 20px; font-weight: 700; margin: 2px 0 0;
@@ -1581,9 +1925,11 @@ const MapComponent = forwardRef(({
         style={{ width: '100%', height: '100%' }}
         title="Press 'N' to toggle NDVI overlay"
       />
-      <button className="hist-toggle" onClick={() => setShowHistPanel(v => !v)}>
-        {showHistPanel ? 'X' : 'History'}
-      </button>
+      {!watchShell && (
+        <button className="hist-toggle" onClick={() => setShowHistPanel(v => !v)}>
+          {showHistPanel ? 'X' : 'History'}
+        </button>
+      )}
       {showHistPanel && (
         <div className="hist-panel">
           <h4>Historical Fire Testing</h4>
@@ -1649,6 +1995,7 @@ const MapComponent = forwardRef(({
           <div className="forecast-header">
             <div>
               <div className="forecast-title">Fire-spread risk — advisory, not a perimeter</div>
+              {forecastTitle && <div className="forecast-context">{forecastTitle}</div>}
               <div className="forecast-label">{activeForecastFrame.label}</div>
             </div>
             <button
