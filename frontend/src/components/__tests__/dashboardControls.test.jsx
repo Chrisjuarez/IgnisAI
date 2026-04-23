@@ -340,6 +340,35 @@ describe('Dashboard controls', () => {
     expect(renderPredictionRasterFrame).toHaveBeenCalled();
   });
 
+  test('Palisades historical preset disables synthetic ignition', async () => {
+    const MapComponent = require('../MapComponent').default;
+
+    render(
+      <MapComponent
+        brightnessFilter=""
+        confidenceFilter=""
+        onFiresUpdated={jest.fn()}
+        setIsFetching={jest.fn()}
+        mapStyle="mapbox://styles/mapbox/streets-v12"
+        userLocation={null}
+        range={0}
+        onNearbyFiresUpdate={jest.fn()}
+      />
+    );
+
+    fireEvent.click(await screen.findByRole('button', { name: /history/i }));
+    fireEvent.click(screen.getByRole('button', { name: /palisades fire/i }));
+
+    await waitFor(() => {
+      expect(predictFireSpreadMultistep).toHaveBeenCalledWith(expect.objectContaining({
+        lat: 34.05,
+        lon: -118.55,
+        date: '2025-01-07T18:30:00Z',
+        ignition: false,
+      }));
+    });
+  });
+
   test('forecast playback advances and clear removes the overlay state', async () => {
     jest.useFakeTimers();
     const MapComponent = require('../MapComponent').default;

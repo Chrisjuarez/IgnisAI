@@ -53,4 +53,21 @@ describe('prediction API client', () => {
       }),
     );
   });
+
+  test('sends ignition only when explicitly supplied', async () => {
+    client.get.mockResolvedValueOnce({ data: { ok: true } });
+
+    await predictFireSpreadMultistep({
+      lat: 34.05,
+      lon: -118.55,
+      ignition: false,
+    });
+
+    expect(client.get).toHaveBeenCalledWith(
+      '/predict-fire-spread/multistep',
+      expect.objectContaining({
+        params: expect.objectContaining({ ignition: false }),
+      }),
+    );
+  });
 });
