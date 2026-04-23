@@ -91,6 +91,16 @@ def _latest_file_age(path: str | None, patterns: Tuple[str, ...] = ("*",)) -> Di
     }
 
 
+def _noaa_cache_health_dir() -> Optional[str]:
+    cache_dir = os.getenv("NOAA_GRID_CACHE_DIR")
+    if cache_dir:
+        return cache_dir
+    template = os.getenv("NOAA_GRID_CACHE_TEMPLATE")
+    if template:
+        return str(Path(template).parent)
+    return None
+
+
 @app.middleware("http")
 async def prediction_metrics_middleware(request: Request, call_next):
     start = time.perf_counter()
@@ -1383,7 +1393,7 @@ def healthz():
         },
         "calibration": calibration_status(model_sha256=file_sha256(MODEL_PATH)),
         "firmsSnapshot": _latest_file_age(os.getenv("FIRMS_SNAPSHOT_DIR"), ("*.csv", "*.CSV")),
-        "noaaCycle": _latest_file_age(os.getenv("NOAA_GRID_CACHE_DIR"), ("*.npz", "*.grib2", "*.grb2")),
+        "noaaCycle": _latest_file_age(_noaa_cache_health_dir(), ("*.npz", "*.grib2", "*.grb2")),
         "weatherQuality": weather_quality_status(),
         "mlSource": source_version_info(),
     }

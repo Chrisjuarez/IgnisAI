@@ -55,6 +55,31 @@ PY
   echo "Model checksum verified: $ACTUAL_SHA"
 fi
 
+FIRMS_DIR="${FIRMS_SNAPSHOT_DIR:-/data/firms_snapshots}"
+NOAA_DIR="${NOAA_GRID_CACHE_DIR:-/data/noaa_grid_cache}"
+python -m services.runtime_cache ensure-dirs \
+  --firms-dir "$FIRMS_DIR" \
+  --noaa-dir "$NOAA_DIR" >/dev/null
+
+if [ -n "${IGNIS_RUNTIME_CACHE_BUCKET:-}" ]; then
+  CACHE_PROFILE="${IGNIS_RUNTIME_CACHE_PROFILE:-palisades}"
+  CACHE_REQUIRED="${IGNIS_RUNTIME_CACHE_REQUIRED:-0}"
+  echo "Syncing Ignis runtime cache profile '$CACHE_PROFILE' from $IGNIS_RUNTIME_CACHE_BUCKET ..."
+  if python -m services.runtime_cache sync \
+      --bucket "$IGNIS_RUNTIME_CACHE_BUCKET" \
+      --profile "$CACHE_PROFILE" \
+      --firms-dir "$FIRMS_DIR" \
+      --noaa-dir "$NOAA_DIR"; then
+    echo "Runtime cache sync complete."
+  else
+    if [ "$CACHE_REQUIRED" = "1" ] || [ "$CACHE_REQUIRED" = "true" ] || [ "$CACHE_REQUIRED" = "yes" ] || [ "$CACHE_REQUIRED" = "on" ]; then
+      echo "Runtime cache sync failed and IGNIS_RUNTIME_CACHE_REQUIRED is enabled." >&2
+      exit 1
+    fi
+    echo "Runtime cache sync failed; continuing because IGNIS_RUNTIME_CACHE_REQUIRED is disabled." >&2
+  fi
+fi
+
 PRED_ENABLED=$(printf '%s' "${PREDICTIONS_ENABLED:-true}" | tr '[:upper:]' '[:lower:]')
 if [ "$PRED_ENABLED" != "false" ] && [ "$PRED_ENABLED" != "0" ] && [ "$PRED_ENABLED" != "no" ] && [ "$PRED_ENABLED" != "off" ]; then
   if [ ! -f "$MODEL_FILE" ]; then
