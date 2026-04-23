@@ -45,6 +45,7 @@ RUN pip install --no-cache-dir -r /app/requirements.txt \
 COPY ignis_ml /app/ignis_ml
 COPY services/tilesvc /app/services/tilesvc
 COPY services/static_pipeline /app/services/static_pipeline
+COPY services/runtime_cache /app/services/runtime_cache
 COPY config /app/config
 
 # Model files: copies whatever is in models/ (at minimum .gitkeep).
