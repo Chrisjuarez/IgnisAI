@@ -106,6 +106,7 @@ export const predictFireSpreadMultistep = async ({
   steps,
   stepHours,
   displayFloor,
+  ignition,
 } = {}) => {
   const latitude = lat != null ? Number(lat) : null;
   const longitude =
@@ -116,6 +117,8 @@ export const predictFireSpreadMultistep = async ({
   }
 
   const threshold = thr == null ? null : Number(thr);
+  const ignitionParam =
+    typeof ignition === "boolean" ? ignition : (ignition == null ? null : String(ignition));
 
   const { data } = await api.get("/predict-fire-spread/multistep", {
     // Cold-start tilesvc + 6-step rollout can take 3-4 minutes; explicit
@@ -130,6 +133,7 @@ export const predictFireSpreadMultistep = async ({
       ...(threshold != null && !Number.isNaN(threshold) ? { thr: threshold } : {}),
       ...(displayFloor != null && !Number.isNaN(Number(displayFloor)) ? { display_floor: Number(displayFloor) } : {}),
       ...(date ? { date } : {}),
+      ...(ignitionParam != null ? { ignition: ignitionParam } : {}),
     },
   });
 
