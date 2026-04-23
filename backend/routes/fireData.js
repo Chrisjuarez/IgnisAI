@@ -423,6 +423,7 @@ router.get('/wildfires/footprints', wildfireLimiter, async (req, res) => {
 module.exports = router;
 module.exports._private = {
   parseCSV,
+  fetchCurrentFires,
   fireToFootprintFeature,
   firesToFootprintGeoJSON,
   parseBbox,
