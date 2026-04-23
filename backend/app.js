@@ -73,6 +73,7 @@ function tryMount(mountPath, modulePath) {
 }
 
 // API routes
+tryMount('/api', './routes/mapData');
 tryMount('/api', './routes/fireData');
 tryMount('/api/weather', './routes/weather');
 tryMount('/api/topography', './routes/topography');

@@ -28,6 +28,12 @@ const api = axios.create({
 export const getWildfireData = (opts = {}) => api.get("/wildfires", { params: opts });
 export const getWildfireFootprints = (opts = {}) => api.get("/wildfires/footprints", { params: opts });
 export const getFirePerimeters = (opts = {}) => api.get("/fire-perimeters", { params: opts });
+export const getMapBootstrap = (opts = {}) => api.get("/map/bootstrap", { params: opts });
+export const getIncidents = (opts = {}) => api.get("/incidents", { params: opts });
+export const getIncident = (id, opts = {}) => api.get(`/incidents/${encodeURIComponent(id)}`, { params: opts });
+export const getIncidentUpdates = (id, opts = {}) => api.get(`/incidents/${encodeURIComponent(id)}/updates`, { params: opts });
+export const getAlerts = (opts = {}) => api.get("/alerts", { params: opts });
+export const getLayers = () => api.get("/layers");
 
 // -----------------------------
 // Prediction endpoints
