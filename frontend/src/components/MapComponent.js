@@ -56,16 +56,16 @@ const DEFAULT_STEP_HOURS = 24;
 
 const FOOTPRINT_FILL_COLOR = [
   'match', ['get', 'brightnessCat'],
-  'Extreme', '#d7191c',
-  'Severe',  '#f04e23',
-  'Moderate', '#fdae42',
-  '#ffd166'
+  'Extreme', '#d34823',
+  'Severe',  '#ff6b35',
+  'Moderate', '#ff9b45',
+  '#ffd977'
 ];
 const FOOTPRINT_FILL_OPACITY = [
   'interpolate', ['linear'], ['get', 'confidencePct'],
-  0, 0.025,
-  50, 0.045,
-  100, 0.075
+  0, 0.02,
+  50, 0.04,
+  100, 0.07
 ];
 const FOOTPRINT_FILL_OPACITY_FORECAST = [
   'interpolate', ['linear'], ['get', 'confidencePct'],
@@ -84,9 +84,9 @@ const FOOTPRINT_LINE_WIDTH = [
 ];
 const OBSERVED_CELL_FILL_OPACITY = [
   'interpolate', ['linear'], ['get', 'confidencePct'],
-  0, 0.18,
-  50, 0.36,
-  100, 0.62
+  0, 0.14,
+  50, 0.28,
+  100, 0.48
 ];
 const OBSERVED_CELL_FILL_OPACITY_FORECAST = [
   'interpolate', ['linear'], ['get', 'confidencePct'],
@@ -104,8 +104,8 @@ const POINT_CIRCLE_OPACITY_FORECAST = [
   0, 0.03,
   100, 0.10
 ];
-const PERIMETER_FILL_OPACITY = 0.08;
-const PERIMETER_FILL_OPACITY_FORECAST = 0.045;
+const PERIMETER_FILL_OPACITY = 0.06;
+const PERIMETER_FILL_OPACITY_FORECAST = 0.035;
 
 // ---- Helpers ----------------------------------------------------------------
 function getBrightnessCategory(b) {
@@ -397,6 +397,67 @@ function featureCoordinateBounds(geometry) {
   visit(geometry?.coordinates);
   if ([bounds.w, bounds.s, bounds.e, bounds.n].some(v => !Number.isFinite(v))) return null;
   return bounds;
+}
+
+function featureCollectionBounds(featureCollection) {
+  const features = Array.isArray(featureCollection?.features) ? featureCollection.features : [];
+  const merged = { w: Infinity, s: Infinity, e: -Infinity, n: -Infinity };
+  features.forEach((feature) => {
+    const bounds = featureCoordinateBounds(feature?.geometry);
+    if (!bounds) return;
+    merged.w = Math.min(merged.w, bounds.w);
+    merged.s = Math.min(merged.s, bounds.s);
+    merged.e = Math.max(merged.e, bounds.e);
+    merged.n = Math.max(merged.n, bounds.n);
+  });
+  if ([merged.w, merged.s, merged.e, merged.n].some((value) => !Number.isFinite(value))) return null;
+  return merged;
+}
+
+function centerFromBounds(bounds) {
+  if (!bounds) return null;
+  return {
+    lon: (bounds.w + bounds.e) / 2,
+    lat: (bounds.s + bounds.n) / 2,
+  };
+}
+
+function hotspotCenterForIncident(fires = [], incident = {}) {
+  const lat = Number(incident.lat);
+  const lon = Number(incident.lon);
+  if (!Number.isFinite(lat) || !Number.isFinite(lon)) return null;
+
+  const nearby = (Array.isArray(fires) ? fires : []).filter((fire) => {
+    const fireLat = Number(fire.latitude);
+    const fireLon = Number(fire.longitude);
+    if (!Number.isFinite(fireLat) || !Number.isFinite(fireLon)) return false;
+    return Math.abs(fireLat - lat) <= 0.35 && Math.abs(fireLon - lon) <= 0.35;
+  });
+
+  if (!nearby.length) return null;
+
+  let totalWeight = 0;
+  let weightedLat = 0;
+  let weightedLon = 0;
+
+  nearby.forEach((fire) => {
+    const fireLat = Number(fire.latitude);
+    const fireLon = Number(fire.longitude);
+    const confidence = confidenceToPercent(fire.confidencePct ?? fire.confidence ?? 0);
+    const frp = Number(fire.frp || 0);
+    const weight = Math.max(1, frp, confidence / 8);
+    totalWeight += weight;
+    weightedLat += fireLat * weight;
+    weightedLon += fireLon * weight;
+  });
+
+  if (!totalWeight) return null;
+
+  return {
+    lat: weightedLat / totalWeight,
+    lon: weightedLon / totalWeight,
+    sampleCount: nearby.length,
+  };
 }
 
 // ---- Component --------------------------------------------------------------
@@ -909,15 +970,37 @@ const MapComponent = forwardRef(({
       if (activePopup) activePopup.remove();
       clearForecastTimeline();
       const map = mapRef.current;
-      map?.flyTo?.({ center: [lon, lat], zoom: Math.max(map.getZoom?.() || 0, 10), duration: 900 });
-      await loadFirePerimeters({
+      const perimeterGeojson = await loadFirePerimeters({
         bbox: bboxAround(lon, lat, 1.25),
         incidentName: incident.name,
       });
+      const perimeterBounds = featureCollectionBounds(perimeterGeojson);
+      const perimeterCenter = centerFromBounds(perimeterBounds);
+      const hotspotCenter = hotspotCenterForIncident(wildfires, incident);
+      const targetCenter = perimeterCenter || hotspotCenter || { lat, lon };
+
+      if (map && perimeterBounds) {
+        map.fitBounds(
+          [[perimeterBounds.w, perimeterBounds.s], [perimeterBounds.e, perimeterBounds.n]],
+          {
+            padding: watchShell
+              ? { top: 86, right: 430, bottom: 90, left: 60 }
+              : { top: 60, right: 60, bottom: 70, left: 60 },
+            duration: 900,
+          }
+        );
+      } else {
+        map?.flyTo?.({
+          center: [targetCenter.lon, targetCenter.lat],
+          zoom: Math.max(map?.getZoom?.() || 0, 10),
+          duration: 900,
+        });
+      }
+
       const useSyntheticIgnition = !(incident.hasHotspots || incident.hasPerimeter);
       return await loadForecastTimeline({
-        lat,
-        lon,
+        lat: targetCenter.lat,
+        lon: targetCenter.lon,
         title: `${incident.name || 'Incident'} Ignis Advisory`,
         stepHours: DEFAULT_STEP_HOURS,
         ignition: useSyntheticIgnition,
@@ -931,7 +1014,7 @@ const MapComponent = forwardRef(({
       isPredictingRef.current = false;
       setIsPredicting(false);
     }
-  }, [activePopup, clearForecastTimeline, loadFirePerimeters, loadForecastTimeline]);
+  }, [activePopup, clearForecastTimeline, loadFirePerimeters, loadForecastTimeline, watchShell, wildfires]);
 
   const forecastSummaryFromPrepared = (prepared) => {
     const frames = Array.isArray(prepared?.frames) ? prepared.frames : [];
@@ -1223,7 +1306,7 @@ const MapComponent = forwardRef(({
       type: 'fill',
       source: 'nws-alerts-source',
       paint: {
-        'fill-color': '#ff4fb3',
+        'fill-color': '#aa6095',
         'fill-opacity': 0.16,
       }
     });
@@ -1232,7 +1315,7 @@ const MapComponent = forwardRef(({
       type: 'line',
       source: 'nws-alerts-source',
       paint: {
-        'line-color': '#ff4fb3',
+        'line-color': '#aa6095',
         'line-width': 1.8,
         'line-dasharray': [2, 1.5],
         'line-opacity': 0.78,
@@ -1307,7 +1390,7 @@ const MapComponent = forwardRef(({
       type: 'fill',
       source: 'fire-perimeters-source',
       paint: {
-        'fill-color': '#ff2d2d',
+        'fill-color': '#d65a31',
         'fill-opacity': PERIMETER_FILL_OPACITY,
       }
     });
@@ -1316,7 +1399,7 @@ const MapComponent = forwardRef(({
       type: 'line',
       source: 'fire-perimeters-source',
       paint: {
-        'line-color': '#ff2d2d',
+        'line-color': '#e16a38',
         'line-width': 2.2,
         'line-opacity': 0.9,
       }
@@ -1337,10 +1420,10 @@ const MapComponent = forwardRef(({
         ],
         'circle-color': [
           'match', ['get', 'brightnessCat'],
-          'Extreme', '#CC0000',
-          'Severe',  '#FF2200',
-          'Moderate', '#FF6600',
-          '#FFA500'
+          'Extreme', '#d94b21',
+          'Severe',  '#ff6b35',
+          'Moderate', '#ff9440',
+          '#ffc766'
         ],
         'circle-opacity': POINT_CIRCLE_OPACITY,
         'circle-stroke-width': [
@@ -1349,11 +1432,11 @@ const MapComponent = forwardRef(({
           'Severe', 0.7,
           0.5
         ],
-        'circle-stroke-color': '#fff',
+        'circle-stroke-color': '#fff2d6',
         'circle-blur': [
           'match', ['get', 'brightnessCat'],
-          'Extreme', 0.8,
-          0.4
+          'Extreme', 0.92,
+          0.52
         ]
       }
     });
@@ -1374,16 +1457,16 @@ const MapComponent = forwardRef(({
         'circle-color': [
           'case',
           ['!=', ['get', 'status'], 'active'], '#8f949b',
-          ['>=', ['coalesce', ['get', 'acres'], 0], 1000], '#f04438',
-          '#ff8a2a',
+          ['>=', ['coalesce', ['get', 'acres'], 0], 1000], '#d44a22',
+          '#ff7d3e',
         ],
         'circle-opacity': 0.92,
         'circle-stroke-width': 2.2,
-        'circle-stroke-color': '#ffe3ba',
+        'circle-stroke-color': '#fff0d1',
         'circle-blur': [
           'case',
           ['!=', ['get', 'status'], 'active'], 0.15,
-          0.35,
+          0.45,
         ],
       }
     });
@@ -1414,7 +1497,7 @@ const MapComponent = forwardRef(({
       paint: {
         'circle-radius': 18,
         'circle-color': 'rgba(0,0,0,0)',
-        'circle-stroke-color': '#fff4c7',
+        'circle-stroke-color': '#ffd8a6',
         'circle-stroke-width': 3,
         'circle-opacity': 1,
       }
@@ -1740,17 +1823,18 @@ const MapComponent = forwardRef(({
     const style = document.createElement('style');
     style.textContent = `
       .predict-spread-btn {
-        background-color: #4CAF50;
-        color: white;
+        background: linear-gradient(135deg, #ff8d4d 0%, #ff6b35 52%, #e35424 100%);
+        color: #1a120d;
         padding: 8px 12px;
         border: none;
-        border-radius: 4px;
+        border-radius: 8px;
         cursor: pointer;
         margin-top: 10px;
         width: 100%;
         font-weight: bold;
+        box-shadow: 0 10px 22px rgba(227, 84, 36, 0.26);
       }
-      .predict-spread-btn:hover { background-color: #45a049; }
+      .predict-spread-btn:hover { filter: brightness(1.04); }
       .prediction-results { margin-top: 10px; padding-top: 10px; border-top: 1px solid #ddd; }
       .prediction-results h5 { margin-top: 0; margin-bottom: 8px; color: #FF4500; }
       .env-data { margin-top: 8px; padding: 8px; background-color: #f8f8f8; border-radius: 4px; font-size: 0.9em; }
@@ -1784,6 +1868,15 @@ const MapComponent = forwardRef(({
         border-radius: 8px; padding: 14px 16px; box-shadow: 0 10px 30px rgba(0,0,0,0.35);
         border: 1px solid rgba(255,255,255,0.08);
       }
+      .watch-shell .forecast-panel {
+        left: 20px; right: auto; bottom: 18px; transform: none;
+        width: min(370px, calc(100% - 440px)); min-width: 0; max-width: 370px;
+        background: rgba(21, 15, 12, 0.92);
+        border-radius: 14px;
+        padding: 14px 16px 12px;
+        box-shadow: 0 16px 40px rgba(0, 0, 0, 0.34);
+        border: 1px solid rgba(255, 140, 92, 0.16);
+      }
       .forecast-header {
         display: flex; align-items: center; justify-content: space-between; gap: 12px;
         margin-bottom: 10px;
@@ -1795,11 +1888,20 @@ const MapComponent = forwardRef(({
       .forecast-context {
         font-size: 11px; color: rgba(247,243,234,0.64); margin-top: 4px;
       }
+      .watch-shell .forecast-context {
+        color: rgba(248, 231, 214, 0.58);
+      }
       .forecast-label {
         font-size: 20px; font-weight: 700; margin: 2px 0 0;
       }
+      .watch-shell .forecast-label {
+        font-size: 17px;
+      }
       .forecast-meta {
         font-size: 12px; color: rgba(247,243,234,0.72); margin-bottom: 12px;
+      }
+      .watch-shell .forecast-meta {
+        margin-bottom: 9px;
       }
       .forecast-ramp {
         height: 8px; border-radius: 999px; margin: 8px 0 6px;
@@ -1810,9 +1912,18 @@ const MapComponent = forwardRef(({
         display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 6px;
         margin-bottom: 10px;
       }
+      .watch-shell .forecast-metrics {
+        gap: 5px;
+        margin-bottom: 8px;
+      }
       .forecast-metric {
         min-width: 0; padding: 7px 8px; border-radius: 8px;
         background: rgba(255,255,255,0.06); font-size: 11px;
+      }
+      .watch-shell .forecast-metric {
+        padding: 7px 7px;
+        border-radius: 10px;
+        background: rgba(255, 255, 255, 0.05);
       }
       .forecast-metric strong {
         display: block; margin-bottom: 2px; color: #fff; font-size: 12px;
@@ -1820,14 +1931,27 @@ const MapComponent = forwardRef(({
       .forecast-status {
         font-size: 11px; color: rgba(247,243,234,0.72); margin-bottom: 10px;
       }
+      .watch-shell .forecast-status {
+        margin-bottom: 8px;
+      }
       .forecast-status.warn { color: #ffcf70; }
       .forecast-status.unavailable { color: #ff6b6b; }
       .forecast-advisory {
         font-size: 12px; line-height: 1.35; color: rgba(247,243,234,0.78);
         margin: 4px 0 10px;
       }
+      .watch-shell .forecast-advisory {
+        margin: 3px 0 8px;
+        font-size: 11.5px;
+        color: rgba(248, 231, 214, 0.76);
+      }
       .forecast-badges {
         display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 10px;
+      }
+      .watch-shell .forecast-badges,
+      .watch-shell .forecast-layer-controls {
+        gap: 5px;
+        margin-bottom: 8px;
       }
       .forecast-badge {
         font-size: 11px; font-weight: 700; border-radius: 8px;
@@ -1853,6 +1977,9 @@ const MapComponent = forwardRef(({
         display: flex; align-items: center; justify-content: space-between; gap: 8px;
         margin-top: 12px;
       }
+      .watch-shell .forecast-controls {
+        margin-top: 10px;
+      }
       .forecast-btn {
         border: none; border-radius: 8px; cursor: pointer; font-weight: 700;
         padding: 8px 12px; background: #2e343b; color: #fff;
@@ -1876,9 +2003,18 @@ const MapComponent = forwardRef(({
         100% { background-position: -200% 0; }
       }
       .forecast-error-msg { color: #ff6b6b; font-size: 12px; margin-top: 8px; }
+      @media (max-width: 1240px) {
+        .watch-shell .forecast-panel {
+          width: min(340px, calc(100% - 404px));
+          max-width: 340px;
+        }
+      }
       @media (max-width: 520px) {
         .forecast-panel { min-width: 0; width: calc(100% - 24px); bottom: 12px; padding: 12px; }
         .forecast-metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+        .watch-shell .forecast-panel {
+          left: 12px; right: 12px; bottom: 12px; width: auto; max-width: none;
+        }
       }
     `;
     document.head.appendChild(style);
@@ -1919,7 +2055,7 @@ const MapComponent = forwardRef(({
   const qualityBadgeClass = activeQualityStatus === 'ok' ? 'good' : (activeQualityStatus === 'unavailable' ? 'warn' : 'warn');
 
   return (
-    <div style={{ width: '100%', height: '100%', position: 'relative' }}>
+    <div className={watchShell ? 'watch-shell' : ''} style={{ width: '100%', height: '100%', position: 'relative' }}>
       <div
         ref={mapContainerRef}
         style={{ width: '100%', height: '100%' }}

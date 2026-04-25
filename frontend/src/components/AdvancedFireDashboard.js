@@ -5,7 +5,7 @@ import { useAuth } from './auth/AuthContext';
 import '../styles/dashboard.css';
 
 const WESTERN_CONUS_BBOX = '-125.1,31.0,-101.8,49.5';
-const DEFAULT_STYLE = 'mapbox://styles/mapbox/outdoors-v12';
+const DEFAULT_STYLE = 'mapbox://styles/mapbox/satellite-streets-v12';
 
 const DEFAULT_LAYERS = {
   incidents: true,
@@ -246,6 +246,12 @@ function IncidentDetailPanel({
 }) {
   if (!incident) return null;
   const updates = detail?.updates || [];
+  const predictionEligibility = detail?.predictionEligibility
+    || incident.predictionEligibility
+    || { eligible: incident.hasPrediction !== false, reasons: [] };
+  const canPredict = Boolean(predictionEligibility?.eligible);
+  const predictionReason = predictionEligibility?.reasons?.[0]
+    || 'Prediction is only enabled when Ignis has enough hotspot or perimeter context.';
   return (
     <aside className="detail-panel open" aria-label="Incident detail">
       <div className="detail-panel-header">
@@ -276,23 +282,32 @@ function IncidentDetailPanel({
         <div className="detail-section">
           <div className="prediction-callout">
             <strong>Ignis Advisory Prediction</strong>
-            <span>Run the ConvLSTM spread-risk workflow using official incident context where available. This is not an official perimeter.</span>
+            <span>
+              Run the ConvLSTM spread-risk workflow against the best available perimeter and hotspot context.
+              This stays separate from official perimeter reporting.
+            </span>
           </div>
           <div className="quality-grid">
-            <div><span>Perimeter</span><strong>{incident.hasPerimeter ? 'Available' : 'Not available'}</strong></div>
-            <div><span>Hotspots</span><strong>{incident.hasHotspots ? 'Recent' : 'Sparse'}</strong></div>
-            <div><span>Status</span><strong>{incident.status}</strong></div>
+            <div><span>Perimeter</span><strong>{incident.hasPerimeter ? 'Available' : 'Missing'}</strong></div>
+            <div><span>Hotspots</span><strong>{incident.hasHotspots ? 'Live context' : 'Sparse'}</strong></div>
+            <div><span>Prediction</span><strong>{canPredict ? 'Ready' : 'Limited'}</strong></div>
           </div>
           <button
             className="primary-action"
             type="button"
-            disabled={runningPrediction || !incident.hasPrediction}
+            disabled={runningPrediction || !canPredict}
             onClick={() => onRunPrediction(incident)}
           >
             {runningPrediction ? 'Running Prediction...' : 'Run Ignis Prediction'}
           </button>
-          {!incident.hasPrediction && (
-            <p className="fine-print">Prediction is disabled for inactive or non-wildfire source records.</p>
+          {!canPredict && (
+            <p className="fine-print">{predictionReason}</p>
+          )}
+          {canPredict && (
+            <p className="fine-print">
+              Ignis runs from the strongest available incident geometry. FIRMS detections can steer the advisory center
+              when the official incident point is too generic.
+            </p>
           )}
         </div>
       )}
