@@ -146,6 +146,17 @@ function normalizeName(value) {
     .toLowerCase();
 }
 
+function resolvePredictionEligibility(incident, { hasPerimeter = false, hasHotspots = false } = {}) {
+  const reasons = [];
+  if (incident?.type !== 'wildfire') reasons.push('record is not an active wildfire');
+  if (incident?.status !== 'active') reasons.push('incident is not active');
+  if (!hasPerimeter && !hasHotspots) reasons.push('prediction requires a recent hotspot cluster or matching perimeter');
+  return {
+    eligible: reasons.length === 0,
+    reasons,
+  };
+}
+
 function normalizeIncident(feature) {
   const props = feature?.properties || {};
   const coords = Array.isArray(feature?.geometry?.coordinates)
@@ -217,6 +228,7 @@ function annotateIncidents(incidents, perimeters, hotspots) {
       const dLon = Math.abs(Number(fire.longitude) - incident.lon);
       return dLat <= 0.35 && dLon <= 0.35;
     });
+    const predictionEligibility = resolvePredictionEligibility(incident, { hasPerimeter, hasHotspots });
     return {
       ...incident,
       hasPerimeter,
@@ -226,7 +238,8 @@ function annotateIncidents(incidents, perimeters, hotspots) {
         ...(hasPerimeter ? ['Perimeters'] : []),
         ...(hasHotspots ? ['FIRMS'] : []),
       ],
-      hasPrediction: incident.type === 'wildfire' && incident.status === 'active',
+      hasPrediction: predictionEligibility.eligible,
+      predictionEligibility,
     };
   });
 }
@@ -503,8 +516,8 @@ router.get('/incidents/:id', async (req, res) => {
     alerts,
     evacuations: [],
     predictionEligibility: {
-      eligible: incident.hasPrediction,
-      reasons: incident.hasPrediction ? [] : ['incident is inactive or not a wildfire'],
+      eligible: incident.predictionEligibility?.eligible ?? incident.hasPrediction,
+      reasons: incident.predictionEligibility?.reasons || [],
     },
     updates: buildUpdates(incident, alerts),
   });
