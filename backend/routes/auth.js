@@ -12,9 +12,8 @@ const authLimiter = rateLimit({
     message: { message: 'Too many requests, please try again later.' }
 });
 
-// JWT Secret (add to .env file)
-const JWT_SECRET = process.env.JWT_SECRET || 'your-fallback-secret-key';
-const JWT_EXPIRES_IN = process.env.JWT_EXPIRES_IN || '7d';
+// JWT secret/expiry come from a single fail-fast loader. See backend/config/jwt.js.
+const { JWT_SECRET, JWT_EXPIRES_IN } = require('../config/jwt');
 
 // Generate JWT token
 const generateToken = (userId) => {
