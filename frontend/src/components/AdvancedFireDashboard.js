@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import MapComponent from './MapComponent';
 import { getMapBootstrap, getIncident, getIncidentUpdates } from '../api';
 import { useAuth } from './auth/AuthContext';
+import SourceHealthPanel from './SourceHealthPanel';
 import '../styles/dashboard.css';
 
 const WESTERN_CONUS_BBOX = '-125.1,31.0,-101.8,49.5';
@@ -624,9 +625,8 @@ const AdvancedFireDashboard = () => {
         <div className="map-status-strip">
           <span>{formatCount(incidents.length)} incidents</span>
           <span>{formatCount(warnings.length)} fire weather alerts</span>
-          <span>{sourceHealthLabel(layerStatus.hotspots)} FIRMS</span>
-          <span>{sourceHealthLabel(layerStatus.alerts)} NWS</span>
         </div>
+        <SourceHealthPanel layerStatus={layerStatus} className="map-source-health" />
       </main>
     </div>
   );
