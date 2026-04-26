@@ -41,12 +41,20 @@ services:
         sync: false # MongoDB Atlas connection string
       - key: JWT_SECRET
         generateValue: true
-      - key: FIRMS_API_KEY
-        sync: false # NASA FIRMS API key
+      # Standardized name. Old `FIRMS_API_KEY` was unused by the codebase
+      # (which reads NASA_API_KEY). Don't reintroduce the old name.
+      - key: NASA_API_KEY
+        sync: false # NASA FIRMS API key (https://firms.modaps.eosdis.nasa.gov/api/)
       - key: TILE_SVC
         sync: false # Set to https://ignisai-tilesvc.onrender.com after tilesvc deploys
       - key: CORS_ORIGIN
         value: https://ignisai-frontend.onrender.com
+      # Bound the in-memory map bootstrap cache so a long-uptime instance
+      # cannot OOM. Tune up if you observe a low hit rate at /metrics.
+      - key: MAP_BOOTSTRAP_CACHE_MS
+        value: "180000"
+      - key: MAP_BOOTSTRAP_CACHE_MAX
+        value: "200"
 
   # ---- Python/FastAPI Tile Service (Starter $7/mo) ----
   - type: web

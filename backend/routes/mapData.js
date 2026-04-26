@@ -1,13 +1,15 @@
 const express = require('express');
 const axios = require('axios');
 const { _private: fireDataHelpers } = require('./fireData');
+const { LruTtlCache } = require('../utils/lruCache');
 
 const router = express.Router();
 
 const WESTERN_CONUS_BBOX = '-125.1,31.0,-101.8,49.5';
 const WESTERN_STATES = ['CA', 'OR', 'WA', 'NV', 'AZ', 'UT', 'ID', 'MT', 'WY', 'CO', 'NM'];
 const CACHE_TTL_MS = Number(process.env.MAP_BOOTSTRAP_CACHE_MS || 180000);
-const USER_AGENT = process.env.IGNIS_USER_AGENT || 'IgnisAI wildfire map (chrisjuarez1596@gmail.com)';
+const CACHE_MAX_ENTRIES = Number(process.env.MAP_BOOTSTRAP_CACHE_MAX || 200);
+const USER_AGENT = process.env.IGNIS_USER_AGENT || 'IgnisAI wildfire map';
 
 const WFIGS_INCIDENTS_URL =
   process.env.WFIGS_INCIDENTS_URL ||
@@ -21,7 +23,9 @@ const FIRIS_PUBLIC_URL =
   process.env.FIRIS_PERIMETERS_URL ||
   'https://services1.arcgis.com/jUJYIo9tSA7EHvfZ/ArcGIS/rest/services/CA_Perimeters_NIFC_FIRIS_public_view/FeatureServer/0/query';
 
-const cache = new Map();
+// In-memory cache. Bounded LRU + TTL to prevent unbounded growth on
+// long-running instances; older entries are evicted lazily.
+const cache = new LruTtlCache({ max: CACHE_MAX_ENTRIES, ttl: CACHE_TTL_MS });
 
 function nowIso() {
   return new Date().toISOString();
@@ -53,18 +57,11 @@ function statusError(source, error, extra = {}) {
 }
 
 function getCached(key) {
-  const hit = cache.get(key);
-  if (!hit) return null;
-  if (Date.now() - hit.createdAt > CACHE_TTL_MS) {
-    cache.delete(key);
-    return null;
-  }
-  return hit.value;
+  return cache.get(key);
 }
 
 function setCached(key, value) {
-  cache.set(key, { createdAt: Date.now(), value });
-  return value;
+  return cache.set(key, value);
 }
 
 function parseBbox(raw = WESTERN_CONUS_BBOX) {
