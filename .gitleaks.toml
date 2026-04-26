@@ -1,0 +1,47 @@
+# .gitleaks.toml
+# Custom rules for IgnisAI. Use with the upstream defaults:
+#   gitleaks detect --redact --config .gitleaks.toml
+#
+# Why these rules:
+#   We have leaked Mapbox secret tokens (sk.*) and NASA FIRMS keys before.
+#   Detecting them at pre-commit prevents the next leak. Public Mapbox
+#   tokens (pk.*) are intentionally NOT flagged — they belong in the
+#   React bundle.
+
+title = "IgnisAI gitleaks rules"
+
+[extend]
+useDefault = true
+
+[[rules]]
+id = "mapbox-secret-token"
+description = "Mapbox secret access token (sk.*)"
+regex = '''sk\.eyJ[A-Za-z0-9._-]{60,}'''
+tags = ["mapbox", "secret"]
+
+[[rules]]
+id = "mongodb-srv-uri-with-creds"
+description = "MongoDB Atlas connection string with embedded credentials"
+regex = '''mongodb\+srv://[^:]+:[^@]+@[A-Za-z0-9.-]+\.mongodb\.net'''
+tags = ["mongodb", "secret"]
+
+[[rules]]
+id = "nasa-firms-key-shape"
+description = "Possible NASA FIRMS API key (32-char hex)"
+# Heuristic: only flag when it looks like a key=value assignment to NASA*
+regex = '''(?i)(NASA|FIRMS)_API_KEY\s*[:=]\s*['"]?[a-f0-9]{32}['"]?'''
+tags = ["nasa", "secret"]
+
+[allowlist]
+description = "Allowlists for known-public test fixtures"
+paths = [
+  '''^.*\.env\.example$''',
+  '''^docs/''',
+  '''^backend/__tests__/''',
+]
+regexes = [
+  # The hard-coded test JWT secret used in the existing jest suite.
+  '''test-secret-key-for-testing-minimum-32-chars''',
+  # CI fake JWT used in .github/workflows/ci.yml
+  '''test-secret-key-for-ci-minimum-32-characters-long''',
+]

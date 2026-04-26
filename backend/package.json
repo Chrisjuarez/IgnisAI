@@ -9,6 +9,7 @@
     "test:watch": "jest --watch",
     "test:coverage": "jest --coverage",
     "test:user": "jest user.model.test.js",
+    "test:unit": "jest --config jest.unit.cjs --runInBand",
     "lint": "echo \"skip\" && exit 0",
     "build": "echo \"skip\" && exit 0",
     "start": "node app.js",

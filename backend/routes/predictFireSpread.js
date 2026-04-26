@@ -17,7 +17,27 @@ const PREDICT_RETRY_BACKOFF_MS = Number(
 );
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
-async function getJSON(url, params = {}, timeout = 80000, retries = 2) {
+/**
+ * Fetch a tilesvc JSON endpoint with optional retry on cold-start 5xx.
+ *
+ * IMPORTANT: the default is `retries=0`. The previous default was 2, which
+ * is dangerous: a /predict_multistep retry restarts the entire 6-step
+ * rollout on tilesvc and almost always re-times out, burning minutes of
+ * compute on every attempt. Short, cheap endpoints (raster, vector meta,
+ * weather) opt in by passing `retries: 2`.
+ *
+ * Signature accepts both legacy positional args and a single options object:
+ *   getJSON(url, params, timeoutMs, retries)
+ *   getJSON(url, params, { timeoutMs, retries })
+ */
+async function getJSON(url, params = {}, timeoutOrOpts = 80000, retriesArg) {
+  const opts =
+    typeof timeoutOrOpts === "object" && timeoutOrOpts !== null
+      ? timeoutOrOpts
+      : { timeoutMs: Number(timeoutOrOpts) || 80000, retries: retriesArg };
+  const timeout = Number.isFinite(opts.timeoutMs) ? opts.timeoutMs : 80000;
+  const retries = Number.isFinite(opts.retries) ? Math.max(0, Math.floor(opts.retries)) : 0;
+
   let lastErr;
   for (let i = 0; i <= retries; i++) {
     try {
@@ -26,11 +46,7 @@ async function getJSON(url, params = {}, timeout = 80000, retries = 2) {
     } catch (err) {
       lastErr = err;
       const status = err?.response?.status;
-      // Retry on connection errors or 502/504 (tilesvc cold start).
-      // NOTE: for long-running endpoints (e.g. /predict_multistep) pass
-      // retries=0 — each retry restarts the rollout from step 1 and
-      // wastes minutes of compute. Use a generous single-attempt timeout
-      // instead.
+      // Retry only on connection errors or 502/504 (tilesvc cold start).
       if (i < retries && (!status || status === 502 || status === 504)) {
         console.warn(`getJSON attempt ${i + 1} failed (${status || err.code}), retrying...`);
         if (PREDICT_RETRY_BACKOFF_MS > 0) {
@@ -114,8 +130,13 @@ router.get("/raster", async (req, res) => {
       ignition: resolveIgnition(ignition),
     };
 
-    // tilesvc returns base64 PNG + bounds; crop centers the output on the fire point
-    const raster = await getJSON(`${TILE_SVC}/predict_raster_json`, params, 80000);
+    // tilesvc returns base64 PNG + bounds; crop centers the output on the fire point.
+    // Short, cheap call — opt into 2 retries to absorb tilesvc cold-start 502s.
+    const raster = await getJSON(
+      `${TILE_SVC}/predict_raster_json`,
+      params,
+      { timeoutMs: 80000, retries: 2 },
+    );
 
     const bounds = raster?.bounds;
     const image_base64 = raster?.image_base64;
@@ -157,18 +178,18 @@ router.get("/vector", async (req, res) => {
       ignition: resolveIgnition(ignition),
     };
 
-    // 1) GeoJSON polygons from tilesvc (honor thr!)
+    // 1) GeoJSON polygons from tilesvc (honor thr!) — short call, retry safe.
     const geojson = await getJSON(
       `${TILE_SVC}/predict_geojson`,
       { lat, lon, ...(Tseq ? { Tseq } : {}), ...(thr ? { thr } : {}), crop_frac: crop, ...sharedParams },
-      20000
+      { timeoutMs: 20000, retries: 2 },
     );
 
-    // 2) Meta (area_fraction + threshold + bounds) from tilesvc
+    // 2) Meta (area_fraction + threshold + bounds) from tilesvc — short, retry safe.
     const meta = await getJSON(
       `${TILE_SVC}/predict`,
       { lat, lon, ...(Tseq ? { Tseq } : {}), png: false, ...(thr ? { thr } : {}), crop_frac: crop, ...sharedParams },
-      80000
+      { timeoutMs: 80000, retries: 2 },
     );
 
     const area_fraction =
@@ -185,7 +206,7 @@ router.get("/vector", async (req, res) => {
       const wr = await getJSON(
         new URL("/api/weather/current", SELF_BASE).toString(),
         { lat, lon },
-        15000
+        { timeoutMs: 15000, retries: 2 },
       );
       wx = wr?.data?.current || null;
     } catch (_) {
@@ -260,10 +281,14 @@ router.get("/multistep", async (req, res) => {
       ...(debug ? { debug } : {}),
     };
 
-    // retries=0: a multistep retry restarts the whole rollout on tilesvc's
-    // side, which usually guarantees the next attempt also times out. One
-    // generous attempt is strictly better.
-    const forecast = await getJSON(`${TILE_SVC}/predict_multistep`, params, MULTISTEP_TIMEOUT_MS, 0);
+    // retries=0 (default): a multistep retry restarts the whole rollout on
+    // tilesvc's side, which usually guarantees the next attempt also times
+    // out. One generous attempt is strictly better than three short ones.
+    const forecast = await getJSON(
+      `${TILE_SVC}/predict_multistep`,
+      params,
+      { timeoutMs: MULTISTEP_TIMEOUT_MS, retries: 0 },
+    );
     if (!Array.isArray(forecast?.bounds) || forecast.bounds.length !== 4 || !Array.isArray(forecast?.steps)) {
       throw new Error(`tilesvc multistep missing bounds/steps: ${JSON.stringify(forecast)?.slice(0, 200)}`);
     }
@@ -304,7 +329,7 @@ router.get("/input-audit", async (req, res) => {
         ...(step_hours ? { step_hours } : {}),
         ...(include_npz ? { include_npz } : {}),
       },
-      80000
+      { timeoutMs: 80000, retries: 2 },
     );
 
     return res.json(audit);

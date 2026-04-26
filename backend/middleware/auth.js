@@ -1,7 +1,8 @@
 const jwt = require('jsonwebtoken');
 const User = require('../models/User');
 
-const JWT_SECRET = process.env.JWT_SECRET || 'your-fallback-secret-key';
+// JWT secret comes from a single fail-fast loader. See backend/config/jwt.js.
+const { JWT_SECRET } = require('../config/jwt');
 
 const authenticateToken = async (req, res, next) => {
   try {

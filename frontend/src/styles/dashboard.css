@@ -2370,6 +2370,131 @@ body {
   font-weight: 800;
 }
 
+/* ---------------------------------------------------------------- *
+ * Source health pills (rendered by SourceHealthPanel)
+ *
+ * Tiers map to colored dots; the pill chrome itself stays neutral so
+ * the strip reads as one visual unit even when 5 sources are mixed
+ * live/partial/stale/down. Colors are inline values rather than HSL
+ * tokens because we don't have semantic success/warning tokens yet.
+ * ---------------------------------------------------------------- */
+
+.source-health-panel {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+  pointer-events: auto;
+}
+
+.map-source-health {
+  /* When parented inside .map-status-strip wrapper, opt back into
+     pointer events so the tooltip on hover works. */
+  pointer-events: auto;
+}
+
+.source-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: rgba(28, 19, 15, 0.85);
+  color: #fff7ee;
+  border: 1px solid rgba(255, 220, 184, 0.14);
+  border-radius: 999px;
+  padding: 5px 10px;
+  font-size: 11.5px;
+  font-weight: 700;
+  line-height: 1;
+  white-space: nowrap;
+  cursor: help;
+  transition: background 120ms ease, border-color 120ms ease, transform 120ms ease;
+}
+
+.source-pill:hover {
+  background: rgba(40, 28, 22, 0.95);
+  border-color: rgba(255, 220, 184, 0.28);
+  transform: translateY(-1px);
+}
+
+.source-pill__dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex: 0 0 auto;
+  background: currentColor;
+  box-shadow: 0 0 0 2px rgba(0, 0, 0, 0.35);
+}
+
+.source-pill__label {
+  font-weight: 800;
+  letter-spacing: 0.02em;
+}
+
+.source-pill__tier {
+  font-weight: 600;
+  opacity: 0.8;
+  font-size: 11px;
+}
+
+.source-pill__age {
+  font-weight: 500;
+  opacity: 0.65;
+  font-size: 11px;
+}
+
+/* Tier colors. Dot uses currentColor so the entire pill can theme via
+   `color`; we override the readable text color back to the neutral
+   pill color so only the dot picks up the tier hue. */
+.source-pill--live {
+  color: #4ade80; /* emerald-400 */
+}
+.source-pill--live .source-pill__label,
+.source-pill--live .source-pill__tier,
+.source-pill--live .source-pill__age {
+  color: #fff7ee;
+}
+
+.source-pill--partial {
+  color: #fbbf24; /* amber-400 */
+  border-color: rgba(251, 191, 36, 0.35);
+}
+.source-pill--partial .source-pill__label,
+.source-pill--partial .source-pill__tier,
+.source-pill--partial .source-pill__age {
+  color: #fff7ee;
+}
+
+.source-pill--stale {
+  color: #f59e0b; /* amber-500 */
+  border-color: rgba(245, 158, 11, 0.35);
+}
+.source-pill--stale .source-pill__label,
+.source-pill--stale .source-pill__tier,
+.source-pill--stale .source-pill__age {
+  color: #fff7ee;
+}
+
+.source-pill--down {
+  color: #f87171; /* red-400 */
+  border-color: rgba(248, 113, 113, 0.5);
+  background: rgba(60, 18, 18, 0.85);
+}
+.source-pill--down .source-pill__label,
+.source-pill--down .source-pill__tier,
+.source-pill--down .source-pill__age {
+  color: #ffe9e2;
+}
+
+@media (max-width: 760px) {
+  .source-pill__age {
+    display: none; /* drop relative time on mobile to save horizontal room */
+  }
+  .source-pill {
+    padding: 4px 8px;
+    font-size: 11px;
+  }
+}
+
 @media (max-width: 1200px) {
   .watch-topbar {
     grid-template-columns: auto auto minmax(180px, 1fr) auto;
