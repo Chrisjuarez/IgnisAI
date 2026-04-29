@@ -181,7 +181,15 @@ const getDirectionName = deg => toCompass(deg);
 const HISTORICAL_FIRES = [
   { name: 'Camp/Paradise Fire',  date: '2018-11-08', lat: 39.80, lon: -121.44, zoom: 10 },
   { name: 'Eaton Fire',          date: '2025-01-07', lat: 34.19, lon: -118.06, zoom: 11 },
-  { name: 'Palisades Fire',      incidentName: 'Palisades', date: '2025-01-07T18:30:00Z', displayDate: '2025-01-07 10:30 PT', lat: 34.05, lon: -118.55, zoom: 11, ignition: false },
+  // Palisades Fire (2025-01-07): real ignition was at the head of Skull
+  // Rock / Temescal Canyon (~34.078°N, -118.555°W), not at the coastline.
+  // The previous lat=34.05 sat on PCH/beach where the synthetic ignition
+  // landed on impervious or non-burnable pixels that get masked out.
+  // ignition:true so the model gets a seed even when FIRMS snapshots
+  // haven't been backfilled for January 2025 — without a seed the rollout
+  // has no input fire signal and the heat defaults to the inland leeward
+  // ridge (Beverly Crest / Bel Air) where baseline weather/fuel risk peaks.
+  { name: 'Palisades Fire',      incidentName: 'Palisades', date: '2025-01-07T18:30:00Z', displayDate: '2025-01-07 10:30 PT', lat: 34.078, lon: -118.555, zoom: 11, ignition: true },
   { name: 'Dixie Fire',         date: '2021-07-14', lat: 40.05, lon: -121.38, zoom: 10 },
   { name: 'Caldor Fire',        date: '2021-08-14', lat: 38.75, lon: -120.30, zoom: 10 },
 ];
