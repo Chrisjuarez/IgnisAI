@@ -149,6 +149,44 @@ DEVICE = _get_torch_device()
 DEFAULT_MODEL_PATH = "/app/models/convlstm_unet_v3_delta_Cd13_Cs15_H64_T6_nautilus.pt"
 MODEL_PATH = os.getenv("MODEL_PATH", DEFAULT_MODEL_PATH)
 MODEL_THRESHOLD = float(os.getenv("MODEL_THRESHOLD", "0.01"))
+
+# ---------------------------------------------------------------------------
+# Autoregressive (AR) feedback configuration.
+#
+# `MODEL_THRESHOLD` is the *classification* threshold the trainer chose to
+# maximize F1 — it answers "is this cell labelled as burned?". For an
+# autoregressive multistep rollout we additionally need to decide what cells
+# count as "fire" when feeding the next step's input. Reusing the
+# classification threshold (typically 0.5–0.95) silently kills the rollout:
+# if the per-step probability rarely exceeds 0.5+, no new cells are fed back
+# and the fire footprint freezes.
+#
+# We expose two knobs:
+#
+#   MODEL_AR_FEEDBACK_MODE   "soft"      (default) propagate the soft
+#                                        probability mass into next-step
+#                                        fire_t. Best when the model is
+#                                        well-calibrated.
+#                            "threshold" hard threshold; cells above
+#                                        MODEL_AR_FEEDBACK_THRESHOLD become 1
+#                                        in the next-step fire_t.
+#
+#   MODEL_AR_FEEDBACK_THRESHOLD  Float; only used when mode == "threshold".
+#                                Defaults to 0.10 — much lower than the
+#                                classification threshold by design.
+#
+# Don't change MODEL_THRESHOLD to fix rollout behavior — that breaks the
+# user-visible "decision threshold" semantics. Tune these instead.
+# ---------------------------------------------------------------------------
+MODEL_AR_FEEDBACK_MODE = os.getenv("MODEL_AR_FEEDBACK_MODE", "soft").strip().lower()
+if MODEL_AR_FEEDBACK_MODE not in {"soft", "threshold"}:
+    print(
+        f"[tilesvc] MODEL_AR_FEEDBACK_MODE={MODEL_AR_FEEDBACK_MODE!r} not recognized; "
+        "falling back to 'soft'."
+    )
+    MODEL_AR_FEEDBACK_MODE = "soft"
+MODEL_AR_FEEDBACK_THRESHOLD = float(os.getenv("MODEL_AR_FEEDBACK_THRESHOLD", "0.10"))
+
 PREDICTIONS_ENABLED = os.getenv("PREDICTIONS_ENABLED", "true").strip().lower() not in {"0", "false", "no", "off"}
 REQUIRED_ARCH_VERSION = os.getenv("REQUIRED_ARCH_VERSION", "v3")
 REQUIRED_TARGET_MODE = os.getenv("REQUIRED_TARGET_MODE", "delta")
@@ -1305,9 +1343,24 @@ def _rollout_multistep_predictions(
             fire_idx = list(MODEL_DYNAMIC_ORDER).index("fire_t")
         except ValueError:
             fire_idx = 0
-        prev_fire = (current_dyn[-1, fire_idx] >= 0.5).astype(np.float32)
+
+        # Keep prev_fire as the soft probability mass from the prior step
+        # rather than collapsing it through a 0.5 cutoff. This preserves the
+        # gradient information the model was trained on (`fire_boost` produces
+        # values in (0, 1] for sparse FIRMS pixels — clamping at 0.5 throws
+        # most of that signal away).
+        prev_fire = current_dyn[-1, fire_idx].astype(np.float32)
+
         if MODEL_TARGET_MODE == "delta":
-            next_fire = np.maximum(prev_fire, (prob >= float(threshold)).astype(np.float32))
+            # AR feedback. See MODEL_AR_FEEDBACK_MODE comment above for why
+            # we don't reuse `threshold` (the classification threshold) here.
+            if MODEL_AR_FEEDBACK_MODE == "soft":
+                # Carry probability mass forward; the model itself smooths
+                # any over-confident pixels on the next forward pass.
+                next_fire = np.maximum(prev_fire, prob.astype(np.float32))
+            else:
+                growth = (prob >= MODEL_AR_FEEDBACK_THRESHOLD).astype(np.float32)
+                next_fire = np.maximum(prev_fire, growth)
         else:
             next_fire = _resize_prob_to_shape(prob, current_dyn.shape[-2:])
         zero = np.zeros_like(next_fire, dtype=np.float32)
