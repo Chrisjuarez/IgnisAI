@@ -528,9 +528,32 @@ def build_dynamic_for_tile(
     window_start = now - dt.timedelta(hours=window_hours)
     days = math.ceil(window_hours / 24.0)
     points = _load_firms_points_from_snapshots(bbox, window_start, now)
+
+    # The live FIRMS NRT API only covers ~5 days. Falling through silently
+    # for older windows produces an empty fire channel — the model then has
+    # no idea where the fire is and predicts on weather/fuel climatology
+    # only. Make the gap loud so the caller can decide whether to seed via
+    # `ignition=True` or go fix the snapshot directory.
+    nowish = dt.datetime.now(dt.timezone.utc)
+    window_age_days = max(0, (nowish - now).days)
+    FIRMS_LIVE_API_MAX_DAYS = 5
+
     if points is None:
+        if window_age_days > FIRMS_LIVE_API_MAX_DAYS:
+            print(
+                f"⚠️  [tilesvc] FIRMS window is {window_age_days}d old (>{FIRMS_LIVE_API_MAX_DAYS}d); "
+                f"live NRT API will return empty. snapshot_dir={_firms_snapshot_dir() or '<unset>'}; "
+                "set FIRMS_SNAPSHOT_DIR + FIRMS_SNAPSHOT_REQUIRED=1 and run "
+                "services/runtime_cache/__main__.py to backfill."
+            )
         csv_text = _fetch_firms_csv(bbox, days=days)
         points = _parse_firms_points(csv_text)
+        if not points and window_age_days > FIRMS_LIVE_API_MAX_DAYS:
+            print(
+                f"⚠️  [tilesvc] FIRMS empty for {window_start.isoformat()}..{now.isoformat()} "
+                "(historical window, no snapshot, live API empty). The fire channel will be "
+                "all-zeros unless the caller passes ignition=True or a seeded perimeter."
+            )
         print(f"[tilesvc] FIRMS points for tile {tile}: {len(points)} over {days}d live/API window")
     else:
         print(f"[tilesvc] FIRMS points for tile {tile}: {len(points)} from persisted daily snapshots")
