@@ -3,7 +3,11 @@ const express = require('express');
 const router = express.Router();
 const axios = require('axios');
 const Wildfire = require('../models/Wildfire');
-require('dotenv').config();
+const dotenv = require('dotenv');
+
+if (process.env.NODE_ENV !== 'test') {
+  dotenv.config({ quiet: true });
+}
 
 const rateLimit = require('express-rate-limit');
 

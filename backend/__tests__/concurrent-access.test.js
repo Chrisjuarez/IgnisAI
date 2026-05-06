@@ -1,9 +1,28 @@
 // backend/__tests__/concurrent-access.test.js
+const mongoose = require('mongoose');
 const request = require('supertest');
 const app = require('../app');
 
 describe('Multi-User Concurrent Access', () => {
+  beforeAll(async () => {
+    const mongoURI =
+      process.env.MONGO_URL ||
+      process.env.MONGODB_TEST_URI ||
+      process.env.MONGODB_URI;
+
+    if (mongoURI && mongoose.connection.readyState === 0) {
+      await mongoose.connect(mongoURI, {
+        serverSelectionTimeoutMS: 5000,
+        socketTimeoutMS: 20000,
+        maxPoolSize: 10,
+      });
+    }
+  });
+
   afterAll(async () => {
+    if (mongoose.connection.readyState !== 0) {
+      await mongoose.connection.close();
+    }
     await new Promise(resolve => setTimeout(resolve, 1000));
   });
 
