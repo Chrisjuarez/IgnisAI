@@ -340,7 +340,7 @@ describe('Dashboard controls', () => {
     expect(renderPredictionRasterFrame).toHaveBeenCalled();
   });
 
-  test('Palisades historical preset disables synthetic ignition', async () => {
+  test('Palisades historical preset uses seeded ignition point', async () => {
     const MapComponent = require('../MapComponent').default;
 
     render(
@@ -361,10 +361,10 @@ describe('Dashboard controls', () => {
 
     await waitFor(() => {
       expect(predictFireSpreadMultistep).toHaveBeenCalledWith(expect.objectContaining({
-        lat: 34.05,
-        lon: -118.55,
+        lat: 34.078,
+        lon: -118.555,
         date: '2025-01-07T18:30:00Z',
-        ignition: false,
+        ignition: true,
       }));
     });
   });
