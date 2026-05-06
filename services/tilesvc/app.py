@@ -395,6 +395,11 @@ def _model_metadata(config_status: str = None) -> Dict[str, Any]:
         "display_floor": PRED_DISPLAY_FLOOR,
         "Tseq": MODEL_TSEQ,
         "step_hours": MODEL_STEP_HOURS,
+        # Surfaced in /healthz, /predict_multistep, etc. so a deploy can be
+        # verified end-to-end: if these keys are missing or stale, the new
+        # AR-feedback code didn't actually ship.
+        "ar_feedback_mode": MODEL_AR_FEEDBACK_MODE,
+        "ar_feedback_threshold": MODEL_AR_FEEDBACK_THRESHOLD,
         "arch_version": extra.get("arch_version"),
         "runtime_arch_version": RUNTIME_ARCH_VERSION,
         "target_mode": MODEL_TARGET_MODE,
