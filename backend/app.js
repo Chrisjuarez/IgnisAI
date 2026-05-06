@@ -4,7 +4,9 @@ const cors = require('cors');
 const dotenv = require('dotenv');
 const connectDB = require('./db');
 
-dotenv.config();
+if (process.env.NODE_ENV !== 'test') {
+  dotenv.config({ quiet: true });
+}
 
 const app = express();
 app.set('trust proxy', 1);
@@ -45,41 +47,31 @@ app.use(cors({
 
 app.use(express.json());
 
-// Auth route
-try {
-  app.use('/api/auth', require('./routes/auth'));
-} catch (e) {
-  console.warn(`Skipping /api/auth: ${e.message}`);
-}
-
 app.use('/health', require('./routes/health')); // Advanced health with DB check
 
-// Helper to mount optional routes
-function tryMount(mountPath, modulePath) {
-  try {
-    const mod = require(modulePath);
-    const handler =
-      typeof mod === 'function'
-        ? mod
-        : (mod && typeof mod.default === 'function' ? mod.default : null);
+function mountRoute(mountPath, modulePath) {
+  const mod = require(modulePath);
+  const handler =
+    typeof mod === 'function'
+      ? mod
+      : (mod && typeof mod.default === 'function' ? mod.default : null);
 
-    if (!handler) {
-      throw new Error('argument handler must be a function');
-    }
-    app.use(mountPath, handler);
-  } catch (e) {
-    console.warn(`Skipping ${modulePath}: ${e.message}`);
+  if (!handler) {
+    throw new Error(`Failed to mount ${modulePath} at ${mountPath}: route module must export a function`);
   }
+
+  app.use(mountPath, handler);
 }
 
 // API routes
-tryMount('/api', './routes/mapData');
-tryMount('/api', './routes/fireData');
-tryMount('/api/weather', './routes/weather');
-tryMount('/api/topography', './routes/topography');
-tryMount('/api/ndvi', './routes/ndvi');
-tryMount('/api/fire-perimeters', './routes/firePerimeters');
-tryMount('/api/predict-fire-spread', './routes/predictFireSpread');
+mountRoute('/api/auth', './routes/auth');
+mountRoute('/api', './routes/mapData');
+mountRoute('/api', './routes/fireData');
+mountRoute('/api/weather', './routes/weather');
+mountRoute('/api/topography', './routes/topography');
+mountRoute('/api/ndvi', './routes/ndvi');
+mountRoute('/api/fire-perimeters', './routes/firePerimeters');
+mountRoute('/api/predict-fire-spread', './routes/predictFireSpread');
 
 // Export app for tests (your existing code - unchanged)
 module.exports = app;

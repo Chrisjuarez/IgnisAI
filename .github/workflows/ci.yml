@@ -6,11 +6,23 @@ on:
     paths:
       - 'backend/**'
       - 'frontend/**'
+      - 'services/**'
+      - 'ignis_ml/**'
+      - 'config/**'
+      - 'docker/**'
+      - 'docker-compose.yml'
+      - 'render.yaml'
       - '.github/workflows/ci.yml'
   pull_request:
     paths:
       - 'backend/**'
       - 'frontend/**'
+      - 'services/**'
+      - 'ignis_ml/**'
+      - 'config/**'
+      - 'docker/**'
+      - 'docker-compose.yml'
+      - 'render.yaml'
       - '.github/workflows/ci.yml'
   schedule:
     - cron: '0 9 * * 1'  # weekly sanity run
@@ -217,6 +229,31 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
+  python-services:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+          cache-dependency-path: services/tilesvc/requirements.txt
+
+      - name: Install Python service dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install --index-url https://download.pytorch.org/whl/cpu torch==2.1.1
+          python -m pip install -r services/tilesvc/requirements.txt
+
+      - name: Run Python service tests
+        run: |
+          python -m pytest services/tilesvc/tests -q
+          python -m pytest services/static_pipeline/tests -q
+          python -m pytest services/runtime_cache/tests -q
+
   codeql:
     runs-on: ubuntu-latest
     permissions:
@@ -291,7 +328,7 @@ jobs:
 
   test-summary:
     runs-on: ubuntu-latest
-    needs: [backend, frontend]
+    needs: [backend, frontend, python-services]
     if: always()
     steps:
       - name: Generate Test Summary
@@ -301,5 +338,6 @@ jobs:
           echo "## Job Status" >> $GITHUB_STEP_SUMMARY
           echo "- Backend: ${{ needs.backend.result }}" >> $GITHUB_STEP_SUMMARY
           echo "- Frontend: ${{ needs.frontend.result }}" >> $GITHUB_STEP_SUMMARY
+          echo "- Python services: ${{ needs.python-services.result }}" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "View detailed coverage reports in the artifacts section." >> $GITHUB_STEP_SUMMARY
