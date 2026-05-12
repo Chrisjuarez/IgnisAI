@@ -32,6 +32,12 @@ REQUIRED_NOAA_CHANNELS = ("u", "v", "gust", "tempC", "q", "precip")
 FIRMS_COLUMNS = ("latitude", "longitude", "acq_date", "acq_time", "frp")
 DEFAULT_FIRMS_PRODUCTS = ("VIIRS_SNPP_SP", "VIIRS_NOAA20_SP", "MODIS_SP")
 GFS_AWS_BASE = "https://noaa-gfs-bdp-pds.s3.amazonaws.com"
+HRRR_AWS_BASE = "https://noaa-hrrr-bdp-pds.s3.amazonaws.com"
+# Source labels stamped into the npz so tilesvc's weather_quality_status
+# can report which gridded product actually powered each prediction.
+SOURCE_TAG_HRRR = "noaa_hrrr"
+SOURCE_TAG_GFS = "noaa_gfs"
+DEFAULT_WEATHER_SOURCE_PRIORITY: Tuple[str, ...] = ("hrrr", "gfs")
 
 
 @dataclass(frozen=True)
@@ -401,9 +407,27 @@ def validate_noaa_npz(path: Path) -> Dict[str, Any]:
     return stats
 
 
-def write_noaa_npz(path: Path, arrays: Mapping[str, np.ndarray]) -> None:
+def write_noaa_npz(
+    path: Path,
+    arrays: Mapping[str, np.ndarray],
+    *,
+    source: Optional[str] = None,
+) -> None:
+    """
+    Write the canonical NOAA cache npz.
+
+    Always writes the six REQUIRED_NOAA_CHANNELS as float32 (SIZE,SIZE).
+    Optionally stamps a `source` zero-d unicode array so downstream
+    consumers (tilesvc weather_quality_status) can report whether the
+    grid came from HRRR or GFS — without that tag they fall back to the
+    generic "noaa_gridded" label.
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
-    payload = {name: np.asarray(arrays[name], dtype=np.float32) for name in REQUIRED_NOAA_CHANNELS}
+    payload: Dict[str, np.ndarray] = {
+        name: np.asarray(arrays[name], dtype=np.float32) for name in REQUIRED_NOAA_CHANNELS
+    }
+    if source:
+        payload["source"] = np.array(str(source))
     np.savez_compressed(path, **payload)
     validate_noaa_npz(path)
 
@@ -425,8 +449,177 @@ def build_gfs_npz_for_hour(
         return out
     grib = _download_gfs_subset(hour, work_dir, session=session)
     arrays = _read_gfs_subset_to_arrays(grib, lat=lat, lon=lon)
-    write_noaa_npz(out, arrays)
+    write_noaa_npz(out, arrays, source=SOURCE_TAG_GFS)
     return out
+
+
+# --------------------------- HRRR (3 km CONUS) ---------------------------
+#
+# HRRR sits at native 3 km on a Lambert Conformal grid, hourly cycles, with
+# an analysis (f00) and a short-range forecast (up to f18 / f48 depending on
+# cycle). For wildfire weather it is dramatically better than GFS 0.25° —
+# Santa Ana flow that channels through canyons in a couple km is invisible
+# at 25 km but resolved (or at least hinted at) at 3 km. AWS Open Data
+# hosts the full archive at noaa-hrrr-bdp-pds with no auth required.
+#
+# We download the full ``wrfsfcf{FF}.grib2`` because HRRR doesn't publish
+# .idx-style byte-range subsetting on AWS the way GFS does. The file is
+# ~140 MB; for a 6-hour multistep cache that is ~840 MB of transient
+# downloads — acceptable for a backfill, and once the npz cache is built
+# tilesvc never touches the gribs again.
+
+
+def hrrr_pgrb2_url(hour: dt.datetime, *, forecast_hour: int = 0) -> str:
+    """
+    Return the AWS Open Data URL for the HRRR surface (wrfsfcf) grib at the
+    given cycle hour and forecast lead. We always pick the analysis (f00)
+    when callers don't specify a lead because that's the closest-to-truth
+    state for backfilling historical fires.
+    """
+    hour = parse_ref_time(hour)
+    date = hour.strftime("%Y%m%d")
+    cycle = f"{hour.hour:02d}"
+    return (
+        f"{HRRR_AWS_BASE}/hrrr.{date}/conus/"
+        f"hrrr.t{cycle}z.wrfsfcf{int(forecast_hour):02d}.grib2"
+    )
+
+
+def _download_hrrr_grib(hour: dt.datetime, work_dir: Path, *, session: Optional[requests.Session] = None) -> Path:
+    """Download the HRRR analysis surface grib for this hour into work_dir."""
+    session = session or requests.Session()
+    work_dir.mkdir(parents=True, exist_ok=True)
+    out = work_dir / f"{parse_ref_time(hour).strftime('%Y%m%dT%H')}_hrrr_sfc.grib2"
+    if out.exists():
+        return out
+    url = hrrr_pgrb2_url(hour, forecast_hour=0)
+    response = session.get(url, headers={"User-Agent": "ignis-ai-runtime-cache"}, timeout=300, stream=True)
+    response.raise_for_status()
+    tmp = out.with_suffix(out.suffix + ".part")
+    with tmp.open("wb") as f:
+        for chunk in response.iter_content(chunk_size=4 * 1024 * 1024):
+            if chunk:
+                f.write(chunk)
+    tmp.replace(out)
+    return out
+
+
+def _read_hrrr_grib_to_arrays(grib_path: Path, *, lat: float, lon: float) -> Dict[str, np.ndarray]:
+    """
+    Reproject HRRR surface fields onto the canonical IgnisAI tile grid.
+
+    HRRR surface grib variable selection mirrors the GFS path so the npz
+    schema stays identical. Note that HRRR APCP is hour-of-cycle precip
+    (analysis = 0); for backfill that's fine, the model doesn't see it as
+    a key driver inside a 24-hour aggregation. If we ever wire forecast
+    leads f01..f18 we'll need to handle bucket accumulation explicitly.
+    """
+    specs = {
+        # (GRIB_ELEMENT, level fragment matched case-insensitively)
+        "u": ("UGRD", "10[- ]M"),
+        "v": ("VGRD", "10[- ]M"),
+        "gust": ("GUST", "SURFACE"),
+        "tempC": ("TMP", "2[- ]M"),
+        "q": ("SPFH", "2[- ]M"),
+        "precip": ("APCP", "SURFACE"),
+    }
+    arrays: Dict[str, np.ndarray] = {}
+    with rasterio.open(grib_path) as src:
+        for name, (variable, level) in specs.items():
+            band = _find_band(src, variable=variable, level=level)
+            if band is None:
+                if name == "precip":
+                    arrays[name] = np.zeros((SIZE, SIZE), dtype=np.float32)
+                    continue
+                raise RuntimeError(f"HRRR grib {grib_path.name} did not expose {variable} {level}")
+            arrays[name] = _reproject_band(src, band, lat=lat, lon=lon)
+    # HRRR temperature is in Kelvin; convert to °C if it looks Kelvin-ish.
+    if np.nanmean(arrays["tempC"]) > 150.0:
+        arrays["tempC"] = arrays["tempC"] - 273.15
+    for name in REQUIRED_NOAA_CHANNELS:
+        finite_mean = float(np.nanmean(arrays[name])) if np.isfinite(arrays[name]).any() else 0.0
+        arrays[name] = np.nan_to_num(arrays[name], nan=finite_mean).astype(np.float32)
+    return arrays
+
+
+def build_hrrr_npz_for_hour(
+    *,
+    hour: dt.datetime,
+    lat: float = PALISADES_LAT,
+    lon: float = PALISADES_LON,
+    out_dir: Path,
+    work_dir: Path,
+    overwrite: bool = False,
+    session: Optional[requests.Session] = None,
+) -> Path:
+    filename = noaa_cache_filename(hour, lat, lon)
+    out = out_dir / filename
+    if out.exists() and not overwrite:
+        validate_noaa_npz(out)
+        return out
+    grib = _download_hrrr_grib(hour, work_dir, session=session)
+    arrays = _read_hrrr_grib_to_arrays(grib, lat=lat, lon=lon)
+    write_noaa_npz(out, arrays, source=SOURCE_TAG_HRRR)
+    return out
+
+
+def _normalize_source_priority(value: str | Sequence[str] | None) -> Tuple[str, ...]:
+    """Coerce a CSV string or sequence into a tuple of lower-case source ids."""
+    if value is None:
+        return DEFAULT_WEATHER_SOURCE_PRIORITY
+    if isinstance(value, str):
+        items = [v.strip().lower() for v in value.split(",") if v.strip()]
+    else:
+        items = [str(v).strip().lower() for v in value if str(v).strip()]
+    cleaned: List[str] = []
+    for item in items:
+        if item in {"hrrr", "gfs"} and item not in cleaned:
+            cleaned.append(item)
+    return tuple(cleaned) if cleaned else DEFAULT_WEATHER_SOURCE_PRIORITY
+
+
+def build_noaa_npz_for_hour(
+    *,
+    hour: dt.datetime,
+    lat: float = PALISADES_LAT,
+    lon: float = PALISADES_LON,
+    out_dir: Path,
+    work_dir: Path,
+    overwrite: bool = False,
+    session: Optional[requests.Session] = None,
+    source_priority: str | Sequence[str] | None = None,
+) -> Path:
+    """
+    Build a single NOAA cache npz for one hour, trying each source in
+    priority order. The first source that succeeds wins. Returns the
+    path to the written npz.
+
+    Errors from earlier sources are swallowed (logged) rather than raised
+    so a transient HRRR archive gap (e.g. AWS missing a single cycle)
+    does not break a multi-hour backfill — we just degrade to the next
+    source for that one hour.
+    """
+    sources = _normalize_source_priority(source_priority)
+    last_error: Optional[Exception] = None
+    for src in sources:
+        try:
+            if src == "hrrr":
+                return build_hrrr_npz_for_hour(
+                    hour=hour, lat=lat, lon=lon, out_dir=out_dir,
+                    work_dir=work_dir, overwrite=overwrite, session=session,
+                )
+            if src == "gfs":
+                return build_gfs_npz_for_hour(
+                    hour=hour, lat=lat, lon=lon, out_dir=out_dir,
+                    work_dir=work_dir, overwrite=overwrite, session=session,
+                )
+        except Exception as exc:
+            last_error = exc
+            print(f"⚠️  {src.upper()} fetch failed for {hour.isoformat()}: {exc}; trying next source")
+            continue
+    raise RuntimeError(
+        f"All weather sources failed for {hour.isoformat()} (priority={sources}): {last_error}"
+    )
 
 
 def build_noaa_cache(
@@ -440,12 +633,24 @@ def build_noaa_cache(
     steps: int = DEFAULT_STEPS,
     step_hours: int = DEFAULT_STEP_HOURS,
     overwrite: bool = False,
+    source_priority: str | Sequence[str] | None = None,
 ) -> List[Path]:
+    """
+    Build the full NOAA grid cache for an event window.
+
+    Iterates over the canonical ``cache_hours_for_multistep`` list — that
+    same helper is what tilesvc uses to compute its read keys, so the
+    written set is exactly what the live service will look for.
+
+    `source_priority` defaults to the ``DEFAULT_WEATHER_SOURCE_PRIORITY``
+    (HRRR then GFS). Set to ("gfs",) to force GFS-only when HRRR archive
+    is unreachable, or override per-call from the CLI.
+    """
     session = requests.Session()
     written: List[Path] = []
     for hour in cache_hours_for_multistep(parse_ref_time(ref_time), t_seq=t_seq, steps=steps, step_hours=step_hours):
         written.append(
-            build_gfs_npz_for_hour(
+            build_noaa_npz_for_hour(
                 hour=hour,
                 lat=lat,
                 lon=lon,
@@ -453,6 +658,7 @@ def build_noaa_cache(
                 work_dir=work_dir,
                 overwrite=overwrite,
                 session=session,
+                source_priority=source_priority,
             )
         )
     return written
@@ -512,6 +718,65 @@ def upload_files(files: Iterable[Path], *, bucket_uri: str, kind: str, profile: 
     return uris
 
 
+def build_event_runtime_cache(
+    *,
+    profile: str,
+    lat: float,
+    lon: float,
+    ref_time: str | dt.datetime,
+    bucket_uri: str = DEFAULT_RUNTIME_BUCKET,
+    out_dir: Optional[Path] = None,
+    work_dir: Path = Path(".cache/runtime_cache/work"),
+    upload: bool = True,
+    build_firms: bool = True,
+    build_noaa: bool = True,
+    overwrite: bool = False,
+    map_key: Optional[str] = None,
+    t_seq: int = DEFAULT_TSEQ,
+    steps: int = DEFAULT_STEPS,
+    step_hours: int = DEFAULT_STEP_HOURS,
+    source_priority: str | Sequence[str] | None = None,
+) -> RuntimeBuildResult:
+    """
+    Generic per-event runtime cache builder. Use this for any historical
+    fire (Eaton, Camp/Paradise, Dixie, Caldor, ...) or any future ad-hoc
+    event. Mirrors `build_palisades_runtime_cache` but takes profile/lat/
+    lon/ref_time as required positional arguments.
+
+    `out_dir` defaults to ``.cache/runtime_cache/{profile}/`` so each event
+    lives in its own directory and you can rsync them into the production
+    `/data/firms_snapshots` and `/data/noaa_grid_cache` selectively.
+    """
+    if out_dir is None:
+        out_dir = Path(".cache/runtime_cache") / profile
+    firms_dir = out_dir / "firms_snapshots"
+    noaa_dir = out_dir / "noaa_grid_cache"
+    firms_files: List[Path] = []
+    noaa_files: List[Path] = []
+    if build_firms:
+        firms_files = build_firms_snapshots(
+            lat=lat, lon=lon, ref_time=ref_time, out_dir=firms_dir,
+            t_seq=t_seq, step_hours=step_hours, map_key=map_key, overwrite=overwrite,
+        )
+    if build_noaa:
+        noaa_files = build_noaa_cache(
+            lat=lat, lon=lon, ref_time=ref_time, out_dir=noaa_dir,
+            work_dir=work_dir, t_seq=t_seq, steps=steps, step_hours=step_hours,
+            overwrite=overwrite, source_priority=source_priority,
+        )
+    if upload:
+        if firms_files:
+            upload_files(firms_files, bucket_uri=bucket_uri, kind="firms_snapshots", profile=profile)
+        if noaa_files:
+            upload_files(noaa_files, bucket_uri=bucket_uri, kind="noaa_grid_cache", profile=profile)
+    return RuntimeBuildResult(
+        profile=profile,
+        firms_files=[str(p) for p in firms_files],
+        noaa_files=[str(p) for p in noaa_files],
+        uploaded=upload,
+    )
+
+
 def build_palisades_runtime_cache(
     *,
     bucket_uri: str = DEFAULT_RUNTIME_BUCKET,
@@ -526,25 +791,27 @@ def build_palisades_runtime_cache(
     build_noaa: bool = True,
     overwrite: bool = False,
     map_key: Optional[str] = None,
+    source_priority: str | Sequence[str] | None = None,
 ) -> RuntimeBuildResult:
-    firms_dir = out_dir / "firms_snapshots"
-    noaa_dir = out_dir / "noaa_grid_cache"
-    firms_files: List[Path] = []
-    noaa_files: List[Path] = []
-    if build_firms:
-        firms_files = build_firms_snapshots(lat=lat, lon=lon, ref_time=ref_time, out_dir=firms_dir, map_key=map_key, overwrite=overwrite)
-    if build_noaa:
-        noaa_files = build_noaa_cache(lat=lat, lon=lon, ref_time=ref_time, out_dir=noaa_dir, work_dir=work_dir, overwrite=overwrite)
-    if upload:
-        if firms_files:
-            upload_files(firms_files, bucket_uri=bucket_uri, kind="firms_snapshots", profile=profile)
-        if noaa_files:
-            upload_files(noaa_files, bucket_uri=bucket_uri, kind="noaa_grid_cache", profile=profile)
-    return RuntimeBuildResult(
+    """
+    Backward-compatible Palisades-specific entrypoint. Implemented as a
+    thin wrapper over `build_event_runtime_cache` so the source-priority
+    plumbing only needs to live in one place.
+    """
+    return build_event_runtime_cache(
         profile=profile,
-        firms_files=[str(p) for p in firms_files],
-        noaa_files=[str(p) for p in noaa_files],
-        uploaded=upload,
+        lat=lat,
+        lon=lon,
+        ref_time=ref_time,
+        bucket_uri=bucket_uri,
+        out_dir=out_dir,
+        work_dir=work_dir,
+        upload=upload,
+        build_firms=build_firms,
+        build_noaa=build_noaa,
+        overwrite=overwrite,
+        map_key=map_key,
+        source_priority=source_priority,
     )
 
 

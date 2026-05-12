@@ -42,7 +42,11 @@ def _set_weather_source(source: str, reason: str = ""):
 
 
 def weather_quality_status():
-    ok = _LAST_WEATHER_SOURCE == "noaa_gridded"
+    # Any of the gridded NOAA sources (HRRR, GFS, generic) counts as "ok".
+    # Open-Meteo single-point fallbacks are flagged "degraded" so the
+    # health surface reflects when predictions are running on coarse
+    # constant-over-tile inputs vs. true gridded weather.
+    ok = _LAST_WEATHER_SOURCE in {"noaa_hrrr", "noaa_gfs", "noaa_gridded"}
     return {
         "status": "ok" if ok else "degraded",
         "source": _LAST_WEATHER_SOURCE,
@@ -82,6 +86,19 @@ def _as_grid(value, *, name: str):
 
 
 def _noaa_cache_path(lat: float, lon: float, ref_time: dt.datetime | None) -> Path | None:
+    """
+    Resolve a NOAA gridded weather cache path for (lat, lon, hour).
+
+    The runtime cache writer in services/runtime_cache/pipeline.py writes
+    files as ``{iso_hour}_{lat:.2f}_{lon:.2f}.npz`` so the same cache dir
+    can hold multiple events without collision. If only NOAA_GRID_CACHE_DIR
+    is set we therefore look up the lat/lon-tagged variant FIRST, and only
+    fall back to the legacy ``{iso_hour}.npz`` filename if that does not
+    exist. NOAA_GRID_CACHE_TEMPLATE still wins when explicitly set.
+
+    Returns the chosen Path (which may not exist yet — callers handle that).
+    Returns None when no cache configuration is present at all.
+    """
     cache_dir = os.getenv("NOAA_GRID_CACHE_DIR")
     template = os.getenv("NOAA_GRID_CACHE_TEMPLATE")
     if not cache_dir and not template:
@@ -96,7 +113,22 @@ def _noaa_cache_path(lat: float, lon: float, ref_time: dt.datetime | None) -> Pa
     }
     if template:
         return Path(template.format(**values))
-    return Path(cache_dir) / f"{values['iso_hour']}.npz"
+    base = Path(cache_dir)
+    primary = base / f"{values['iso_hour']}_{values['lat']}_{values['lon']}.npz"
+    legacy = base / f"{values['iso_hour']}.npz"
+    if primary.exists():
+        return primary
+    if legacy.exists():
+        return legacy
+    # Neither variant exists yet — return the canonical (lat/lon-tagged)
+    # path so health checks and error messages mention the right filename.
+    return primary
+
+
+# Tagged source labels surfaced through /healthz weather_quality_status.
+# We differentiate HRRR vs GFS so operators can tell which gridded product
+# actually powered each prediction.
+_NOAA_GRID_SOURCES = ("noaa_hrrr", "noaa_gfs", "noaa_gridded")
 
 
 def _fetch_noaa_cached_weather_grids(lat: float, lon: float, ref_time: dt.datetime | None):
@@ -119,7 +151,18 @@ def _fetch_noaa_cached_weather_grids(lat: float, lon: float, ref_time: dt.dateti
             }
             grids["rh"] = np.full((SIZE, SIZE), np.nan, np.float32)
             grids["prcp"] = grids["precip"]
-        _set_weather_source("noaa_gridded", str(path))
+            # The runtime cache writer stamps the originating product into
+            # the npz as a `source` array (zero-d unicode). Older files
+            # without that key fall back to the generic "noaa_gridded" tag.
+            source_tag = "noaa_gridded"
+            if "source" in data.files:
+                try:
+                    raw_tag = str(np.asarray(data["source"]).item()).strip().lower()
+                except Exception:
+                    raw_tag = ""
+                if raw_tag in _NOAA_GRID_SOURCES:
+                    source_tag = raw_tag
+        _set_weather_source(source_tag, str(path))
         return grids
     except Exception as exc:
         _set_weather_source("open_meteo_fallback", f"noaa_cache_invalid:{exc}")
