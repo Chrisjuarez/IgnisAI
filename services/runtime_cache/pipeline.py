@@ -330,14 +330,35 @@ def _band_tags(src: rasterio.io.DatasetReader, band: int) -> str:
 
 
 def _find_band(src: rasterio.io.DatasetReader, *, variable: str, level: str) -> Optional[int]:
+    """
+    Locate a grib band by (variable, level).
+
+    `level` is matched as a regex against the band tag text after upper-
+    casing. This is important because grib readers normalize the level
+    string differently per product:
+
+      * GFS exposes the level verbatim in the .idx (e.g. ``10 m above ground``)
+      * HRRR via rasterio exposes ``GRIB_SHORT_NAME=10-HTGL`` plus a
+        ``GRIB_COMMENT`` with the long form
+
+    Callers therefore pass a regex like ``r"10[- ]?M(?: ABOVE GROUND)?"``
+    that survives both. A bare substring still works because plain text
+    is also a valid regex. The fallback (variable-only) is intentionally
+    LAST — picking the first UGRD band when 10m isn't found would land
+    on 80m/max-wind diagnostics and silently produce wrong values.
+    """
+    import re
+
     var = variable.upper()
-    lvl = level.upper()
+    # IMPORTANT: do NOT upper-case the regex itself — that would flip
+    # lowercase escapes (e.g. \b word boundary) into their uppercase
+    # complements (\B = NOT a word boundary), silently inverting the
+    # match. Compile case-insensitive instead so callers can write
+    # patterns in either case.
+    pattern = re.compile(level, re.IGNORECASE)
     for band in range(1, src.count + 1):
         text = _band_tags(src, band)
-        if var in text and lvl in text:
-            return band
-    for band in range(1, src.count + 1):
-        if var in _band_tags(src, band):
+        if var in text and pattern.search(text):
             return band
     return None
 
@@ -360,13 +381,18 @@ def _reproject_band(src: rasterio.io.DatasetReader, band: int, *, lat: float, lo
 
 
 def _read_gfs_subset_to_arrays(grib_path: Path, *, lat: float, lon: float) -> Dict[str, np.ndarray]:
+    # GFS bands carry the same GRIB_SHORT_NAME identifiers as HRRR even
+    # though the .idx file shows the long form ("10 m above ground").
+    # Match against the unambiguous short name so this path stops
+    # depending on band ordering — see the HRRR comment block for the
+    # symptom this prevents.
     specs = {
-        "u": ("UGRD", "10 m"),
-        "v": ("VGRD", "10 m"),
-        "gust": ("GUST", "surface"),
-        "tempC": ("TMP", "2 m"),
-        "q": ("SPFH", "2 m"),
-        "precip": ("APCP", "surface"),
+        "u":     ("UGRD", r"\b10-HTGL\b"),
+        "v":     ("VGRD", r"\b10-HTGL\b"),
+        "gust":  ("GUST", r"\b(?:0-)?SFC\b"),
+        "tempC": ("TMP",  r"\b2-HTGL\b"),
+        "q":     ("SPFH", r"\b2-HTGL\b"),
+        "precip": ("APCP", r"\b(?:0-)?SFC\b"),
     }
     arrays: Dict[str, np.ndarray] = {}
     with rasterio.open(grib_path) as src:
@@ -508,20 +534,33 @@ def _read_hrrr_grib_to_arrays(grib_path: Path, *, lat: float, lon: float) -> Dic
     """
     Reproject HRRR surface fields onto the canonical IgnisAI tile grid.
 
-    HRRR surface grib variable selection mirrors the GFS path so the npz
-    schema stays identical. Note that HRRR APCP is hour-of-cycle precip
-    (analysis = 0); for backfill that's fine, the model doesn't see it as
-    a key driver inside a 24-hour aggregation. If we ever wire forecast
-    leads f01..f18 we'll need to handle bucket accumulation explicitly.
+    HRRR's wrfsfcf product packs ~170 bands, and crucially it carries
+    UGRD/VGRD at MULTIPLE altitudes (10 m, 80 m, and sometimes diagnostic
+    max-wind fields) — substring-matching "UGRD" alone lands on the wrong
+    altitude and produces 30-60 m/s wind values that look like jet-stream
+    flow over LA. Each spec below pins the level via the grib short-name
+    pattern that rasterio surfaces in band tags:
+
+      * 10 m wind        → GRIB_SHORT_NAME "10-HTGL"
+      * 2 m temp/spfh    → GRIB_SHORT_NAME "2-HTGL"
+      * surface gust/pcp → GRIB_SHORT_NAME "SFC" (or "0-SFC")
+
+    \\b on both sides of "10-HTGL" prevents accidental matches against
+    "80-HTGL" or "110-HTGL". Same for "2-HTGL" vs "12-HTGL".
+
+    Note: HRRR APCP is hour-of-cycle precip (analysis = 0); for backfill
+    that's fine, the model doesn't see it as a key driver inside a 24-h
+    aggregation. If we wire forecast leads f01..f18 we'll need bucket
+    accumulation logic.
     """
     specs = {
-        # (GRIB_ELEMENT, level fragment matched case-insensitively)
-        "u": ("UGRD", "10[- ]M"),
-        "v": ("VGRD", "10[- ]M"),
-        "gust": ("GUST", "SURFACE"),
-        "tempC": ("TMP", "2[- ]M"),
-        "q": ("SPFH", "2[- ]M"),
-        "precip": ("APCP", "SURFACE"),
+        # (GRIB_ELEMENT, level regex matched against UPPERCASE band tag text)
+        "u":     ("UGRD", r"\b10-HTGL\b"),
+        "v":     ("VGRD", r"\b10-HTGL\b"),
+        "gust":  ("GUST", r"\b(?:0-)?SFC\b"),
+        "tempC": ("TMP",  r"\b2-HTGL\b"),
+        "q":     ("SPFH", r"\b2-HTGL\b"),
+        "precip": ("APCP", r"\b(?:0-)?SFC\b"),
     }
     arrays: Dict[str, np.ndarray] = {}
     with rasterio.open(grib_path) as src:
@@ -531,11 +570,25 @@ def _read_hrrr_grib_to_arrays(grib_path: Path, *, lat: float, lon: float) -> Dic
                 if name == "precip":
                     arrays[name] = np.zeros((SIZE, SIZE), dtype=np.float32)
                     continue
-                raise RuntimeError(f"HRRR grib {grib_path.name} did not expose {variable} {level}")
+                raise RuntimeError(
+                    f"HRRR grib {grib_path.name} did not expose {variable} at level matching {level!r}"
+                )
             arrays[name] = _reproject_band(src, band, lat=lat, lon=lon)
     # HRRR temperature is in Kelvin; convert to °C if it looks Kelvin-ish.
     if np.nanmean(arrays["tempC"]) > 150.0:
         arrays["tempC"] = arrays["tempC"] - 273.15
+    # Specific humidity is dimensionless [kg/kg]; HRRR ships it in that unit
+    # already so no conversion is needed.
+    # Sanity bound: 10 m winds rarely exceed 50 m/s even in extreme Santa
+    # Ana events. If the mean of |wind| over a 32 km tile exceeds that,
+    # we almost certainly picked up an upper-level or max-wind diagnostic.
+    # Refuse to write a bogus cache rather than silently corrupt training.
+    speed_mean = float(np.nanmean(np.sqrt(arrays["u"] ** 2 + arrays["v"] ** 2)))
+    if speed_mean > 50.0:
+        raise RuntimeError(
+            f"HRRR wind from {grib_path.name} has tile-mean speed {speed_mean:.1f} m/s — "
+            "likely reading the wrong altitude band. Aborting cache write."
+        )
     for name in REQUIRED_NOAA_CHANNELS:
         finite_mean = float(np.nanmean(arrays[name])) if np.isfinite(arrays[name]).any() else 0.0
         arrays[name] = np.nan_to_num(arrays[name], nan=finite_mean).astype(np.float32)
