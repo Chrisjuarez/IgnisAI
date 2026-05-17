@@ -33,7 +33,7 @@ RUN set -eux; \
   }
 
 # PyTorch CPU-only (installed before requirements.txt to avoid pulling CUDA version from PyPI)
-RUN pip install --no-cache-dir --index-url https://download.pytorch.org/whl/cpu torch==2.1.1
+RUN pip install --no-cache-dir --index-url https://download.pytorch.org/whl/cpu torch==2.8.0
 
 # Remaining Python dependencies
 RUN pip install --no-cache-dir -r /app/requirements.txt \
