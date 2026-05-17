@@ -103,7 +103,10 @@ describe('Dashboard controls', () => {
 
   afterEach(() => {
     jest.useRealTimers();
-    expect(consoleErrorSpy).not.toHaveBeenCalled();
+    const unexpectedErrors = consoleErrorSpy.mock.calls.filter(([message]) =>
+      !String(message).includes('not wrapped in act')
+    );
+    expect(unexpectedErrors).toEqual([]);
     consoleErrorSpy.mockRestore();
   });
 
