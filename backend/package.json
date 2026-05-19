@@ -36,7 +36,7 @@
   },
   "devDependencies": {
     "@babel/preset-env": "^7.28.5",
-    "@shelf/jest-mongodb": "^5.2.2",
+    "@shelf/jest-mongodb": "^6.0.2",
     "@types/jest": "^29.5.14",
     "jest": "^30.2.0",
     "mongodb-memory-server": "^10.3.0",
