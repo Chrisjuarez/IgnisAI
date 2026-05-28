@@ -39,7 +39,7 @@
     "@shelf/jest-mongodb": "^6.0.2",
     "@types/jest": "^30.0.0",
     "jest": "^30.2.0",
-    "mongodb-memory-server": "^10.3.0",
+    "mongodb-memory-server": "^11.1.0",
     "nock": "^14.0.10",
     "nodemon": "^3.1.0",
     "supertest": "^7.2.2"
