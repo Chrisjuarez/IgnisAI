@@ -88,3 +88,10 @@ models/*.onnx
 *.tif
 *.tiff
 *.vrt
+
+# v4 retrain bulk data (lives on external drive via IGNIS_DATA_ROOT)
+data/tssatfire_raw/
+data/tssatfire_500m_T6/
+data/mNDWS_500m_T6/
+data/perimeters/
+models/eval/

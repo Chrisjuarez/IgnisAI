@@ -44,9 +44,10 @@ import torch.nn.functional as F
 USE_GROUPNORM = True     # GN is more stable than BN for small/variable batches.
 GN_GROUPS     = 8
 USE_ASPP      = True     # Keep the light context pyramid at the bottleneck.
-ARCH_VERSION  = "v3"     # Stage-4: input Cd changes when derived features are on
-                         # and target may be delta instead of full mask — bump so
-                         # checkpoint filenames don't collide with v2.
+ARCH_VERSION  = "v4"     # v4: 18 dynamic (12 raw + 6 derived) / 9 static channels,
+                         # Santa-Ana retrain. Bumped so v3 checkpoints/filenames
+                         # don't collide and tilesvc refuses a mismatched arch.
+                         # (Set REQUIRED_ARCH_VERSION=v4 on tilesvc at deploy.)
 
 
 def Norm2d(num_channels: int):
