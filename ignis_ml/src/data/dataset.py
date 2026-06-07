@@ -109,6 +109,10 @@ class NpzTileDataset(Dataset):
         # Stage-3 non-spatial augmentations. All default to 0.0 so existing
         # callers keep their old behavior when they don't pass these.
         channel_dropout_p: float = 0.0,
+        # Names that must NEVER be channel-dropped. v3 protected only fire_t,
+        # which let wind (u/v/gust) get zeroed ~15% of the time and taught the
+        # model to under-weight wind. v4 passes [fire_t,u,v,viirs_i4].
+        channel_dropout_exclude: Optional[List[str]] = None,
         gaussian_noise_std: float = 0.0,
         temporal_dropout_p: float = 0.0,
         # Stage-4 derived feature engineering.
@@ -135,6 +139,9 @@ class NpzTileDataset(Dataset):
         self.fire_boost = float(fire_boost)
         self.compute_slope_aspect = compute_slope_aspect
         self.channel_dropout_p = float(channel_dropout_p)
+        self.channel_dropout_exclude = (
+            list(channel_dropout_exclude) if channel_dropout_exclude else ["fire_t"]
+        )
         self.gaussian_noise_std = float(gaussian_noise_std)
         self.temporal_dropout_p = float(temporal_dropout_p)
         # Stage-4
@@ -373,17 +380,22 @@ class NpzTileDataset(Dataset):
         # in expected_dyn_order) is NEVER dropped — it is the dominant signal.
         if self.channel_dropout_p > 0.0 and x_dyn.shape[1] > 1:
             T, C, H, W = x_dyn.shape
-            # protect fire_t: find its index in the expected order if available,
-            # else assume channel 0.
-            fire_idx = 0
+            # Protect every name in channel_dropout_exclude (v4: fire_t,u,v,
+            # viirs_i4). Map names -> indices via expected_dyn; if no expected
+            # order is known, fall back to protecting channel 0 (fire_t).
+            protect = set()
             if self.expected_dyn is not None:
-                try:
-                    fire_idx = self.expected_dyn.index("fire_t")
-                except ValueError:
-                    fire_idx = -1  # no fire_t channel in this dataset
+                for nm in self.channel_dropout_exclude:
+                    try:
+                        protect.add(self.expected_dyn.index(nm))
+                    except ValueError:
+                        pass
+            else:
+                protect.add(0)
             drop_mask = np.random.rand(C) < self.channel_dropout_p
-            if 0 <= fire_idx < C:
-                drop_mask[fire_idx] = False
+            for idx in protect:
+                if 0 <= idx < C:
+                    drop_mask[idx] = False
             if drop_mask.any():
                 # zero entire channel across all timesteps + spatial extent
                 x_dyn[:, drop_mask, :, :] = 0.0
