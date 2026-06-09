@@ -11,7 +11,7 @@
     "dotenv": "^17.4.2",
     "mapbox-gl": "^3.24.0",
     "react": "^19.1.1",
-    "react-dom": "^19.2.6",
+    "react-dom": "^19.2.7",
     "react-router-dom": "^7.17.0",
     "web-vitals": "^5.3.0"
   },
