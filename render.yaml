@@ -67,6 +67,8 @@ services:
     envVars:
       - key: MODEL_PATH
         value: /app/models/convlstm_unet_v3_delta_Cd13_Cs15_H64_T6_nautilus.pt
+      - key: REQUIRED_ARCH_VERSION
+        value: v3
       - key: NASA_API_KEY
         sync: false # NASA FIRMS API key (same key as FIRMS_API_KEY above)
       - key: MODEL_URL
