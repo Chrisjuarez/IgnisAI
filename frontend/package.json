@@ -9,7 +9,7 @@
     "@testing-library/user-event": "^13.5.0",
     "axios": "^1.18.0",
     "dotenv": "^17.4.2",
-    "mapbox-gl": "^3.24.0",
+    "mapbox-gl": "^3.25.0",
     "react": "^19.1.1",
     "react-dom": "^19.2.7",
     "react-router-dom": "^7.17.0",
