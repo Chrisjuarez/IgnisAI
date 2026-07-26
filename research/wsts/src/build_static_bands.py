@@ -122,15 +122,43 @@ CROSSWALK_NOTES: Dict[str, str] = {
 SHRUB_AS_CLOSED = False
 
 
-def crosswalk_nlcd(nlcd: np.ndarray, shrub_as_closed: bool = SHRUB_AS_CLOSED) -> np.ndarray:
-    """Map NLCD codes -> IGBP 1..17. Unknown codes -> 16 (Barren) as a neutral default."""
+#: Elevation below which an UNCLASSIFIED NLCD pixel is treated as open water.
+#: NLCD is a *land* cover product and carries nodata over the ocean. Defaulting
+#: those to Barren put 15.7% of the Palisades tile in the wrong IGBP class:
+#:     NLCD water 11.6% + NLCD "barren" 15.7% = 27.3%
+#:     NASADEM below 2 m                      = 26.7%
+#: i.e. that "barren" region IS the Pacific. Barren and Water are separate
+#: one-hot channels, so the model would have seen ocean as bare ground in the
+#: single event this study cares most about.
+OCEAN_ELEV_M = 1.0
+
+
+def crosswalk_nlcd(nlcd: np.ndarray, shrub_as_closed: bool = SHRUB_AS_CLOSED,
+                   elev: Optional[np.ndarray] = None) -> np.ndarray:
+    """Map NLCD codes -> IGBP 1..17.
+
+    Unrecognized codes fall back to 16 (Barren), except where `elev` is supplied
+    and the pixel sits below OCEAN_ELEV_M — those become 17 (Water Bodies).
+    Passing `elev` is strongly recommended for any coastal tile.
+    """
     table = dict(NLCD_TO_IGBP)
     if shrub_as_closed:
         table[52] = 6          # Closed Shrublands
         table[51] = 6
+
+    known = np.zeros(nlcd.shape, dtype=bool)
     out = np.full(nlcd.shape, 16, dtype=np.uint8)
     for src, dst in table.items():
-        out[nlcd == src] = dst
+        m = (nlcd == src)
+        out[m] = dst
+        known |= m
+
+    if elev is not None:
+        ocean = (~known) & np.isfinite(elev) & (elev < OCEAN_ELEV_M)
+        out[ocean] = 17
+        if ocean.any():
+            print(f"    ocean fix: {ocean.mean():.1%} unclassified pixels below "
+                  f"{OCEAN_ELEV_M:.0f} m reassigned Barren -> Water")
     return out
 
 
@@ -229,7 +257,14 @@ def build_for_preset(preset, dem: Optional[Path], nlcd: Optional[Path],
 
     if nlcd:
         raw = window_to_tile(nlcd, preset.lat, preset.lon, categorical=True)
-        igbp = crosswalk_nlcd(raw)
+        # Reuse this run's DEM when available; otherwise fall back to one
+        # already written by fetch_dem.py, so the ocean fix still applies.
+        elev_for_fix = elev if dem else None
+        if elev_for_fix is None:
+            cached = out_dir / f"{preset.key}_elev_375m.npy"
+            if cached.is_file():
+                elev_for_fix = np.load(cached)
+        igbp = crosswalk_nlcd(raw, elev=elev_for_fix)
         np.save(out_dir / f"{preset.key}_landcover_igbp_375m.npy", igbp)
         vals, counts = np.unique(igbp, return_counts=True)
         frac = {int(v): round(float(c) / igbp.size, 4) for v, c in zip(vals, counts)}
