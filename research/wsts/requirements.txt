@@ -1,0 +1,44 @@
+# research/wsts dependencies — INSTALL IN A DEDICATED ENV.
+#
+# Do NOT pip install these into `ignis-ml` (the training env) or into conda
+# `base`. earthaccess pulls s3fs -> aiobotocore -> a newer botocore, which
+# conflicts with boto3 and breaks S3 access:
+#
+#     boto3 1.40.20 requires botocore<1.41.0, but earthaccess wants >=1.43.3
+#
+# That is a real conflict, not a warning to click past. Keeping this track in
+# its own environment is the whole reason it is a "parallel track".
+#
+#   conda create -n wsts python=3.11 -y
+#   conda activate wsts
+#   pip install -r research/wsts/requirements.txt
+#
+# Verify with:  python -c "import earthaccess, rasterio, pyproj, torch; print('ok')"
+
+# --- data access -----------------------------------------------------------
+earthaccess>=0.14.0        # NASA Earthdata search/download (VNP09GA)
+rasterio>=1.4.0            # GeoTIFF / HDF-EOS subdataset reads
+pyproj>=3.7.0              # EPSG:4326 -> EPSG:5070
+h5py>=3.10.0               # WSTS HDF5 fire stacks
+
+# --- model + eval ----------------------------------------------------------
+torch>=2.2.0
+torchvision>=0.17.0
+segmentation-models-pytorch>=0.3.3   # ResNet-18 U-Net encoders (WSTS+ baseline)
+timm>=0.9.0                          # encoder zoo behind smp
+
+# --- analysis / notebook ---------------------------------------------------
+numpy>=1.26.0
+pandas>=2.0.0
+matplotlib>=3.8.0
+scikit-learn>=1.4.0        # isotonic calibration, AP cross-checks
+jupyterlab>=4.0.0
+ipykernel>=6.29.0
+
+# --- weights ---------------------------------------------------------------
+huggingface_hub>=0.23.0    # pulls saadlahrichi/WSTSPlus
+
+# NOTE: intentionally NOT pinned to exact versions. Pin with
+#   pip freeze > research/wsts/requirements.lock.txt
+# once the harness reproduces AP ~= 0.478, so the published result is
+# reproducible from a known-good environment.
