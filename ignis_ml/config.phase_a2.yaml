@@ -1,0 +1,119 @@
+# Phase A2 — Phase A protocol + SOFTENED SAMPLER.
+#
+# Purpose: isolate the prior-shift fix. Identical to config.phase_a.yaml in
+# every respect except ONE:
+#
+#   training.sampling.weight_mode : inverse -> sqrt_inverse
+#
+# Why. build_santa_ana_sampler weights each tile by 1/bin_count, giving every
+# fire-fraction bin equal total sampling mass. Measured on this exact corpus
+# (scripts/diagnose_prior_shift.py):
+#
+#     bin 0: 3167 tiles (79.2% of corpus) -> 16.7% of draws   (0.2x)
+#     bin 5:    5 tiles ( 0.1% of corpus) -> 16.7% of draws (133.3x)
+#
+#     delta prior, natural    : 0.0345
+#     delta prior, as sampled : 0.1854      <- 5.26x shift
+#
+# The model therefore learns P(fire | oversampled), not P(fire | real), and its
+# raw probabilities come out over-confident by almost exactly that factor. The
+# implied logit bias is +1.8285, which maps raw p=0.50 to 0.1384 — versus the
+# fitted isotonic curve's observed 0.1371 at raw 0.50. A 0.9% match: prior shift
+# explains the ENTIRE calibration error, not merely part of it.
+#
+# sqrt_inverse (weight = 1/sqrt(bin_count)) keeps fire-heavy tiles well
+# represented for optimization while cutting the prior shift substantially, so
+# raw probabilities land closer to deployment-real and isotonic calibration
+# stops being load-bearing.
+#
+# The threshold sweep is also widened here (the phase_a run's optimum, 0.520,
+# sat above the old 0.50 ceiling), but that affects REPORTING only in this arm:
+# select_on=ap means checkpoint selection is threshold-free either way.
+#
+# Run:
+#   export IGNIS_DATA_ROOT=/Volumes/T9/ignis-data
+#   cd ignis_ml && python train_v4.py --config config.phase_a2.yaml
+
+data_root: data
+
+datasets:
+  mndws:
+    raw_dir: data/mNDWS_raw/ndws_western_dataset
+    tiles_dir: data/mNDWS_500m_T3
+
+checkpoints:
+  model: checkpoints/convlstm_unet_phase_a2.pt
+
+grid:
+  crs: "EPSG:5070"
+  tile_km: 32
+  res_m: 500
+
+channels:
+  dynamic_order: [fire_t, u, v, gust, tempC, q, precip]
+  static_order:  [elev, slope, aspect_cos, aspect_sin, ndvi, bi, erc, pdsi, chili, impervious, water, population, fuel1, fuel2, fuel3]
+
+training:
+  seq_len: 3
+  batch_size: 8
+  hidden_channels: 64
+  num_workers: 2
+  cache_items: 0
+  persistent_workers: false
+  epochs: 30
+  lr: 0.0008
+  weight_decay: 0.0005
+  optimizer: adamw
+  scheduler: cosine
+  warmup_epochs: 5
+  grad_clip: 1.0
+  early_stop: 6
+  mixed_precision: true
+  seed: 42                 # PINNED — same split as phase_a
+
+  drop_encoder: 0.10
+  drop_decoder: 0.15
+
+  target_mode: delta
+
+  loss:
+    # Held identical to phase_a — NOT the variable under test here.
+    focal: { enable: true, gamma: 2.0, alpha: inv_freq }
+    dice_weight: 0.0
+    dice_dilate_px: 2
+    tversky: { enable: false, alpha: 0.3, beta: 0.7, weight: 0.6 }
+    wind_align: { enable: true, weight: 0.1 }
+
+  metrics:
+    select_on: ap          # held identical to phase_a
+    threshold: 0.5
+    tta: false
+    threshold_sweep:
+      lo: 0.05
+      hi: 0.95             # widened; reporting-only in this arm (select_on=ap)
+      n: 91
+
+  sampling:
+    santa_ana_boost: 5.0
+    santa_ana_u_threshold: -5.0
+    # ---- THE ONLY FACTOR UNDER TEST ----
+    # inverse      -> every bin equal mass  (prior shift 5.26x, what phase_a ran)
+    # sqrt_inverse -> partial rebalancing   (materially lower shift)
+    # uniform      -> natural distribution  (no shift, but few fire-heavy draws)
+    weight_mode: sqrt_inverse
+
+features:
+  derived:
+    enable: true
+    include: null
+  days_since_fire_cap: 7
+
+augmentation:
+  hflip_p: 0.5
+  vflip_p: 0.5
+  rot90_p: 1.0
+  translate_px: 0
+  channel_dropout_p: 0.05
+  channel_dropout_exclude: [fire_t, u, v]
+  gaussian_noise_std: 0.01
+  temporal_dropout_p: 0.10
