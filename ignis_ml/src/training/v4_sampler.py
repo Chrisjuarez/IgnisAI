@@ -51,6 +51,21 @@ def _fire_fraction(npz_path: Path) -> float:
         return 0.0
 
 
+#: How hard to rebalance the fire-fraction bins.
+#:
+#:   "inverse"      weight = 1/bin_count  -> every bin gets EQUAL total mass.
+#:                  Maximum rebalancing. On mNDWS_500m_T3 this oversamples the
+#:                  rarest bin ~133x and shifts the delta positive prior from
+#:                  0.035 (natural) to 0.185 (as sampled) — a 5.26x prior shift
+#:                  that the model then bakes into its output probabilities.
+#:                  See ignis_ml/scripts/diagnose_prior_shift.py.
+#:   "sqrt_inverse" weight = 1/sqrt(bin_count) -> partial rebalancing. Keeps
+#:                  fire-heavy tiles well represented without the extreme prior
+#:                  shift, so raw probabilities stay closer to deployment-real.
+#:   "uniform"      no rebalancing; natural class distribution.
+WEIGHT_MODES = ("inverse", "sqrt_inverse", "uniform")
+
+
 def build_santa_ana_sampler(
     train_files: Sequence[Path],
     meta_dir: Optional[Path] = None,
@@ -59,15 +74,27 @@ def build_santa_ana_sampler(
     num_bins: int = 6,
     floor_weight: float = 0.05,
     seed: int = 42,
+    weight_mode: str = "inverse",
 ) -> Tuple[WeightedRandomSampler, dict]:
     """Return (sampler, stats).
 
     Weight per tile = (binned fire-fraction weight) * (boost if santa_ana).
     Mirrors the intent of train_nautilus.build_train_sampler and multiplies in
     the Santa-Ana boost on top.
+
+    `weight_mode` controls how aggressively the fire-fraction bins are
+    rebalanced; see WEIGHT_MODES. Default "inverse" preserves the historical
+    v3/v4 behavior so existing runs stay reproducible.
+
+    The returned stats include `prior_shift`, the ratio of the sampled mean
+    fire fraction to the natural one. That number is the factor by which the
+    model's learned probabilities will be inflated relative to deployment, so
+    it belongs in every training log.
     """
+    if weight_mode not in WEIGHT_MODES:
+        raise ValueError(f"weight_mode must be one of {WEIGHT_MODES}, got {weight_mode!r}")
+
     files = [Path(f) for f in train_files]
-    rng = np.random.default_rng(seed)
 
     sa_flags = _load_santa_ana_tilekeys(Path(meta_dir)) if meta_dir else {}
 
@@ -75,11 +102,14 @@ def build_santa_ana_sampler(
 
     # Bin by fire fraction so empty/near-empty tiles don't dominate, matching
     # the v3 fire-fraction-balanced intent.
-    if fracs.max() > 0:
+    if fracs.max() > 0 and weight_mode != "uniform":
         edges = np.linspace(0.0, fracs.max() + 1e-9, num_bins + 1)
         bins = np.clip(np.digitize(fracs, edges) - 1, 0, num_bins - 1)
         bin_counts = np.bincount(bins, minlength=num_bins).astype(np.float64)
-        inv = np.where(bin_counts > 0, 1.0 / bin_counts, 0.0)
+        if weight_mode == "inverse":
+            inv = np.where(bin_counts > 0, 1.0 / bin_counts, 0.0)
+        else:  # sqrt_inverse
+            inv = np.where(bin_counts > 0, 1.0 / np.sqrt(bin_counts), 0.0)
         base_w = inv[bins]
     else:
         base_w = np.ones(len(files), dtype=np.float64)
@@ -96,13 +126,22 @@ def build_santa_ana_sampler(
     sampler = WeightedRandomSampler(
         weights_t, num_samples=len(weights_t), replacement=True
     )
+
+    # Prior shift: what the sampler does to the class balance the model sees.
+    p_draw = weights / (weights.sum() + 1e-12)
+    natural = float(fracs.mean())
+    sampled = float((p_draw * fracs).sum())
+
     stats = {
         "n_tiles": len(files),
         "n_santa_ana": int((boost > 1.0).sum()),
         "santa_ana_fraction_raw": float((boost > 1.0).mean()),
-        "mean_fire_fraction": float(fracs.mean()),
+        "mean_fire_fraction": natural,
         "effective_santa_ana_sampling_share": float(
             weights[boost > 1.0].sum() / (weights.sum() + 1e-12)
         ),
+        "weight_mode": weight_mode,
+        "sampled_fire_fraction": sampled,
+        "prior_shift": float(sampled / max(natural, 1e-12)),
     }
     return sampler, stats
