@@ -8,6 +8,6 @@ rasterio
 shapely
 pyproj
 boto3
-torch==2.12.0
+torch==2.13.0
 scipy
 pytest
