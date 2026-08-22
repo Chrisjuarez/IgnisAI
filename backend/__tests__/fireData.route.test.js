@@ -3,7 +3,7 @@ const request = require('supertest');
 
 // --- Mocks (declare BEFORE requiring app) ---
 jest.mock('axios', () => ({ get: jest.fn() }));
-jest.mock('../models/Wildfire', () => ({ insertMany: jest.fn(), find: jest.fn() }));
+jest.mock('../models/Wildfire', () => ({ bulkWrite: jest.fn(), find: jest.fn() }));
 
 const axios = require('axios');
 const Wildfire = require('../models/Wildfire');
@@ -24,9 +24,7 @@ describe('GET /api/wildfires', () => {
     ].join('\n');
 
     axios.get.mockResolvedValue({ data: csv });
-    Wildfire.insertMany.mockResolvedValue([
-      { _id: 'a1' }, { _id: 'a2' }
-    ]);
+    Wildfire.bulkWrite.mockResolvedValue({ upsertedCount: 2 });
 
     const res = await request(app).get('/api/wildfires');
 
@@ -34,11 +32,18 @@ describe('GET /api/wildfires', () => {
     expect(res.body).toHaveProperty('message', 'Wildfire data fetched & stored');
     expect(res.body).toHaveProperty('count', 2);
     // we don’t assert on the exact shape of each doc to avoid tight-coupling
-    expect(Wildfire.insertMany).toHaveBeenCalledTimes(1);
-    const toInsert = Wildfire.insertMany.mock.calls[0][0];
-    expect(Array.isArray(toInsert)).toBe(true);
-    expect(toInsert).toHaveLength(2);
-    expect(toInsert[0]).toMatchObject({
+    expect(Wildfire.bulkWrite).toHaveBeenCalledTimes(1);
+    const operations = Wildfire.bulkWrite.mock.calls[0][0];
+    expect(Array.isArray(operations)).toBe(true);
+    expect(operations).toHaveLength(2);
+    expect(operations[0].updateOne.upsert).toBe(true);
+    expect(operations[0].updateOne.filter).toMatchObject({
+      latitude: 34.0522,
+      longitude: -118.2437,
+      satellite: 'N21',
+      instrument: 'VIIRS',
+    });
+    expect(operations[0].updateOne.update.$set).toMatchObject({
       scan: 0.4,
       track: 0.4,
       frp: 12.3,
@@ -57,7 +62,7 @@ describe('GET /api/wildfires', () => {
 
     expect(res.status).toBe(200);
     expect(res.body).toEqual({ message: 'No valid fire data', count: 0, data: [] });
-    expect(Wildfire.insertMany).not.toHaveBeenCalled();
+    expect(Wildfire.bulkWrite).not.toHaveBeenCalled();
   });
 
   it('propagates provider errors (500)', async () => {
@@ -73,7 +78,7 @@ describe('GET /api/wildfires', () => {
       data: [],
       stale: true,
     });
-    expect(Wildfire.insertMany).not.toHaveBeenCalled();
+    expect(Wildfire.bulkWrite).not.toHaveBeenCalled();
   });
 
   it('returns FIRMS detection footprints as valid GeoJSON polygons', async () => {
