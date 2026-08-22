@@ -45,3 +45,29 @@ def test_static_catalog_channel_requires_uri():
         static_catalog._parse_channel("elev", {"units": "m"})
 
     assert exc.value.reason == "static_catalog_invalid_channel"
+
+def _catalog_payload(version):
+    return {
+        "version": version,
+        "channels": {
+            name: {"uri": f"/tmp/{name}.tif"}
+            for name in static_catalog.REQUIRED_BASE_STATIC
+        },
+    }
+
+
+def test_load_catalog_reuses_parsed_catalog_until_file_changes(tmp_path, monkeypatch):
+    path = tmp_path / "static_catalog.json"
+    path.write_text(json.dumps(_catalog_payload("v1")), encoding="utf-8")
+    monkeypatch.setenv("STATIC_CATALOG_PATH", str(path))
+    static_catalog._catalog_by_path.clear()
+
+    first = static_catalog.load_catalog()
+
+    assert static_catalog.load_catalog() is first, "unchanged catalog should not be re-parsed"
+
+    path.write_text(json.dumps(_catalog_payload("v2-rebuilt")), encoding="utf-8")
+    reloaded = static_catalog.load_catalog()
+
+    assert reloaded is not first
+    assert reloaded["version"] == "v2-rebuilt"

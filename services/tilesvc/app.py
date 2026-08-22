@@ -1408,6 +1408,7 @@ def metrics():
 def healthz():
     _ensure_model_metadata_loaded(load_checkpoint=False)
     model_exists = os.path.exists(MODEL_PATH)
+    model_sha256 = file_sha256(MODEL_PATH)
     try:
         from .static_catalog import load_catalog
         static_catalog_ok = True
@@ -1422,7 +1423,7 @@ def healthz():
         "predictionsEnabled": PREDICTIONS_ENABLED,
         "modelPath": MODEL_PATH,
         "modelExists": model_exists,
-        "modelSha256": file_sha256(MODEL_PATH),
+        "modelSha256": model_sha256,
         "device": str(DEVICE),
         "Cd": MODEL_CD,
         "Cs": MODEL_CS,
@@ -1449,7 +1450,7 @@ def healthz():
             "channels": sorted((static_catalog_meta.get("channels") or {}).keys()),
             "fuel_channels": static_catalog_meta.get("fuel_channels"),
         },
-        "calibration": calibration_status(model_sha256=file_sha256(MODEL_PATH)),
+        "calibration": calibration_status(model_sha256=model_sha256),
         "firmsSnapshot": _latest_file_age(os.getenv("FIRMS_SNAPSHOT_DIR"), ("*.csv", "*.CSV")),
         "noaaCycle": _latest_file_age(_noaa_cache_health_dir(), ("*.npz", "*.grib2", "*.grb2")),
         "weatherQuality": weather_quality_status(),
