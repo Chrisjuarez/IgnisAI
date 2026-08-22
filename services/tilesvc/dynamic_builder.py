@@ -409,110 +409,140 @@ def _rasterize_frp(points, t_start, t_end, affine):
 OPEN_METEO_ARCHIVE = "https://archive-api.open-meteo.com/v1/archive"
 
 
-def fetch_weather_grids(lat: float, lon: float, ref_time: dt.datetime = None):
-    """
-    Fetch weather and expand to per-pixel constant grids.
-    If ref_time is provided and in the past (>24h ago), use the Open-Meteo Archive API.
-    Otherwise use the current/forecast API.
+_HOURLY_VARIABLES = (
+    "temperature_2m,relative_humidity_2m,"
+    "wind_speed_10m,wind_direction_10m,wind_gusts_10m,precipitation"
+)
 
-    Cached by (rounded lat/lon, ref hour, archive vs forecast) for
-    WEATHER_CACHE_TTL seconds. Each multistep prediction calls this once per
-    timestep (T=6), so this alone removes ~5 duplicate HTTP round trips per
-    request.
+#: Days of hourly forecast to request. The rollout asks for weather up to
+#: steps * step_hours ahead, so the series must span the whole forecast.
+_FORECAST_DAYS = int(os.getenv("OPEN_METEO_FORECAST_DAYS", "7"))
+
+#: Days of hourly history to request per archive call, for the same reason.
+_ARCHIVE_WINDOW_DAYS = int(os.getenv("OPEN_METEO_ARCHIVE_DAYS", "7"))
+
+_SERIES_TIME_FORMAT = "%Y-%m-%dT%H:%M"
+
+
+def _as_utc(moment: dt.datetime) -> dt.datetime:
+    return moment.replace(tzinfo=dt.timezone.utc) if moment.tzinfo is None else moment.astimezone(dt.timezone.utc)
+
+
+def _parse_series_time(stamp: str) -> dt.datetime:
+    return dt.datetime.strptime(stamp, _SERIES_TIME_FORMAT).replace(tzinfo=dt.timezone.utc)
+
+
+def _series_covers(series: dict, target: dt.datetime) -> bool:
+    times = series.get("time") or []
+    if not times:
+        return False
+    return _parse_series_time(times[0]) <= target <= _parse_series_time(times[-1])
+
+
+def _fetch_hourly_series(lat: float, lon: float, target: dt.datetime, use_archive: bool) -> dict:
+    common = {
+        "latitude": lat,
+        "longitude": lon,
+        "hourly": _HOURLY_VARIABLES,
+        "windspeed_unit": "ms",
+        "precipitation_unit": "mm",
+        "temperature_unit": "celsius",
+        "timezone": "UTC",
+    }
+
+    if use_archive:
+        # The archive lags real time by a couple of days; asking past its edge
+        # returns an error rather than a truncated series.
+        latest = dt.datetime.now(dt.timezone.utc).date() - dt.timedelta(days=2)
+        start = target.date()
+        end = min(start + dt.timedelta(days=_ARCHIVE_WINDOW_DAYS - 1), latest)
+        params = {**common, "start_date": start.isoformat(), "end_date": max(start, end).isoformat()}
+        url, timeout = OPEN_METEO_ARCHIVE, 20
+    else:
+        params = {**common, "forecast_days": _FORECAST_DAYS}
+        url, timeout = OPEN_METEO, 15
+
+    try:
+        response = requests.get(url, params=params, timeout=timeout).json()
+        return response.get("hourly", {}) or {}
+    except Exception as exc:
+        print(f"⚠️  Open-Meteo hourly fetch failed: {exc}")
+        return {}
+
+
+def _hourly_series(lat: float, lon: float, target: dt.datetime, use_archive: bool) -> dict:
+    """Hourly weather series covering `target`, cached per location.
+
+    The rollout needs one sample per lead time. Caching the series rather than
+    a single hour means the whole forecast costs one HTTP round trip instead of
+    one per step, and — unlike Open-Meteo's `current` endpoint — the value
+    actually varies with lead time.
+    """
+    cache_key = (round(float(lat), 2), round(float(lon), 2), bool(use_archive))
+
+    cached = _cache_get(_weather_cache, cache_key, _WEATHER_TTL_SEC)
+    if cached is not None and _series_covers(cached, target):
+        return cached
+
+    series = _fetch_hourly_series(lat, lon, target, use_archive)
+    if series.get("time"):
+        _cache_set(_weather_cache, cache_key, series)
+    return series
+
+
+def _sample_hourly(series: dict, target: dt.datetime) -> dict:
+    times = series.get("time") or []
+    if not times:
+        return {}
+
+    wanted = target.replace(minute=0, second=0, microsecond=0).strftime(_SERIES_TIME_FORMAT)
+    try:
+        index = times.index(wanted)
+    except ValueError:
+        # Lead time beyond the series: clamp to the nearest end rather than
+        # silently falling back to hour zero.
+        index = 0 if target < _parse_series_time(times[0]) else len(times) - 1
+
+    def value_at(name: str, default: float) -> float:
+        values = series.get(name) or []
+        if index < len(values) and values[index] is not None:
+            return float(values[index])
+        return default
+
+    return {
+        "temperature_2m": value_at("temperature_2m", 15.0),
+        "relative_humidity_2m": value_at("relative_humidity_2m", 50.0),
+        "wind_speed_10m": value_at("wind_speed_10m", 3.0),
+        "wind_direction_10m": value_at("wind_direction_10m", 0.0),
+        "wind_gusts_10m": value_at("wind_gusts_10m", 3.0),
+        "precipitation": value_at("precipitation", 0.0),
+    }
+
+
+def fetch_weather_grids(lat: float, lon: float, ref_time: dt.datetime = None):
+    """Weather for `ref_time`, expanded to per-pixel constant grids.
+
+    Prefers the cached NOAA grids. Otherwise falls back to Open-Meteo, reading
+    the hour matching `ref_time` out of a cached hourly series so that each
+    forecast step gets its own lead-time weather.
     """
     noaa_grids = _fetch_noaa_cached_weather_grids(lat, lon, ref_time)
     if noaa_grids is not None:
         return {k: v.copy() for k, v in noaa_grids.items()}
 
     now = dt.datetime.now(dt.timezone.utc)
-    use_archive = (ref_time is not None and (now - ref_time).total_seconds() > 86400)
+    target = _as_utc(ref_time) if ref_time is not None else now
+    use_archive = (now - target).total_seconds() > 86400
 
-    # Cache key: nearest 0.05° (~5 km) and hour bucket. Open-Meteo archive is
-    # stable; forecast rotates hourly, so hour bucket gives us a natural TTL
-    # without pinning to `ref_time` to the minute.
-    lat_q = round(float(lat), 2)
-    lon_q = round(float(lon), 2)
-    if ref_time is not None:
-        hour_bucket = ref_time.replace(minute=0, second=0, microsecond=0).isoformat()
-    else:
-        hour_bucket = now.replace(minute=0, second=0, microsecond=0).isoformat()
-    cache_key = (lat_q, lon_q, hour_bucket, bool(use_archive))
+    sample = _sample_hourly(_hourly_series(lat, lon, target, use_archive), target)
 
-    cached = _cache_get(_weather_cache, cache_key, _WEATHER_TTL_SEC)
-    if cached is not None:
-        _set_weather_source(
-            "open_meteo_fallback",
-            "archive_cache" if use_archive else "forecast_current_cache",
-        )
-        # Return defensive copies so callers can't mutate cached arrays.
-        return {k: v.copy() for k, v in cached.items()}
+    T = sample.get("temperature_2m", 15.0)        # °C
+    RH = sample.get("relative_humidity_2m", 50.0)  # %
+    WS = sample.get("wind_speed_10m", 3.0)         # m/s
+    WD = sample.get("wind_direction_10m", 0.0)     # deg
+    G = sample.get("wind_gusts_10m", WS)           # m/s
+    P = sample.get("precipitation", 0.0)           # mm
 
-    cur = {}
-
-    if use_archive:
-        date_str = ref_time.strftime("%Y-%m-%d")
-        target_hour = ref_time.hour
-        params = {
-            "latitude": lat,
-            "longitude": lon,
-            "start_date": date_str,
-            "end_date": date_str,
-            "hourly": (
-                "temperature_2m,relative_humidity_2m,"
-                "wind_speed_10m,wind_direction_10m,wind_gusts_10m,precipitation"
-            ),
-            "windspeed_unit": "ms",
-            "precipitation_unit": "mm",
-            "temperature_unit": "celsius",
-            "timezone": "UTC",
-        }
-        try:
-            j = requests.get(OPEN_METEO_ARCHIVE, params=params, timeout=20).json()
-            hourly = j.get("hourly", {}) or {}
-            times = hourly.get("time", [])
-            # Find the closest hour index
-            idx = min(target_hour, len(times) - 1) if times else 0
-            cur = {
-                "temperature_2m": hourly.get("temperature_2m", [15.0])[idx],
-                "relative_humidity_2m": hourly.get("relative_humidity_2m", [50.0])[idx],
-                "wind_speed_10m": hourly.get("wind_speed_10m", [3.0])[idx],
-                "wind_direction_10m": hourly.get("wind_direction_10m", [0.0])[idx],
-                "wind_gusts_10m": hourly.get("wind_gusts_10m", [3.0])[idx],
-                "precipitation": hourly.get("precipitation", [0.0])[idx],
-            }
-            print(f"[tilesvc] Archive weather for {date_str} hour {target_hour}: T={cur.get('temperature_2m')}, "
-                  f"RH={cur.get('relative_humidity_2m')}, WS={cur.get('wind_speed_10m')}")
-        except Exception as e:
-            print(f"⚠️  Archive weather fetch failed: {e}")
-            cur = {}
-    else:
-        params = {
-            "latitude": lat,
-            "longitude": lon,
-            "timezone": "UTC",
-            "current": (
-                "temperature_2m,relative_humidity_2m,"
-                "wind_speed_10m,wind_direction_10m,wind_gusts_10m,precipitation"
-            ),
-            "windspeed_unit": "ms",
-            "precipitation_unit": "mm",
-            "temperature_unit": "celsius",
-        }
-        try:
-            j = requests.get(OPEN_METEO, params=params, timeout=12).json()
-            cur = j.get("current", {}) or {}
-        except Exception:
-            cur = {}
-
-    # Fallbacks if anything missing
-    T  = float(cur.get("temperature_2m",       15.0))  # °C
-    RH = float(cur.get("relative_humidity_2m", 50.0))  # %
-    WS = float(cur.get("wind_speed_10m",        3.0))  # m/s
-    WD = float(cur.get("wind_direction_10m",    0.0))  # deg
-    G  = float(cur.get("wind_gusts_10m",       WS))    # m/s
-    P  = float(cur.get("precipitation",         0.0))  # mm
-
-    # Convert to model inputs
     u, v = wind_to_uv(np.array(WS, np.float32), np.array(WD, np.float32))
     q = rh_to_q(np.array(RH, np.float32), np.array(T, np.float32))
 
@@ -530,9 +560,8 @@ def fetch_weather_grids(lat: float, lon: float, ref_time: dt.datetime = None):
     }
     _set_weather_source(
         "open_meteo_fallback",
-        "archive" if use_archive else "forecast_current",
+        "archive_hourly" if use_archive else "forecast_hourly",
     )
-    _cache_set(_weather_cache, cache_key, {k: v.copy() for k, v in grids.items()})
     return grids
 
 

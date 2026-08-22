@@ -3,11 +3,16 @@ const request = require('supertest');
 
 // Mock BEFORE requiring app
 jest.mock('axios', () => ({ get: jest.fn() }));
-jest.mock('../models/Wildfire', () => ({ insertMany: jest.fn() }));
+jest.mock('../models/Wildfire', () => ({ bulkWrite: jest.fn() }));
 
 const axios = require('axios');
 const Wildfire = require('../models/Wildfire');
 const app = require('../app');
+
+// The route persists via an idempotent bulk upsert; these assertions care
+// about the documents it would store, not the operation envelope.
+const storedDocuments = () =>
+  Wildfire.bulkWrite.mock.calls[0][0].map((op) => op.updateOne.update.$set);
 
 describe('GET /api/wildfires filtering flags', () => {
   beforeEach(() => {
@@ -27,21 +32,21 @@ describe('GET /api/wildfires filtering flags', () => {
 
   test('default behavior excludes likely flares (count = 2)', async () => {
     axios.get.mockResolvedValue({ data: csv });
-    Wildfire.insertMany.mockResolvedValue([{_id:'x1'},{_id:'x2'}]); // 2 inserts
+    Wildfire.bulkWrite.mockResolvedValue({ upsertedCount: 2 });
 
     const res = await request(app).get('/api/wildfires').expect(200);
 
     expect(res.body).toHaveProperty('message');
     expect(res.body).toHaveProperty('count', 2);
-    expect(Wildfire.insertMany).toHaveBeenCalledTimes(1);
-    const docs = Wildfire.insertMany.mock.calls[0][0];
+    expect(Wildfire.bulkWrite).toHaveBeenCalledTimes(1);
+    const docs = storedDocuments();
     expect(Array.isArray(docs)).toBe(true);
     expect(docs).toHaveLength(2); // flare removed
   });
 
   test('excludeFlares=false includes flare (count = 3)', async () => {
     axios.get.mockResolvedValue({ data: csv });
-    Wildfire.insertMany.mockResolvedValue([{_id:'x1'},{_id:'x2'},{_id:'x3'}]);
+    Wildfire.bulkWrite.mockResolvedValue({ upsertedCount: 3 });
 
     const res = await request(app)
       .get('/api/wildfires')
@@ -49,13 +54,13 @@ describe('GET /api/wildfires filtering flags', () => {
       .expect(200);
 
     expect(res.body.count).toBe(3);
-    const docs = Wildfire.insertMany.mock.calls[0][0];
+    const docs = storedDocuments();
     expect(docs).toHaveLength(3);
   });
 
   test('predictableOnly=true returns only predictable rows (count = 1)', async () => {
     axios.get.mockResolvedValue({ data: csv });
-    Wildfire.insertMany.mockResolvedValue([{_id:'p1'}]);
+    Wildfire.bulkWrite.mockResolvedValue({ upsertedCount: 1 });
 
     const res = await request(app)
       .get('/api/wildfires')
@@ -63,7 +68,7 @@ describe('GET /api/wildfires filtering flags', () => {
       .expect(200);
 
     expect(res.body.count).toBe(1);
-    const docs = Wildfire.insertMany.mock.calls[0][0];
+    const docs = storedDocuments();
     expect(docs).toHaveLength(1);
     // sanity check on derived fields we rely on in UI:
     expect(docs[0]).toHaveProperty('confidence');

@@ -134,6 +134,37 @@ def _placeholder_static_tensor(
     }
 
 
+#: Parsed catalog per resolved path, as (mtime_ns, size, catalog). Every
+#: /healthz and every prediction reads the catalog, but it only changes on
+#: deploy, so re-reading and re-parsing per call is pure overhead. Callers
+#: treat the result as read-only.
+_catalog_by_path: Dict[str, Tuple[int, int, Dict[str, Any]]] = {}
+
+
+def _read_catalog(p: Path) -> Dict[str, Any]:
+    with p.open("r", encoding="utf-8") as f:
+        data = json.load(f)
+
+    channels = data.get("channels")
+    if not isinstance(channels, Mapping):
+        raise InputUnavailable(
+            "Static catalog must contain a channels object",
+            reason="static_catalog_invalid",
+            details={"path": str(p)},
+        )
+
+    missing = [name for name in REQUIRED_BASE_STATIC if name not in channels]
+    if missing:
+        raise InputUnavailable(
+            f"Static catalog missing required channels: {missing}",
+            reason="static_catalog_missing_channels",
+            details={"missing": missing, "path": str(p)},
+        )
+
+    data["_path"] = str(p)
+    return data
+
+
 def load_catalog(path: str | Path | None = None) -> Dict[str, Any]:
     p = Path(path) if path else _resolve_catalog_path()
     if not p:
@@ -147,24 +178,16 @@ def load_catalog(path: str | Path | None = None) -> Dict[str, Any]:
             reason="static_catalog_missing",
             details={"path": str(p)},
         )
-    with p.open("r", encoding="utf-8") as f:
-        data = json.load(f)
-    channels = data.get("channels")
-    if not isinstance(channels, Mapping):
-        raise InputUnavailable(
-            "Static catalog must contain a channels object",
-            reason="static_catalog_invalid",
-            details={"path": str(p)},
-        )
-    missing = [name for name in REQUIRED_BASE_STATIC if name not in channels]
-    if missing:
-        raise InputUnavailable(
-            f"Static catalog missing required channels: {missing}",
-            reason="static_catalog_missing_channels",
-            details={"missing": missing, "path": str(p)},
-        )
-    data["_path"] = str(p)
-    return data
+
+    stat = p.stat()
+    key = str(p.resolve())
+    cached = _catalog_by_path.get(key)
+    if cached and cached[0] == stat.st_mtime_ns and cached[1] == stat.st_size:
+        return cached[2]
+
+    catalog = _read_catalog(p)
+    _catalog_by_path[key] = (stat.st_mtime_ns, stat.st_size, catalog)
+    return catalog
 
 
 def catalog_version(catalog: Mapping[str, Any]) -> Dict[str, Any]:

@@ -26,6 +26,7 @@ from .grid import (
 )
 from .dynamic_builder import DEFAULT_DYNAMIC_ORDER, build_dynamic_for_tile, fetch_weather_grids, weather_quality_status
 from .static_builder import CHANNEL_ORDER
+from .cache_health import firms_snapshot_status, noaa_cycle_status
 from .calibration import calibrate_probability, calibration_status
 from .ml_runtime import file_sha256, runtime_imports, source_version_info
 from .prediction_contract import next_fire_from_delta, risk_class_summary
@@ -67,28 +68,6 @@ def _metrics_text() -> str:
         lines.append(f"{name}_sum {_METRIC_SUMS[name]:.6f}")
         lines.append(f"{name}_count {_METRIC_COUNTS.get(name, 0.0):.0f}")
     return "\n".join(lines) + "\n"
-
-
-def _latest_file_age(path: str | None, patterns: Tuple[str, ...] = ("*",)) -> Dict[str, Any]:
-    if not path:
-        return {"configured": False}
-    root = Path(path)
-    if not root.exists():
-        return {"configured": True, "ok": False, "path": str(root), "error": "missing"}
-    files = []
-    for pattern in patterns:
-        files.extend([p for p in root.glob(pattern) if p.is_file()])
-    if not files:
-        return {"configured": True, "ok": False, "path": str(root), "error": "empty"}
-    latest = max(files, key=lambda p: p.stat().st_mtime)
-    age_seconds = max(0.0, time.time() - latest.stat().st_mtime)
-    return {
-        "configured": True,
-        "ok": True,
-        "path": str(root),
-        "latest_file": latest.name,
-        "age_seconds": age_seconds,
-    }
 
 
 def _noaa_cache_health_dir() -> Optional[str]:
@@ -1408,6 +1387,7 @@ def metrics():
 def healthz():
     _ensure_model_metadata_loaded(load_checkpoint=False)
     model_exists = os.path.exists(MODEL_PATH)
+    model_sha256 = file_sha256(MODEL_PATH)
     try:
         from .static_catalog import load_catalog
         static_catalog_ok = True
@@ -1422,7 +1402,7 @@ def healthz():
         "predictionsEnabled": PREDICTIONS_ENABLED,
         "modelPath": MODEL_PATH,
         "modelExists": model_exists,
-        "modelSha256": file_sha256(MODEL_PATH),
+        "modelSha256": model_sha256,
         "device": str(DEVICE),
         "Cd": MODEL_CD,
         "Cs": MODEL_CS,
@@ -1449,9 +1429,9 @@ def healthz():
             "channels": sorted((static_catalog_meta.get("channels") or {}).keys()),
             "fuel_channels": static_catalog_meta.get("fuel_channels"),
         },
-        "calibration": calibration_status(model_sha256=file_sha256(MODEL_PATH)),
-        "firmsSnapshot": _latest_file_age(os.getenv("FIRMS_SNAPSHOT_DIR"), ("*.csv", "*.CSV")),
-        "noaaCycle": _latest_file_age(_noaa_cache_health_dir(), ("*.npz", "*.grib2", "*.grb2")),
+        "calibration": calibration_status(model_sha256=model_sha256),
+        "firmsSnapshot": firms_snapshot_status(os.getenv("FIRMS_SNAPSHOT_DIR")),
+        "noaaCycle": noaa_cycle_status(_noaa_cache_health_dir()),
         "weatherQuality": weather_quality_status(),
         "mlSource": source_version_info(),
     }

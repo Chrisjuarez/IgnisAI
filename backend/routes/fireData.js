@@ -173,24 +173,70 @@ function stripCsvRows(csvText = '') {
   return lines.length > 1 ? lines.slice(1) : [];
 }
 
+/**
+ * A FIRMS detection is identified by where and when it was observed and by
+ * which sensor saw it. Shared by in-memory deduping and by the persistence
+ * filter so both agree on what "the same detection" means.
+ */
+function detectionIdentity(fire = {}) {
+  return {
+    latitude: fire.latitude,
+    longitude: fire.longitude,
+    timestamp: fire.timestamp instanceof Date ? fire.timestamp : new Date(fire.timestamp),
+    satellite: fire.satellite || null,
+    instrument: fire.instrument || null,
+  };
+}
+
+function detectionIdentityKey(fire = {}) {
+  const identity = detectionIdentity(fire);
+  return [
+    identity.latitude,
+    identity.longitude,
+    identity.timestamp.toISOString(),
+    identity.satellite || '',
+    identity.instrument || '',
+  ].join('|');
+}
+
 function dedupeFires(fires = []) {
   const unique = new Map();
   for (const fire of fires) {
-    const timestamp = fire.timestamp instanceof Date
-      ? fire.timestamp.toISOString()
-      : new Date(fire.timestamp).toISOString();
-    const key = [
-      fire.latitude,
-      fire.longitude,
-      timestamp,
-      fire.satellite || '',
-      fire.instrument || '',
-    ].join('|');
+    const key = detectionIdentityKey(fire);
     if (!unique.has(key)) {
       unique.set(key, fire);
     }
   }
   return Array.from(unique.values());
+}
+
+/**
+ * Persist detections idempotently. FIRMS re-serves the same rows on every
+ * poll and this route is called on each map load, so appending would grow the
+ * collection by a full snapshot per request.
+ *
+ * Returns the number of detections not previously stored.
+ */
+async function storeDetections(fires = []) {
+  if (!fires.length || typeof Wildfire.bulkWrite !== 'function') {
+    return 0;
+  }
+
+  const operations = fires.map((fire) => ({
+    updateOne: {
+      filter: detectionIdentity(fire),
+      update: { $set: fire },
+      upsert: true,
+    },
+  }));
+
+  try {
+    const result = await Wildfire.bulkWrite(operations, { ordered: false });
+    return result?.upsertedCount ?? 0;
+  } catch (err) {
+    console.warn('⚠️  Failed to persist wildfire detections:', err.message);
+    return 0;
+  }
 }
 
 function decorateFire(fire = {}) {
@@ -373,15 +419,8 @@ router.get('/wildfires', wildfireLimiter, async (req, res) => {
       return res.status(200).json({ message: 'No valid fire data', count: 0, data: [] });
     }
 
-    // Insert rows; ignore duplicate errors
-    let inserted = [];
-    try {
-      inserted = await Wildfire.insertMany(result.fires, { ordered: false });
-    } catch (_) { /* ignore dup key errors */ }
-
-    const insertedCount = Array.isArray(inserted) ? inserted.length : 0;
-    // ok to log counts
-    console.log(`🔥 Parsed ${result.fires.length} (inserted ${insertedCount})`);
+    const insertedCount = await storeDetections(result.fires);
+    console.log(`🔥 Parsed ${result.fires.length} (new ${insertedCount})`);
 
     const message = insertedCount > 0
       ? 'Wildfire data fetched & stored'

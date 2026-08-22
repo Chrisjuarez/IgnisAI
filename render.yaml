@@ -97,8 +97,12 @@ services:
         value: "0"
       - key: CALIBRATION_REQUIRED
         value: "0"
+      # Production runs with this on; the blueprint said "0" while the
+      # dashboard said "1", which made the served weather source impossible to
+      # reason about from the repo. Off means the cached NOAA grids are never
+      # read and every prediction silently uses the Open-Meteo fallback.
       - key: NOAA_GRIB_ENABLED
-        value: "0"
+        value: "1"
       - key: NOAA_GRID_CACHE_DIR
         value: /data/noaa_grid_cache
       - key: NOAA_GRID_CACHE_TEMPLATE
