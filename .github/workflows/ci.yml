@@ -240,13 +240,21 @@ jobs:
         with:
           python-version: '3.11'
           cache: pip
-          cache-dependency-path: services/tilesvc/requirements.txt
+          cache-dependency-path: |
+            services/tilesvc/requirements.txt
+            services/tilesvc/requirements-torch.txt
 
       - name: Install Python service dependencies
         run: |
           python -m pip install --upgrade pip
-          python -m pip install --index-url https://download.pytorch.org/whl/cpu torch==2.8.0
-          python -m pip install -r services/tilesvc/requirements.txt
+          python -m pip install -r services/tilesvc/requirements-torch.txt
+          python -m pip install -r services/tilesvc/requirements-dev.txt
+
+      - name: Verify torch is the CPU-only build
+        run: |
+          python -c "import torch; assert torch.__version__.endswith('+cpu'), \
+            'expected a CPU-only torch build, got ' + torch.__version__; \
+            print(torch.__version__)"
 
       - name: Run Python service tests
         run: |

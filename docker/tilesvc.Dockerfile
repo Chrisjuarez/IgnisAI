@@ -5,6 +5,15 @@ ENV PYTHONUNBUFFERED=1 PORT=8008 PYTHONPATH=/app \
     GDAL_DISABLE_READDIR_ON_OPEN=EMPTY_DIR \
     CPL_VSIL_CURL_ALLOWED_EXTENSIONS=.tif,.tiff,.json
 
+# The instance has a fraction of a CPU, but the math libraries size their thread
+# pools from the host's core count and allocate a per-thread arena each. On a
+# many-core host that reserves a lot of memory to push a 64x64 tile through a
+# small model. Override at deploy time if this ever runs somewhere with real cores.
+ENV OMP_NUM_THREADS=1 \
+    MKL_NUM_THREADS=1 \
+    OPENBLAS_NUM_THREADS=1 \
+    TORCH_NUM_THREADS=1
+
 # Runtime deps — libexpat1, libgeos, libproj needed by rasterio/shapely/pyproj at runtime
 RUN apt-get update && apt-get install -y --no-install-recommends \
       curl ca-certificates \
@@ -32,8 +41,12 @@ RUN set -eux; \
     python -m pip install --no-cache-dir rasterio==1.4.3 shapely==2.1.2 pyproj==3.7.2; \
   }
 
-# PyTorch CPU-only (installed before requirements.txt to avoid pulling CUDA version from PyPI)
-RUN pip install --no-cache-dir --index-url https://download.pytorch.org/whl/cpu torch==2.8.0
+# PyTorch, CPU-only. Version and index are pinned together in the requirements
+# file so a bump cannot separate them and pull the CUDA wheel from PyPI.
+COPY services/tilesvc/requirements-torch.txt /app/requirements-torch.txt
+RUN pip install --no-cache-dir -r /app/requirements-torch.txt \
+ && python -c "import torch; assert torch.__version__.endswith('+cpu'), \
+      'expected a CPU-only torch build, got ' + torch.__version__"
 
 # Remaining Python dependencies
 RUN pip install --no-cache-dir -r /app/requirements.txt \

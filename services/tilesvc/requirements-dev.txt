@@ -1,0 +1,4 @@
+# Test-only dependencies. Kept out of requirements.txt so the production image
+# does not ship a test framework.
+-r requirements.txt
+pytest
