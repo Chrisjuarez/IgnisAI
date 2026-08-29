@@ -479,15 +479,25 @@ function filterIncidents(incidents, query = {}) {
 /**
  * What the map actually needs from a bootstrap.
  *
- * The full payload carries every FIRMS detection in the bbox so that
- * /incidents/:id can find the ones near a given fire. At western-CONUS extent
- * that is thousands of records, and serialising them dominated a response
- * large enough to exhaust a 512 MB instance on a single cold request. The map
- * never read them - it fetches /wildfires directly - so they stay server-side.
+ * The full payload carries every FIRMS detection and every official perimeter
+ * in the bbox, because /incidents/:id and the incident annotation step both
+ * read them. The map does not: it fetches /wildfires and /fire-perimeters
+ * directly, and the only references to these fields in the frontend are a
+ * layer toggle and an empty placeholder in an error branch.
+ *
+ * Shipping them anyway is what exhausted a 512 MB instance. Measured against
+ * production after the detections were withheld, perimeter geometry alone
+ * still ran ~36 KB per feature: 381 features came to 13.8 MB, and the ~524 at
+ * western-CONUS extent did not complete at all. Both now stay server-side and
+ * are reported as counts.
  */
 function bootstrapResponse(payload) {
-  const { hotspots, ...response } = payload;
-  return { ...response, hotspotCount: Array.isArray(hotspots) ? hotspots.length : 0 };
+  const { hotspots, perimeters, ...response } = payload;
+  return {
+    ...response,
+    hotspotCount: Array.isArray(hotspots) ? hotspots.length : 0,
+    perimeterCount: (perimeters && Array.isArray(perimeters.features)) ? perimeters.features.length : 0,
+  };
 }
 
 router.get('/map/bootstrap', async (req, res) => {
@@ -499,7 +509,8 @@ router.get('/map/bootstrap', async (req, res) => {
     res.status(200).json({
       updatedAt: nowIso(),
       incidents: [],
-      perimeters: { type: 'FeatureCollection', features: [] },
+      hotspotCount: 0,
+      perimeterCount: 0,
       alerts: [],
       alertsGeojson: { type: 'FeatureCollection', features: [] },
       evacuations: [],
