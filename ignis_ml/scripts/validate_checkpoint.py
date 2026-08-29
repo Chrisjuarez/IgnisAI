@@ -39,7 +39,7 @@ import json
 import os
 import sys
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 
@@ -172,6 +172,36 @@ def compass(u: float, v: float) -> str:
 
 
 # ---------------------------------------------------------------------------
+def record_run(payload: Dict[str, Any]) -> None:
+    """Persist one run so it survives the container.
+
+    Render does not expose one-off job stdout through its API, so a run that
+    only prints leaves nothing retrievable - least of all when it fails.
+    """
+    try:
+        sys.path.insert(0, str(_REPO))
+        from services.tilesvc.validation_reports import write_report
+    except ImportError as exc:
+        print(f"  (validation report not written: {exc})")
+        return
+    path = write_report(payload)
+    if path:
+        print(f"  report: {path}")
+
+
+def cli(argv: Optional[List[str]] = None) -> int:
+    """Entry point that records a failure rather than losing it to a dead container."""
+    try:
+        return main(argv)
+    except Exception as exc:
+        record_run({
+            "status": "error",
+            "argv": list(argv if argv is not None else sys.argv[1:]),
+            "error": {"type": type(exc).__name__, "message": str(exc)},
+        })
+        raise
+
+
 def main(argv: Optional[List[str]] = None) -> int:
     ap = argparse.ArgumentParser(description="Visual/directional checkpoint validation")
     ap.add_argument("--ckpt", type=Path, required=True)
@@ -309,6 +339,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     # The threshold-free number is the one to trust: a thresholded cos computed
     # from a handful of pixels is noise, and its sign can flip with the cut.
     print(f"\n  probability-weighted cos (threshold-free): {cos_w:+.3f}")
+    verdict = None
     if np.isfinite(cos_w):
         verdict = ("DOWNWIND — probability mass leans with the wind" if cos_w > 0.3 else
                    "CROSSWIND — mass roughly perpendicular to the wind" if cos_w > -0.3 else
@@ -316,9 +347,29 @@ def main(argv: Optional[List[str]] = None) -> int:
         print(f"  -> {verdict}")
 
     finite = [c for _, n, c in sweep if np.isfinite(c) and n >= 10]
-    if finite and (max(finite) > 0.3 > min(finite) or min(finite) < -0.3 < max(finite)):
+    sign_flip = bool(finite and (max(finite) > 0.3 > min(finite) or min(finite) < -0.3 < max(finite)))
+    if sign_flip:
         print("  ⚠ sign flips across thresholds — the peak and the mass disagree.")
         print("    Trust the weighted value; a single thresholded cos is not evidence.")
+
+    record_run({
+        "status": "ok",
+        "checkpoint": args.ckpt.name,
+        "event": args.event,
+        "seq_len": seq_len,
+        "threshold": thr,
+        "arch_version": ck.get("arch_version"),
+        "val_ap": ck.get("val_ap"),
+        "val_csi": ck.get("val_csi"),
+        "wind": {"u_ms": u_ms, "v_ms": v_ms, "toward": compass(u_ms, v_ms)},
+        "weighted_cos": None if not np.isfinite(cos_w) else float(cos_w),
+        "verdict": verdict if np.isfinite(cos_w) else None,
+        "sign_flips_across_thresholds": sign_flip,
+        "sweep": [{"threshold": float(t), "pixels": int(n),
+                   "cos": None if not np.isfinite(c) else float(c)} for t, n, c in sweep],
+        "prediction": {"min": float(prob.min()), "mean": float(prob.mean()), "max": float(prob.max())},
+        "prior_fire_pixels": int(fire_prior.sum()),
+    })
 
     # ---- figure ------------------------------------------------------------
     # The numbers above are the evidence; the figure is a convenience. Skip it
@@ -394,4 +445,4 @@ def main(argv: Optional[List[str]] = None) -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(cli())
