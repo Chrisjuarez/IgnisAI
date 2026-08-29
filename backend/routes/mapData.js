@@ -279,9 +279,11 @@ async function fetchHotspots(bbox) {
     excludeFlares: true,
   });
   const fires = Array.isArray(result.fires) ? result.fires : [];
+  // Footprint polygons are deliberately not built here. They are one polygon
+  // per detection - thousands at full extent - and /wildfires/footprints
+  // builds its own copy for the client that actually renders them.
   return {
     fires,
-    footprints: fireDataHelpers.firesToFootprintGeoJSON(fires),
     stale: result.stale === true,
     message: result.message,
   };
@@ -425,8 +427,11 @@ async function buildBootstrap(query = {}) {
     bbox: bbox.raw,
     incidents,
     perimeters: perimeters.geojson,
+    // Detections stay on the shared payload because /incidents/:id reads them
+    // to find hotspots near one fire. They are withheld from the bootstrap
+    // RESPONSE instead - see bootstrapResponse below. `hotspotFootprints` is
+    // gone entirely: nothing ever read it.
     hotspots: hotspots.fires,
-    hotspotFootprints: hotspots.footprints,
     alerts: normalizedAlerts,
     alertsGeojson: alerts.geojson,
     evacuations: [],
@@ -471,18 +476,30 @@ function filterIncidents(incidents, query = {}) {
   });
 }
 
+/**
+ * What the map actually needs from a bootstrap.
+ *
+ * The full payload carries every FIRMS detection in the bbox so that
+ * /incidents/:id can find the ones near a given fire. At western-CONUS extent
+ * that is thousands of records, and serialising them dominated a response
+ * large enough to exhaust a 512 MB instance on a single cold request. The map
+ * never read them - it fetches /wildfires directly - so they stay server-side.
+ */
+function bootstrapResponse(payload) {
+  const { hotspots, ...response } = payload;
+  return { ...response, hotspotCount: Array.isArray(hotspots) ? hotspots.length : 0 };
+}
+
 router.get('/map/bootstrap', async (req, res) => {
   try {
     const payload = await buildBootstrap(req.query);
-    res.json(payload);
+    res.json(bootstrapResponse(payload));
   } catch (err) {
     console.error('map bootstrap error:', err.message);
     res.status(200).json({
       updatedAt: nowIso(),
       incidents: [],
       perimeters: { type: 'FeatureCollection', features: [] },
-      hotspots: [],
-      hotspotFootprints: { type: 'FeatureCollection', features: [] },
       alerts: [],
       alertsGeojson: { type: 'FeatureCollection', features: [] },
       evacuations: [],
@@ -569,4 +586,5 @@ module.exports._private = {
   normalizeAlert,
   buildUpdates,
   eventMatchesFireWeather,
+  bootstrapResponse,
 };
