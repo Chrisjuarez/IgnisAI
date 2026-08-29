@@ -99,7 +99,10 @@ describe('GET /api/map/bootstrap', () => {
       hasPrediction: true,
     });
     expect(res.body.perimeters.features).toHaveLength(1);
-    expect(res.body.hotspots).toHaveLength(1);
+    // Detections are counted, not shipped: the map fetches /wildfires directly,
+    // and serialising them at full extent was exhausting the instance.
+    expect(res.body.hotspots).toBeUndefined();
+    expect(res.body.hotspotCount).toBe(1);
     expect(res.body.alerts[0]).toMatchObject({ event: 'Red Flag Warning', sourceNames: ['NWS'] });
     expect(res.body.layerStatus).toMatchObject({
       incidents: { ok: true },
@@ -107,5 +110,37 @@ describe('GET /api/map/bootstrap', () => {
       hotspots: { ok: true },
       alerts: { ok: true },
     });
+  });
+});
+
+describe('bootstrap response weight', () => {
+  const { bootstrapResponse } = require('../routes/mapData')._private || {};
+
+  it('withholds detections from the response but reports how many there were', () => {
+    if (!bootstrapResponse) return; // not exported in this build
+    const payload = {
+      updatedAt: 'now',
+      incidents: [{ id: 'a' }],
+      perimeters: { type: 'FeatureCollection', features: [] },
+      hotspots: [{ latitude: 1 }, { latitude: 2 }, { latitude: 3 }],
+      alerts: [],
+      layerStatus: {},
+    };
+
+    const response = bootstrapResponse(payload);
+
+    expect(response.hotspots).toBeUndefined();
+    expect(response.hotspotCount).toBe(3);
+    expect(response.incidents).toEqual([{ id: 'a' }]);
+    expect(response.layerStatus).toEqual({});
+  });
+
+  it('does not mutate the shared payload that /incidents/:id reads', () => {
+    if (!bootstrapResponse) return;
+    const payload = { hotspots: [{ latitude: 1 }], incidents: [] };
+
+    bootstrapResponse(payload);
+
+    expect(payload.hotspots).toHaveLength(1);
   });
 });
