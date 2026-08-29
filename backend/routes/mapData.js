@@ -8,7 +8,13 @@ const router = express.Router();
 const WESTERN_CONUS_BBOX = '-125.1,31.0,-101.8,49.5';
 const WESTERN_STATES = ['CA', 'OR', 'WA', 'NV', 'AZ', 'UT', 'ID', 'MT', 'WY', 'CO', 'NM'];
 const CACHE_TTL_MS = Number(process.env.MAP_BOOTSTRAP_CACHE_MS || 180000);
-const CACHE_MAX_ENTRIES = Number(process.env.MAP_BOOTSTRAP_CACHE_MAX || 200);
+// Entry count is a weak bound here: one bootstrap ranges from ~0.4 MB for a
+// city bbox to tens of MB for western CONUS, and the key is the bbox, so
+// panning the map mints a new entry each time. 200 of the large ones is
+// gigabytes on a 512 MB instance, which is what took the backend down.
+// The byte budget is the real bound; the count is a backstop.
+const CACHE_MAX_ENTRIES = Number(process.env.MAP_BOOTSTRAP_CACHE_MAX || 12);
+const CACHE_MAX_BYTES = Number(process.env.MAP_BOOTSTRAP_CACHE_BYTES || 64 * 1024 * 1024);
 const USER_AGENT = process.env.IGNIS_USER_AGENT || 'IgnisAI wildfire map';
 
 const WFIGS_INCIDENTS_URL =
@@ -25,7 +31,7 @@ const FIRIS_PUBLIC_URL =
 
 // In-memory cache. Bounded LRU + TTL to prevent unbounded growth on
 // long-running instances; older entries are evicted lazily.
-const cache = new LruTtlCache({ max: CACHE_MAX_ENTRIES, ttl: CACHE_TTL_MS });
+const cache = new LruTtlCache({ max: CACHE_MAX_ENTRIES, ttl: CACHE_TTL_MS, maxBytes: CACHE_MAX_BYTES });
 
 function nowIso() {
   return new Date().toISOString();
