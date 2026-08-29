@@ -32,6 +32,7 @@ from .cache_health import firms_snapshot_status, noaa_cycle_status
 from .calibration import calibrate_probability, calibration_status
 from .ml_runtime import file_sha256, runtime_imports, source_version_info
 from .prediction_contract import next_fire_from_delta, risk_class_summary
+from .site_exposure import DEFAULT_ARRIVAL_THRESHOLD, sample_exposure
 from .static_catalog import InputUnavailable, load_static_tensor_for_model
 from .display_quality import display_mask_from_static, is_static_placeholder_or_missing
 
@@ -1508,6 +1509,79 @@ def healthz():
         "noaaCycle": noaa_cycle_status(_noaa_cache_health_dir()),
         "weatherQuality": weather_quality_status(),
         "mlSource": source_version_info(),
+    }
+
+
+@app.get("/site_exposure")
+def site_exposure_endpoint(
+    site_lat: float = Query(..., description="Latitude of the asset being assessed"),
+    site_lon: float = Query(..., description="Longitude of the asset being assessed"),
+    ignition_lat: float = Query(None, description="Ignition latitude; defaults to the site"),
+    ignition_lon: float = Query(None, description="Ignition longitude; defaults to the site"),
+    days: int = Query(3, ge=1, le=6, description="Forecast horizon in days"),
+    Tseq: int = Query(MODEL_TSEQ),
+    step_hours: int = Query(MODEL_STEP_HOURS),
+    thr: float = Query(None),
+    arrival_threshold: float = Query(DEFAULT_ARRIVAL_THRESHOLD, ge=0.0, le=1.0),
+    date: str = Query(None),
+):
+    """Spread forecast read at one asset rather than rendered as an image.
+
+    The rollout is centred on the ignition, so the site is sampled out of that
+    tile. Defaulting the ignition to the site answers "what if it starts here";
+    passing a separate ignition answers "what if it starts over there".
+    """
+    fire_lat = site_lat if ignition_lat is None else float(ignition_lat)
+    fire_lon = site_lon if ignition_lon is None else float(ignition_lon)
+
+    ref_time = _parse_date_param(date)
+    threshold = float(thr) if thr is not None else MODEL_THRESHOLD
+
+    bounds, _crop, rollout = _rollout_multistep_predictions(
+        fire_lat,
+        fire_lon,
+        Tseq=Tseq,
+        steps=int(days),
+        step_hours=step_hours,
+        crop_frac=1.0,
+        ignition=True,
+        ref_time=ref_time,
+        threshold=threshold,
+    )
+
+    exposure = sample_exposure(
+        rollout,
+        lonlat_to_tile(fire_lon, fire_lat),
+        site_lon=site_lon,
+        site_lat=site_lat,
+        ignition_lon=fire_lon,
+        ignition_lat=fire_lat,
+        arrival_threshold=float(arrival_threshold),
+        model_sha256=file_sha256(MODEL_PATH),
+    )
+
+    weather_quality = weather_quality_status()
+
+    return {
+        "site": {"lat": site_lat, "lon": site_lon},
+        "ignition": {"lat": fire_lat, "lon": fire_lon, "seeded": True},
+        "horizon_days": int(days),
+        "step_hours": int(step_hours),
+        "bounds": [float(v) for v in bounds],
+        **exposure,
+        "model_meta": _model_metadata(),
+        "quality": {
+            "status": weather_quality.get("status", "degraded"),
+            "degraded": weather_quality.get("status") != "ok",
+            "reasons": [] if weather_quality.get("status") == "ok"
+                       else [weather_quality.get("reason") or "open_meteo_weather_fallback"],
+        },
+        "data_sources": {
+            "fire": "NASA FIRMS live/archive window plus seeded ignition",
+            "weather": "NOAA gridded" if weather_quality.get("status") == "ok" else "Open-Meteo fallback",
+            "weather_source": weather_quality.get("source"),
+            "static": "STATIC_CATALOG_PATH COG/S3 manifest",
+        },
     }
 
 
