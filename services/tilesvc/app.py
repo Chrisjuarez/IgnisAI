@@ -29,6 +29,7 @@ from .grid import (
 from .dynamic_builder import DEFAULT_DYNAMIC_ORDER, build_dynamic_for_tile, fetch_weather_grids, weather_quality_status
 from .static_builder import CHANNEL_ORDER
 from .cache_health import firms_snapshot_status, noaa_cycle_status
+from .validation_reports import list_reports, report_dir
 from .calibration import calibrate_probability, calibration_status
 from .ml_runtime import file_sha256, runtime_imports, source_version_info
 from .prediction_contract import next_fire_from_delta, risk_class_summary
@@ -1582,6 +1583,23 @@ def site_exposure_endpoint(
             "weather_source": weather_quality.get("source"),
             "static": "STATIC_CATALOG_PATH COG/S3 manifest",
         },
+    }
+
+
+@app.get("/validation_runs")
+def validation_runs(limit: int = Query(10, ge=1, le=50)):
+    """Checkpoint validation runs recorded on the mounted disk.
+
+    Validation runs as a one-off job in this service, because this is where the
+    credentials for the static rasters live. Render does not expose job stdout
+    through its API, so without this the answer - and any failure - is only
+    visible by opening the dashboard.
+    """
+    runs = list_reports(limit=limit)
+    return {
+        "directory": str(report_dir()),
+        "count": len(runs),
+        "runs": runs,
     }
 
 
