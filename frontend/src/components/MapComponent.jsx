@@ -14,6 +14,7 @@ import {
   getWildfireData,
   getWildfireFootprints,
   getFirePerimeters,
+  getSpreadBands,
   predictFireSpreadMultistep
 } from '../api';
 import {
@@ -61,6 +62,8 @@ const FOOTPRINT_FILL_COLOR = [
   'Moderate', '#ff9b45',
   '#ffd977'
 ];
+const SPREAD_BAND_FILL_OPACITY = 0.62;
+const SPREAD_BAND_LINE_WIDTH = 1.4;
 const FOOTPRINT_FILL_OPACITY = [
   'interpolate', ['linear'], ['get', 'confidencePct'],
   0, 0.02,
@@ -1262,8 +1265,26 @@ const MapComponent = forwardRef(({
   }, []);
 
   // ---------- Expose actions to parent ----------
+
+  // Fetch spread bands for a point and paint them. Returns the band collection
+  // so a caller can drive a legend from the same data the map drew.
+  const showSpreadBands = useCallback(async ({ lat, lon, days = 3, date } = {}) => {
+    const payload = await getSpreadBands({ lat, lon, days, date });
+    const bands = payload?.bands || emptyFeatureCollection();
+    const src = mapRef.current?.getSource?.('spread-bands-source');
+    if (src) src.setData(bands);
+    return payload;
+  }, []);
+
+  const clearSpreadBands = useCallback(() => {
+    const src = mapRef.current?.getSource?.('spread-bands-source');
+    if (src) src.setData(emptyFeatureCollection());
+  }, []);
+
   useImperativeHandle(ref, () => ({
     refreshWildfires: fetchWildfires,
+    showSpreadBands,
+    clearSpreadBands,
     toggleNdvi,
     toggleHistoryPanel: () => setShowHistPanel(v => !v),
     runPredictionForIncident,
@@ -1301,6 +1322,7 @@ const MapComponent = forwardRef(({
       'observed-fire-cells-source',
       'wildfire-footprints-source',
       'fire-perimeters-source',
+      'spread-bands-source',
     ].forEach(id => {
       if (map.getSource(id)) map.removeSource(id);
     });
@@ -1363,6 +1385,42 @@ const MapComponent = forwardRef(({
         ],
         'line-opacity': 0.78,
       }
+    });
+
+    // Spread day bands. One source, colour driven by the feature's own `color`
+    // property, so the palette lives with the data that defines it rather than
+    // being duplicated here and drifting.
+    map.addSource('spread-bands-source', {
+      type: 'geojson',
+      data: emptyFeatureCollection(),
+    });
+    map.addLayer({
+      id: 'spread-bands-fill',
+      type: 'fill',
+      source: 'spread-bands-source',
+      paint: {
+        'fill-color': ['get', 'color'],
+        'fill-opacity': SPREAD_BAND_FILL_OPACITY,
+      },
+      layout: {
+        // Bands are disjoint so they cannot stack, but draw order still
+        // matters where simplified edges abut. Day 1 highest, so nearest-term
+        // sits on top rather than depending on feature order in the payload.
+        'fill-sort-key': ['-', 0, ['get', 'day']],
+      },
+    });
+    map.addLayer({
+      id: 'spread-bands-outline',
+      type: 'line',
+      source: 'spread-bands-source',
+      paint: {
+        // The isochron: a dated contour keeps bands separable when the fills
+        // themselves stop being distinguishable. Recommended by Copernicus
+        // GC 8:167 (2025) for exactly this reason.
+        'line-color': ['get', 'color'],
+        'line-width': SPREAD_BAND_LINE_WIDTH,
+        'line-opacity': 0.9,
+      },
     });
 
     map.addSource('wildfire-footprints-source', {

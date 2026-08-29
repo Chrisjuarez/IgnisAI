@@ -100,10 +100,47 @@ def test_threshold_controls_what_counts_as_burned():
     assert not sb.cumulative_masks(rollout, 0.50)[0].any()
 
 
-def test_collection_declares_that_bands_are_cumulative():
+def test_collection_declares_that_bands_are_disjoint():
     rollout = [_step(1, _blob(slice(28, 34), slice(28, 34)))]
 
     props = sb.spread_bands(rollout, lonlat_to_tile(LON, LAT), IDENTITY)["properties"]
 
-    assert props["cumulative"] is True
+    assert props["disjoint"] is True
     assert props["palette"] == "YlOrRd-reversed"
+
+
+def test_bands_do_not_overlap_so_colours_never_stack():
+    rollout = [_step(1, _blob(slice(28, 32), slice(28, 32))),
+               _step(2, _blob(slice(26, 34), slice(26, 34))),
+               _step(3, _blob(slice(24, 36), slice(24, 36)))]
+
+    bands = sb.arrival_bands(sb.cumulative_masks(rollout, sb.DEFAULT_BAND_THRESHOLD))
+
+    for i, a in enumerate(bands):
+        for b in bands[i + 1:]:
+            assert not (a & b).any(), "a cell may only belong to the day it first burned"
+
+
+def test_the_union_of_bands_is_still_the_cumulative_burn():
+    rollout = [_step(1, _blob(slice(28, 32), slice(28, 32))),
+               _step(2, _blob(slice(26, 34), slice(26, 34))),
+               _step(3, _blob(slice(24, 36), slice(24, 36)))]
+
+    masks = sb.cumulative_masks(rollout, sb.DEFAULT_BAND_THRESHOLD)
+    bands = sb.arrival_bands(masks)
+
+    for day in range(len(masks)):
+        union = np.zeros_like(masks[0])
+        for band in bands[: day + 1]:
+            union |= band
+        assert np.array_equal(union, masks[day]), "splitting must not change what burned"
+
+
+def test_a_cell_that_reburns_stays_with_its_first_day():
+    rollout = [_step(1, _blob(slice(28, 34), slice(28, 34))),
+               _step(2, _blob(slice(28, 34), slice(28, 34)))]
+
+    bands = sb.arrival_bands(sb.cumulative_masks(rollout, sb.DEFAULT_BAND_THRESHOLD))
+
+    assert bands[0].sum() == 36
+    assert bands[1].sum() == 0, "day 2 adds nothing new, so it draws nothing"

@@ -64,6 +64,25 @@ def cumulative_masks(rollout: Sequence[Dict[str, Any]], threshold: float) -> Lis
     return masks
 
 
+def arrival_bands(masks: Sequence[np.ndarray]) -> List[np.ndarray]:
+    """Split nested masks into disjoint bands by first-arrival day.
+
+    Cumulative masks stack: day 3 covers day 1, so drawing them as translucent
+    layers muddies every colour where they overlap. A progression map instead
+    gives each cell to the day it FIRST burned, which is both what the
+    published maps show and what lets each band keep its own colour. The union
+    of bands 1..N is still exactly cumulative mask N, so the semantics do not
+    change - only which pixels each band is responsible for drawing.
+    """
+    bands: List[np.ndarray] = []
+    claimed: Optional[np.ndarray] = None
+    for mask in masks:
+        band = mask if claimed is None else (mask & ~claimed)
+        claimed = mask if claimed is None else (claimed | mask)
+        bands.append(band)
+    return bands
+
+
 def _polygonize(mask: np.ndarray, tile, to_wgs84) -> List[Dict[str, Any]]:
     if not mask.any():
         return []
@@ -94,17 +113,19 @@ def spread_bands(
 ) -> Dict[str, Any]:
     """Nested day bands as GeoJSON, outermost (latest) day first.
 
-    Later days are emitted first so that a renderer drawing in order paints the
-    largest band underneath and the sharpest, nearest day on top without
-    needing to know the ordering rule.
+    Bands are disjoint - each cell belongs to the day it first burned - so a
+    renderer can paint them at full opacity without colours stacking. Later
+    days are still emitted first so draw order stays correct even for a
+    renderer that ignores the sort key.
     """
     masks = cumulative_masks(rollout, threshold)
+    bands = arrival_bands(masks)
 
     features: List[Dict[str, Any]] = []
-    for index in range(len(masks) - 1, -1, -1):
+    for index in range(len(bands) - 1, -1, -1):
         step = rollout[index]
         day = index + 1
-        for geometry in _polygonize(masks[index], tile, to_wgs84):
+        for geometry in _polygonize(bands[index], tile, to_wgs84):
             features.append({
                 "type": "Feature",
                 "geometry": geometry,
@@ -123,8 +144,9 @@ def spread_bands(
         "properties": {
             "threshold": float(threshold),
             "days": len(masks),
-            "cumulative": True,
+            "disjoint": True,
             "palette": "YlOrRd-reversed",
-            "note": "Bands are cumulative: each day contains every earlier day.",
+            "note": ("Each cell belongs to the day it first burned, so bands do not "
+                     "overlap; the union of days 1..N is the area burned by day N."),
         },
     }

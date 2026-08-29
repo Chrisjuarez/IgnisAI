@@ -385,4 +385,46 @@ router.get("/site-exposure", async (req, res) => {
   }
 });
 
+// GET /api/predict-fire-spread/bands?lat=&lon=&days=&band_threshold=
+//
+// Spread as dated polygons rather than a heat raster. Thin proxy: the
+// polygonisation and reprojection live in tilesvc, which owns the grid.
+router.get("/bands", async (req, res) => {
+  try {
+    if (!predictionsEnabled()) return sendPredictionsDisabled(res);
+    const { lat, lon, days, band_threshold, Tseq, thr, ignition, date } = req.query;
+    if (lat == null || lon == null) {
+      return res.status(400).json({ error: "lat and lon are required" });
+    }
+
+    const params = {
+      lat,
+      lon,
+      ...(days != null ? { days } : {}),
+      ...(band_threshold != null ? { band_threshold } : {}),
+      ...(Tseq ? { Tseq } : {}),
+      ...(thr ? { thr } : {}),
+      ...(date ? { date } : {}),
+      ignition: resolveIgnition(ignition),
+    };
+
+    // A rollout per request, so this carries the multistep budget and does not
+    // retry: a retry restarts the whole rollout and re-spends the same minutes.
+    const payload = await getJSON(
+      `${TILE_SVC}/spread_bands`,
+      params,
+      { timeoutMs: MULTISTEP_TIMEOUT_MS, retries: 0 },
+    );
+
+    return res.json(payload);
+  } catch (err) {
+    const status = err?.response?.status;
+    console.error("spread bands failed:", status || err.code, err?.response?.data ?? err.message);
+    return res.status(status === 422 ? 422 : 502).json({
+      error: "spread_bands_failed",
+      detail: err?.response?.data ?? err.message,
+    });
+  }
+});
+
 module.exports = router;
