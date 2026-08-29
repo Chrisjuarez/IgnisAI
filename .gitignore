@@ -95,3 +95,5 @@ data/tssatfire_500m_T6/
 data/mNDWS_500m_T6/
 data/perimeters/
 models/eval/
+*.tar.gz
+research/wsts/third_party/

@@ -1,5 +1,7 @@
+import gc
 import os
 import io
+import pickle
 import re
 import json
 import math
@@ -125,6 +127,13 @@ def _get_torch_device() -> torch.device:
 
 
 DEVICE = _get_torch_device()
+
+# Thread pools are sized from the host's core count, not the container's CPU
+# share, so an unconstrained default reserves an arena per host core to run one
+# 64x64 tile. The Dockerfile sets the matching OMP/MKL variables; this covers
+# torch's own pool and any deployment that does not go through that image.
+torch.set_num_threads(max(1, int(os.getenv("TORCH_NUM_THREADS", "1"))))
+
 DEFAULT_MODEL_PATH = "/app/models/convlstm_unet_v3_delta_Cd13_Cs15_H64_T6_nautilus.pt"
 MODEL_PATH = os.getenv("MODEL_PATH", DEFAULT_MODEL_PATH)
 MODEL_THRESHOLD = float(os.getenv("MODEL_THRESHOLD", "0.01"))
@@ -403,6 +412,61 @@ def _model_metadata(config_status: str = None) -> Dict[str, Any]:
     return meta
 
 
+def _torch_build_info() -> Dict[str, Any]:
+    """Which torch wheel is actually installed.
+
+    The CPU-only pin has been silently undone once already by a dependency bump
+    that reintroduced the CUDA wheel from PyPI, which costs image size and
+    resident memory on an instance that will never have a GPU. Reporting it
+    here makes the regression visible instead of invisible.
+    """
+    version = torch.__version__
+    return {
+        "version": version,
+        "build": "cpu" if version.endswith("+cpu") else "default",
+        "num_threads": torch.get_num_threads(),
+    }
+
+
+def _read_checkpoint(map_location, **kwargs):
+    """torch.load, memory-mapping the tensor storage where the format allows."""
+    try:
+        return torch.load(MODEL_PATH, map_location=map_location, mmap=True, **kwargs)
+    except (RuntimeError, ValueError):
+        # Checkpoints predating zipfile serialization cannot be mapped.
+        return torch.load(MODEL_PATH, map_location=map_location, **kwargs)
+
+
+def _load_checkpoint(map_location):
+    """Load the checkpoint, memory-mapping its tensor storage where possible.
+
+    mmap leaves the ~50 MB of weights file-backed and reclaimable instead of
+    copying them into anonymous memory. That matters on a 512 MB instance,
+    where the load peak lands while the previous container is still shutting
+    down. Legacy checkpoints predating zipfile serialization cannot be mapped,
+    so fall back to a plain read for those.
+
+    torch >= 2.6 unpickles with weights_only=True, which rejects the numpy
+    scalars train_v4.py stamps into checkpoint metadata (val_ap, val_csi, the
+    sampling statistics). Every checkpoint that trainer produces therefore
+    fails to load on the strict path, so fall back to a full unpickle. That is
+    safe here only because the entrypoint verifies MODEL_SHA256 against
+    MODEL_URL before this runs — provenance is established outside torch.
+
+    The real fix is upstream — the trainer should record metadata as plain
+    Python types, after which the strict path succeeds and this branch stops
+    being reached.
+    """
+    try:
+        return _read_checkpoint(map_location)
+    except pickle.UnpicklingError:
+        print(
+            "⚠️  Checkpoint carries non-plain metadata (numpy scalars); "
+            "loading with weights_only=False after SHA256 verification"
+        )
+        return _read_checkpoint(map_location, weights_only=False)
+
+
 def _ensure_model_metadata_loaded(load_checkpoint: bool = True) -> None:
     global _model_meta
     if _model_meta is not None:
@@ -415,8 +479,11 @@ def _ensure_model_metadata_loaded(load_checkpoint: bool = True) -> None:
     checkpoint_meta = {}
     if load_checkpoint and os.path.exists(MODEL_PATH):
         try:
-            ckpt = torch.load(MODEL_PATH, map_location="cpu")
+            # Only the non-tensor keys are wanted here, so map the file rather
+            # than reading 50 MB of weights into memory to look at its labels.
+            ckpt = _load_checkpoint(map_location="cpu")
             checkpoint_meta = _checkpoint_metadata_from_obj(ckpt)
+            del ckpt
             if checkpoint_meta:
                 _apply_model_metadata(checkpoint_meta, MODEL_PATH)
         except Exception as exc:
@@ -517,7 +584,7 @@ def _load_model_once():
         lstm_layers=MODEL_LSTM_LAYERS,
     )
 
-    ckpt = torch.load(MODEL_PATH, map_location=DEVICE)
+    ckpt = _load_checkpoint(map_location=DEVICE)
     checkpoint_meta = _checkpoint_metadata_from_obj(ckpt)
     if checkpoint_meta:
         _apply_model_metadata(checkpoint_meta, MODEL_PATH)
@@ -541,8 +608,14 @@ def _load_model_once():
                 f"unexpected={getattr(incompat, 'unexpected_keys', [])}"
             )
         model.to(DEVICE)
+        # load_state_dict has copied every tensor into the model, so the
+        # checkpoint and the cleaned view of it are now dead weight.
+        del cleaned, state
     else:
         raise RuntimeError(f"Unsupported checkpoint type: {type(ckpt)}")
+
+    del ckpt
+    gc.collect()
 
     model.eval()
     _model = model
@@ -1404,6 +1477,7 @@ def healthz():
         "modelExists": model_exists,
         "modelSha256": model_sha256,
         "device": str(DEVICE),
+        "torch": _torch_build_info(),
         "Cd": MODEL_CD,
         "Cs": MODEL_CS,
         "hidden": MODEL_HIDDEN,

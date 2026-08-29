@@ -1,0 +1,15 @@
+# PyTorch, pinned to the CPU-only build.
+#
+# Every deployment runs TORCH_DEVICE=cpu, but the default PyPI wheel drags in
+# the CUDA runtime and the nvidia-* libraries behind it — hundreds of MB of
+# image and resident memory that a 512 MB CPU instance can never use.
+#
+# The version and the index live together in this one file on purpose. They
+# were previously split across the Dockerfile and CI (which installed the CPU
+# build) and requirements.txt (which pinned a different version from PyPI), so
+# `pip install -r requirements.txt` quietly upgraded the CPU build straight
+# back to the CUDA one. Keeping them in the same file makes that undoable.
+#
+# /healthz reports torch.build; it must read "cpu".
+--index-url https://download.pytorch.org/whl/cpu
+torch==2.12.0
