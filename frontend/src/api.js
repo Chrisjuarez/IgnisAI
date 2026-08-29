@@ -146,6 +146,45 @@ export const predictFireSpreadMultistep = async ({
   return data;
 };
 
+/**
+ * Fire exposure at a fixed asset.
+ * Backend expects: /predict-fire-spread/site-exposure?site_lat=&site_lon=&ignition_lat=&ignition_lon=&days=
+ *
+ * The ignition defaults to the site itself, which answers "what if it starts
+ * here"; passing an ignition answers "what if it starts over there".
+ */
+export const getSiteExposure = async ({
+  siteLat,
+  siteLon,
+  ignitionLat,
+  ignitionLon,
+  days,
+  arrivalThreshold,
+  date,
+} = {}) => {
+  const lat = siteLat != null ? Number(siteLat) : null;
+  const lon = siteLon != null ? Number(siteLon) : null;
+  if (lat == null || Number.isNaN(lat) || lon == null || Number.isNaN(lon)) {
+    throw new Error(`getSiteExposure missing site coordinates (lat=${siteLat}, lon=${siteLon})`);
+  }
+
+  const { data } = await api.get("/predict-fire-spread/site-exposure", {
+    // One rollout per request, same cost profile as multistep.
+    timeout: MULTISTEP_TIMEOUT_MS,
+    params: {
+      site_lat: lat,
+      site_lon: lon,
+      ...(ignitionLat != null && !Number.isNaN(Number(ignitionLat)) ? { ignition_lat: Number(ignitionLat) } : {}),
+      ...(ignitionLon != null && !Number.isNaN(Number(ignitionLon)) ? { ignition_lon: Number(ignitionLon) } : {}),
+      ...(days ? { days } : {}),
+      ...(arrivalThreshold != null ? { arrival_threshold: Number(arrivalThreshold) } : {}),
+      ...(date ? { date } : {}),
+    },
+  });
+
+  return data;
+};
+
 // Keep your old name if the UI calls it:
 export const predictFireSpread = async ({ lat, lng, thr, date } = {}) =>
   predictFireSpreadVector({ lat, lng, thr, date });
