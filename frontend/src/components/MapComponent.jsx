@@ -567,8 +567,11 @@ const MapComponent = forwardRef(({
       // You can pass { predictableOnly:true } if you want to hide weak signals by default.
       const map = mapRef.current;
       const bbox = mapBoundsBbox(map);
+      // Scope the detection read to the viewport, as the footprint and
+      // perimeter reads already are. Unscoped, this returned the whole archive
+      // on every load however small the map window.
       const [firesResult, footprintsResult] = await Promise.allSettled([
-        getWildfireData(),
+        getWildfireData({ ...(bbox ? { bbox } : {}), days: 2 }),
         getWildfireFootprints({ ...(bbox ? { bbox } : {}), days: 2 }),
       ]);
 

@@ -82,6 +82,13 @@ if (require.main === module) {
 
   app.listen(PORT, '0.0.0.0', () => {
     console.log(`🚀 Backend listening on :${PORT}`);
+    // FIRMS ingest runs on a timer, not on the request path. Started only when
+    // the server runs for real so tests do not reach for the network.
+    const fireData = require('./routes/fireData');
+    if (typeof fireData.startIngest === 'function') {
+      fireData.refreshDetections({ reason: 'startup' });
+      fireData.startIngest();
+    }
   });
 
   const tryConnect = async (delayMs = 3000) => {
