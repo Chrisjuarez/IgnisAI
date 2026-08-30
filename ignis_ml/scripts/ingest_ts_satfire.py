@@ -48,7 +48,7 @@ try:
     from services.tilesvc.grid import (  # type: ignore
         SIZE,            # 64 px per side
         TILE_M,          # 32_000 m
-        lonlat_to_tile,
+        snapped_tile,
         tile_affine,
         tile_bounds_lonlat,
     )
@@ -163,8 +163,10 @@ class TSSatFireReader:
 def _tiles_covering(fire: FireStack) -> List[Tuple[int, int]]:
     """Integer (ix, iy) EPSG:5070 tile indices whose 32 km cells the fire spans.
 
-    Uses the live grid's lonlat_to_tile on the fire's lon/lat bounds so tile
-    keys land on exactly the integer grid tilesvc serves.
+    Uses snapped_tile, not lonlat_to_tile: these are addresses on the fixed
+    32 km lattice, and walking neighbours only means anything on that lattice.
+    lonlat_to_tile returns a window centred on the fire, whose ix/iy is just
+    whichever cell its corner happens to land in.
     """
     if not _HAVE_GRID:
         raise RuntimeError(f"services.tilesvc.grid unavailable: {_GRID_IMPORT_ERR}")
@@ -172,7 +174,7 @@ def _tiles_covering(fire: FireStack) -> List[Tuple[int, int]]:
     # Walk the fire's lon/lat extent; for a scaffold we seed from ignition and
     # let the real reader provide bounds. Here we just return the ignition tile
     # plus its 8 neighbors so large fires get full coverage.
-    base = lonlat_to_tile(lon0, lat0)
+    base = snapped_tile(lon0, lat0)
     return [(base.ix + dx, base.iy + dy) for dx in (-1, 0, 1) for dy in (-1, 0, 1)]
 
 

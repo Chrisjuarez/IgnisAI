@@ -5,7 +5,14 @@ it is indistinguishable from a flaw in the model.
 """
 import math
 
-from tools.audit_direction import angular_difference, growth_origin, spread_bearing
+import pytest
+
+from tools.audit_direction import (
+    angular_difference,
+    growth_origin,
+    mean_centroid,
+    spread_bearing,
+)
 
 
 def square(lon: float, lat: float, half: float = 0.01):
@@ -76,3 +83,47 @@ def test_alignment_sign_matches_the_verdict_language():
     # An upwind forecast must produce a negative cosine; this is the number the
     # whole audit reduces to.
     assert math.cos(math.radians(angular_difference(95.0, 224.0))) < 0
+
+
+def annulus(lon: float, lat: float, outer: float, inner: float, shift: float = 0.0):
+    """A ring band: the fire has grown past the earlier band, leaving a hole."""
+    def ring(half, dx=0.0):
+        return [[lon - half + dx, lat - half], [lon + half + dx, lat - half],
+                [lon + half + dx, lat + half], [lon - half + dx, lat + half],
+                [lon - half + dx, lat - half]]
+    return {
+        "geometry": {"type": "Polygon", "coordinates": [ring(outer, shift), ring(inner)]},
+        "properties": {"day": 2},
+    }
+
+
+def test_annulus_centroid_follows_the_growth_not_the_hole():
+    # Outer boundary pushed east; the hole stays put. The band's actual mass is
+    # therefore east, and dropping the hole would report the donut's middle.
+    band = annulus(-118.5, 34.05, outer=0.04, inner=0.02, shift=0.01)
+
+    lon, _ = mean_centroid([band])
+
+    assert lon > -118.5, "hole-aware centroid must follow the band, not sit at the donut centre"
+
+
+def test_bands_are_area_weighted_so_a_sliver_cannot_outvote_the_front():
+    main = square(-118.40, 34.05, half=0.05)     # large, east
+    sliver = square(-118.90, 34.05, half=0.001)  # tiny, far west
+
+    lon, _ = mean_centroid([main, sliver])
+
+    assert lon == pytest.approx(-118.40, abs=0.01), "a sliver must not drag the centroid"
+
+
+def test_a_pure_downwind_band_scores_near_plus_one():
+    # The calibration the deterministic baseline exists to provide: if a band
+    # laid down straight downwind does not score ~+1, the metric is wrong
+    # before any model is judged by it.
+    ignition = (-118.5, 34.05)
+    s = scene(observed_at=ignition, forecast_at=(-118.60, 33.95))   # toward SW
+
+    bearing = spread_bearing(s, ignition)
+    wind_toward = 225.0
+
+    assert math.cos(math.radians(angular_difference(bearing, wind_toward))) > 0.95

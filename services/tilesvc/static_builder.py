@@ -53,16 +53,19 @@ def _coerce_tile(tile: Union[TileID, Tuple[int, int], Dict[str, Any]]) -> TileID
     if isinstance(tile, TileID):
         return tile
     if isinstance(tile, tuple) and len(tile) == 2:
-        return TileID(int(tile[0]), int(tile[1]))
+        return TileID.from_grid(int(tile[0]), int(tile[1]))
     if isinstance(tile, dict) and "ix" in tile and "iy" in tile:
-        return TileID(int(tile["ix"]), int(tile["iy"]))
+        return TileID.from_grid(int(tile["ix"]), int(tile["iy"]))
     raise TypeError(f"Unsupported tile type: {type(tile)}")
 
 
 def _static_npz_path(tile: TileID, cache_dir: str) -> Path:
     d = Path(cache_dir)
     d.mkdir(parents=True, exist_ok=True)
-    return d / f"static_ix{tile.ix}_iy{tile.iy}.npz"
+    # Keyed on the window origin, not on ix/iy. Prediction windows are centred
+    # on the fire, so many distinct windows fall inside one grid cell and share
+    # an ix/iy - keying on that would serve one fire's statics to another.
+    return d / f"static_{tile.key}.npz"
 
 
 def _fetch_dem_tile(tile: TileID) -> np.ndarray:

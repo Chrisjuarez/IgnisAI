@@ -286,11 +286,22 @@ def main(argv: Optional[List[str]] = None) -> int:
     stat = np.asarray(stat, dtype=np.float32)
     print(f"  x_dyn {x_dyn.shape}  x_stat {stat.shape}")
 
-    # Wind read from the RAW builder output, which is already in m/s.
-    u_ms = float(x_dyn[:, 1].mean())
-    v_ms = float(x_dyn[:, 2].mean())
-    print(f"  mean wind: u={u_ms:+.2f} v={v_ms:+.2f} m/s -> blowing toward "
+    # Wind read from the RAW builder output, which is already in m/s, and from
+    # the LAST frame rather than averaged over the sequence. The forecast is
+    # driven by conditions at prediction time; a window that ends in a wind
+    # event is mostly the calm days before it, so the average describes a
+    # different fire. For Palisades at T=6 the average reads 1.50 m/s toward
+    # 248 deg against 6.93 m/s toward 224 deg in the frame that actually drives
+    # the step - and this vector is the reference every alignment below is
+    # measured against, so averaging it made those numbers wrong.
+    u_ms = float(x_dyn[-1, 1].mean())
+    v_ms = float(x_dyn[-1, 2].mean())
+    u_window = float(x_dyn[:, 1].mean())
+    v_window = float(x_dyn[:, 2].mean())
+    print(f"  driving wind: u={u_ms:+.2f} v={v_ms:+.2f} m/s -> blowing toward "
           f"{compass(u_ms, v_ms)}")
+    print(f"  (window mean: u={u_window:+.2f} v={v_window:+.2f} -> "
+          f"{compass(u_window, v_window)}, not used)")
     if max(abs(u_ms), abs(v_ms)) > 60:
         print("  ⚠ implausible wind magnitude — the builder output is probably "
               "already normalized, or channel order is wrong")

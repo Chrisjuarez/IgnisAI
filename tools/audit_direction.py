@@ -24,6 +24,8 @@ from __future__ import annotations
 import argparse
 import json
 import math
+
+from shapely.geometry import shape
 import sys
 import urllib.parse
 import urllib.request
@@ -65,28 +67,39 @@ def polygon_centroid(coords: List[List[float]]) -> Optional[Tuple[float, float]]
     return cx / (3.0 * area), cy / (3.0 * area)
 
 
-def feature_centroids(features: List[Dict[str, Any]]) -> List[Tuple[float, float]]:
-    out = []
-    for feature in features:
-        geometry = feature.get("geometry") or {}
-        rings = []
-        if geometry.get("type") == "Polygon":
-            rings = geometry["coordinates"][:1]
-        elif geometry.get("type") == "MultiPolygon":
-            rings = [poly[0] for poly in geometry["coordinates"]]
-        for ring in rings:
-            centroid = polygon_centroid([(p[0], p[1]) for p in ring])
-            if centroid:
-                out.append(centroid)
-    return out
-
-
 def mean_centroid(features: List[Dict[str, Any]]) -> Optional[Tuple[float, float]]:
-    centroids = feature_centroids(features)
-    if not centroids:
+    """Area-weighted centroid of a day's bands, holes included.
+
+    Both details decide the answer. Arrival bands after day 1 are annuli - the
+    fire has grown past the earlier band, so the earlier band is a hole in this
+    one - and the centroid of an annulus's OUTER RING sits at the middle of the
+    donut whatever direction the fire is actually running. Dropping the holes
+    therefore reported a fire that had barely moved: the deterministic downwind
+    baseline, which by construction is pure downwind, measured 0.6 km of
+    displacement where it had advanced 8 km, and scored -0.11 instead of +1.
+
+    Averaging polygons unweighted has the same flavour of error, letting a
+    sliver of noise count for as much as the main front.
+    """
+    total = 0.0
+    cx = cy = 0.0
+    for feature in features:
+        geometry = feature.get("geometry")
+        if not geometry:
+            continue
+        polygon = shape(geometry)
+        if polygon.is_empty or not polygon.is_valid:
+            polygon = polygon.buffer(0)
+        area = polygon.area
+        if area <= 0:
+            continue
+        point = polygon.centroid
+        cx += point.x * area
+        cy += point.y * area
+        total += area
+    if total <= 0:
         return None
-    return (sum(c[0] for c in centroids) / len(centroids),
-            sum(c[1] for c in centroids) / len(centroids))
+    return cx / total, cy / total
 
 
 def growth_origin(scene: Dict[str, Any], ignition: Tuple[float, float]) -> Tuple[float, float]:
