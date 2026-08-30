@@ -25,12 +25,14 @@ from .grid import (
     tile_bounds_albers,
     lonlat_to_xy_m,
     PIX,
+    SIZE,
 )
 from .dynamic_builder import DEFAULT_DYNAMIC_ORDER, build_dynamic_for_tile, fetch_weather_grids, weather_quality_status
 from .static_builder import CHANNEL_ORDER
 from .cache_health import firms_snapshot_status, noaa_cycle_status
-from .wind_summary import wind_from_sequence
+from .wind_summary import wind_from_sequence, wind_vector_from_sequence
 from .validation_reports import list_reports, report_dir
+from .baseline_spread import baseline_rollout
 from .spread_bands import DEFAULT_BAND_THRESHOLD, spread_scene
 from .calibration import calibrate_probability, calibration_status
 from .ml_runtime import file_sha256, runtime_imports, source_version_info
@@ -1889,10 +1891,24 @@ def predict_raster_json_raw(lat: float = Query(...), lon: float = Query(...), Ts
     }
 
 
+# Naming these is what makes a wrong ?model= a 422 instead of a silent fall
+# through to the learned model - the failure that made the first baseline
+# comparison unfalsifiable.
+SUPPORTED_FORECAST_MODELS = frozenset({"ignis", "downwind"})
+
+
 @app.get("/predict_multistep")
 def predict_multistep(
     lat: float = Query(...),
     lon: float = Query(...),
+    model: str = Query(
+        "ignis",
+        description=(
+            "'ignis' runs the learned model. 'downwind' runs the deterministic "
+            "baseline instead - the bar the learned model has to clear. Both "
+            "return the same shape so they can be compared directly."
+        ),
+    ),
     Tseq: int = Query(MODEL_TSEQ),
     steps: int = Query(6),
     step_hours: int = Query(MODEL_STEP_HOURS),
@@ -1921,35 +1937,59 @@ def predict_multistep(
     debug_dump = "dump" in debug_modes
 
     normalized_steps = max(1, int(steps))
+    resolved_model = str(model).strip().lower() or "ignis"
+    if resolved_model not in SUPPORTED_FORECAST_MODELS:
+        raise HTTPException(
+            status_code=422,
+            detail=f"unknown model {resolved_model!r}; expected one of {sorted(SUPPORTED_FORECAST_MODELS)}",
+        )
+    baseline_only = resolved_model == "downwind"
     debug_sink: Dict[str, Any] = {}
 
-    if debug_solid:
-        # Step-1 plumbing sanity test: bypass the model entirely and produce a
-        # constant probability field on the same input shape / bounds the real
-        # pipeline would use. If the overlay renders as a fully-filled
-        # translucent rectangle aligned with the crop bounds, the bounds and
-        # coordinates pipeline is correct and the bug lives in the probability
-        # field (model / inputs / AR feedback). If the overlay is not a clean
-        # rectangle (e.g. a vertical strip), the bug lives in the
-        # bounds/coordinates math.
+    if debug_solid or baseline_only:
+        # Neither of these runs the network, but both need everything that
+        # feeds it - bounds, statics, the observed fire. Sharing the input
+        # preparation is what makes the baseline a like-for-like control rather
+        # than a second pipeline, and stops it paying for an inference it would
+        # only discard.
         dyn, stat, bounds, base_time, static_summary = _prepare_prediction_inputs_with_summary(
             lat, lon, Tseq, ignition=ignition, ref_time=ref_time, hours_step=step_hours,
         )
         prob_shape = tuple(int(v) for v in dyn.shape[-2:])
         crop_window = _build_crop_window(prob_shape, bounds, lat, lon, crop_frac)
-        rollout = [
-            {
-                "index": i,
-                "lead_hours": (i + 1) * int(step_hours),
-                "label": _step_label((i + 1) * int(step_hours)),
-                "prob": np.full(prob_shape, 0.5, dtype=np.float32),
-            }
-            for i in range(normalized_steps)
-        ]
         debug_sink["dyn"] = dyn
         debug_sink["stat"] = stat
         debug_sink["base_time"] = base_time
         debug_sink["static_summary"] = static_summary
+
+        if debug_solid:
+            # Step-1 plumbing sanity test: bypass the model entirely and produce
+            # a constant probability field on the same input shape / bounds the
+            # real pipeline would use. If the overlay renders as a fully-filled
+            # translucent rectangle aligned with the crop bounds, the bounds and
+            # coordinates pipeline is correct and the bug lives in the
+            # probability field (model / inputs / AR feedback). If the overlay is
+            # not a clean rectangle (e.g. a vertical strip), the bug lives in the
+            # bounds/coordinates math.
+            rollout = [
+                {
+                    "index": i,
+                    "lead_hours": (i + 1) * int(step_hours),
+                    "label": _step_label((i + 1) * int(step_hours)),
+                    "prob": np.full(prob_shape, 0.5, dtype=np.float32),
+                }
+                for i in range(normalized_steps)
+            ]
+        else:
+            u_ms, v_ms, _ = wind_vector_from_sequence(dyn, MODEL_DYNAMIC_ORDER) or (0.0, 0.0, None)
+            rollout = baseline_rollout(
+                _observed_fire_from_dyn(dyn),
+                u_ms=u_ms,
+                v_ms=v_ms,
+                steps=normalized_steps,
+                step_hours=step_hours,
+                ignition_rc=(int(SIZE // 2), int(SIZE // 2)),
+            )
     else:
         bounds, crop_window, rollout = _rollout_multistep_predictions(
             lat,
@@ -1967,6 +2007,7 @@ def predict_multistep(
     payload_steps = []
     cropped_bounds = crop_window["bounds"]
     observed_fire_full = _observed_fire_from_dyn(debug_sink["dyn"]) if debug_sink.get("dyn") is not None else None
+
     display_mask_full, display_mask_summary = display_mask_from_static(
         debug_sink.get("stat"),
         list(MODEL_STATIC_ORDER),
@@ -2089,6 +2130,11 @@ def predict_multistep(
             ignition_lon=lon,
             ignition_lat=lat,
         ),
+        # Which forecaster produced these steps. An unrecognised ?model= value
+        # used to fall through to the learned model silently, so a baseline
+        # comparison could report two runs of the same thing and look like the
+        # baseline had simply matched it. Echoed here so that is visible.
+        "model": resolved_model,
         "bounds": list(map(float, cropped_bounds)),
         "coordinates": crop_window["coordinates"],
         "threshold": threshold,
