@@ -62,6 +62,11 @@ MOISTURE_STEP_100H = 0.04
 #: Below this the fuel is at its moisture of extinction and the fire is out.
 ETA_M_EXTINCT = 1e-9
 
+#: Effective wind speed limit, ft/min per unit reaction intensity. Rothermel's
+#: wind factor is unbounded; Andrews (2013) showed it must be capped near
+#: 0.9 * I_R or the model returns impossible spread rates in strong wind.
+EFFECTIVE_WIND_LIMIT_COEFF = 0.9
+
 #: Grass is fully cured at or below 30% herbaceous moisture and fully green at
 #: 120%, transferring linearly between (Scott & Burgan 2005).
 CURED_AT = 0.30
@@ -199,7 +204,17 @@ def spread_rate_m_per_h(
     c = 7.47 * math.exp(-0.133 * sav_bar ** 0.55)
     b = 0.02526 * sav_bar ** 0.54
     e = 0.715 * math.exp(-3.59e-4 * sav_bar)
-    phi_w = c * (wind_ft_min ** b) * (beta_ratio ** -e) if wind_ft_min > 0 and beta_ratio > 0 else 0.0
+
+    # Effective wind speed limit (Andrews 2013; Andrews 2018 sec. 5). Rothermel's
+    # wind factor has no upper bound, but the model was fitted well below the
+    # winds a Santa Ana produces and runs away above roughly 0.9 * I_R. Left
+    # unbounded it returns spread rates that are physically impossible - which
+    # is exactly where this implementation was overshooting.
+    wind_limit_ft_min = EFFECTIVE_WIND_LIMIT_COEFF * reaction_intensity
+    wind_capped = min(wind_ft_min, wind_limit_ft_min)
+    wind_limited = wind_ft_min > wind_limit_ft_min
+
+    phi_w = c * (wind_capped ** b) * (beta_ratio ** -e) if wind_capped > 0 and beta_ratio > 0 else 0.0
     phi_s = 5.275 * beta ** -0.3 * max(0.0, slope_fraction) ** 2 if beta > 0 else 0.0
 
     # --- heat sink -----------------------------------------------------------

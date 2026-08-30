@@ -140,3 +140,29 @@ def test_grid_evaluates_each_fuel_and_zeroes_non_burnable():
     assert out[0, 2] == 0.0 and out[1, 2] == 0.0, "non-burnable cells must not spread"
     assert out[0, 0] > 0 and out[1, 0] > 0
     assert out[0, 0] > out[1, 0], "grass should outrun litter in the grid path too"
+
+
+def test_characteristic_sav_matches_published_fuel_model_values():
+    """The fuel bed maths must reproduce Scott & Burgan's published SAV.
+
+    Independent of weather, so it isolates a mis-transcribed load or depth from
+    an error in the spread equations. Three models hitting their published
+    values is the strongest check available without a reference implementation.
+    """
+    from tools.validate_rothermel import characteristic_sav
+
+    assert characteristic_sav(101) == pytest.approx(2054, rel=0.02)   # GR1
+    assert characteristic_sav(102) == pytest.approx(1820, rel=0.02)   # GR2
+    assert characteristic_sav(142) == pytest.approx(1672, rel=0.02)   # SH2
+
+
+def test_effective_wind_limit_stops_runaway_spread():
+    """Rothermel's wind factor is unbounded; Andrews (2013) caps it near 0.9*I_R.
+
+    Without the cap a Santa Ana produces spread rates that are not physical.
+    Doubling an already-strong wind must not double the rate.
+    """
+    strong = ros(102, midflame_wind_ms=8.0)
+    stronger = ros(102, midflame_wind_ms=16.0)
+
+    assert stronger < strong * 1.5, "wind factor is running away past the limit"
