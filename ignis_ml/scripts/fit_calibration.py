@@ -296,9 +296,15 @@ def collect_pairs_from_tiles(ckpt_path: Path, tiles: Path, *, seq_len: Optional[
                      ["fire_t", "u", "v", "gust", "tempC", "q", "precip"])
     stat_order = list(ck.get("stat_order") or [])
 
+    # Match the checkpoint's own training setup, or the fit describes a
+    # different model: derived channels make up the difference between the 7
+    # stored dynamics and the Cd the network expects, and a delta checkpoint
+    # predicts NEW growth, so its label is y_delta rather than the full mask.
+    target_mode = str(ck.get("target_mode") or "mask")
     dataset = NpzTileDataset(
         tiles, augment=False, expected_dyn_order=dyn_order[:7],
         expected_stat_order=stat_order or None, seq_len=T,
+        derived_features_enable=True, target_mode=target_mode,
     )
     total = len(dataset)
     if not total:
@@ -317,7 +323,8 @@ def collect_pairs_from_tiles(ckpt_path: Path, tiles: Path, *, seq_len: Optional[
     probs: List[np.ndarray] = []
     labels: List[np.ndarray] = []
     with torch.no_grad():
-        for x_dyn, x_stat, y in DataLoader(subset, batch_size=8):
+        for batch in DataLoader(subset, batch_size=8):
+            x_dyn, x_stat, y = batch[0], batch[1], batch[2]
             prob = torch.sigmoid(model(x_dyn.float(), x_stat.float()))[:, 0].numpy()
             label = y[:, 0].numpy()
             if EXCLUDE_PRIOR_FIRE:
@@ -336,6 +343,7 @@ def collect_pairs_from_tiles(ckpt_path: Path, tiles: Path, *, seq_len: Optional[
         "tiles_total": total,
         "holdout_fraction": holdout,
         "seq_len": T,
+        "target_mode": target_mode,
         "excluded_prior_fire": EXCLUDE_PRIOR_FIRE,
         "model_sha256": ck.get("sha256"),
     }
