@@ -15,7 +15,7 @@ the field is named `toward_deg` rather than left to be assumed.
 from __future__ import annotations
 
 import math
-from typing import Any, Dict, Optional, Sequence
+from typing import Any, Dict, Optional, Sequence, Tuple
 
 COMPASS_POINTS = (
     "N", "NNE", "NE", "ENE", "E", "ESE", "SE", "SSE",
@@ -63,9 +63,53 @@ def wind_summary(u_ms: Optional[float], v_ms: Optional[float],
 
 
 def wind_from_channels(channels: Dict[str, Any]) -> Dict[str, Any]:
-    """Pull the mean wind out of the per-channel stats the response already builds."""
+    """Wind from per-channel stats.
+
+    Only correct when those stats already describe a single time step. The
+    channel summary averages over the whole input sequence, and a sequence that
+    ends in a wind event is mostly the calm days before it: for the Palisades
+    Santa Ana this reported 1.5 m/s where the driving hour was 6.9 m/s, a
+    factor of four, which made every alignment measurement wrong. Prefer
+    wind_from_sequence.
+    """
     def mean_of(name: str) -> Optional[float]:
         entry = channels.get(name)
         return entry.get("mean") if isinstance(entry, dict) else None
 
     return wind_summary(mean_of("u"), mean_of("v"), mean_of("gust"))
+
+
+def wind_vector_from_sequence(
+    dyn, dynamic_order: Sequence[str]
+) -> Optional[Tuple[float, float, Optional[float]]]:
+    """Mean (u, v, gust) over the most recent frame of a [T, C, H, W] sequence.
+
+    The forecast is driven by conditions at the prediction time, not by the
+    average of the history window, so the last frame is the one to report, the
+    one to steer a baseline with, and the one to compare a predicted direction
+    against. Returns None when the sequence carries no wind channels.
+    """
+    import numpy as np
+
+    order = list(dynamic_order or [])
+    if "u" not in order or "v" not in order:
+        return None
+
+    latest = np.asarray(dyn)[-1]
+    gust = float(latest[order.index("gust")].mean()) if "gust" in order else None
+    return (
+        float(latest[order.index("u")].mean()),
+        float(latest[order.index("v")].mean()),
+        gust,
+    )
+
+
+def wind_from_sequence(dyn, dynamic_order: Sequence[str]) -> Dict[str, Any]:
+    """Reportable wind for the frame that drives the forecast."""
+    try:
+        vector = wind_vector_from_sequence(dyn, dynamic_order)
+    except Exception:
+        return {"available": False, "reason": "wind_unreadable"}
+    if vector is None:
+        return {"available": False, "reason": "wind_channels_missing"}
+    return wind_summary(*vector)
