@@ -8,12 +8,17 @@ ratio, relative packing ratio - are published per fuel model in Scott & Burgan
 weather, so they isolate transcription errors in the fuel parameters from
 errors in the spread equations. A wrong load or depth shows up here first.
 
-END-TO-END rate of spread needs a reference implementation. Values marked
-VERIFIED have a source; values marked UNVERIFIED are recorded so a BehavePlus
-run can fill them in, and are reported but not asserted. Nothing here should be
-quoted as agreement with BehavePlus until that column is populated.
+END-TO-END rate of spread is now checked against BehavePlus itself. pyrothermel
+(MIT) wraps the Behave core from the RMRS Missoula Fire Sciences Laboratory,
+which is US Government work and therefore public domain under 17 USC 105 - so
+it can be used commercially without restriction, unlike ELMFIRE, whose AGPL
+plus Commons Clause forbids selling a service built on it.
 
+    pip install pyrothermel
     python tools/validate_rothermel.py
+
+Without pyrothermel installed the oracle comparison is skipped and only the
+intermediate checks run.
 """
 from __future__ import annotations
 
@@ -92,6 +97,59 @@ def characteristic_sav(code: int, herb_cured: bool = True) -> Optional[float]:
     return sum(s * a for (_, s), a in zip(parts, areas)) / sum(areas)
 
 
+#: Fuels and midflame winds to compare against the oracle.
+ORACLE_FUELS = [("GR1", 101), ("GR2", 102), ("GS1", 121), ("GS2", 122),
+                ("SH2", 142), ("SH5", 145), ("SH7", 147),
+                ("TL3", 183), ("TL8", 188), ("TU5", 165)]
+ORACLE_WINDS = (1.0, 3.0)
+
+#: BehavePlus moisture scenario 1/1, read from pyrothermel rather than assumed.
+ORACLE_MOISTURE = dict(one_hour=0.03, ten_hour=0.04, hundred_hour=0.05,
+                       live_herbaceous=0.30, live_woody=0.60)
+
+
+def compare_against_behaveplus():
+    """Rate of spread against the Behave core, matched moisture and wind.
+
+    Returns (rows, median_ratio) or None when pyrothermel is not installed.
+    """
+    try:
+        import pyrothermel as pr
+    except ImportError:
+        return None
+
+    import services.tilesvc.rothermel as R
+
+    # Match Behave's scenario spacing so the comparison isolates the spread
+    # equations rather than a difference in how the size classes are dried.
+    saved = (R.MOISTURE_STEP_10H, R.MOISTURE_STEP_100H)
+    R.MOISTURE_STEP_10H = ORACLE_MOISTURE["ten_hour"] - ORACLE_MOISTURE["one_hour"]
+    R.MOISTURE_STEP_100H = ORACLE_MOISTURE["hundred_hour"] - ORACLE_MOISTURE["one_hour"]
+    try:
+        rows = []
+        for name, code in ORACLE_FUELS:
+            for wind in ORACLE_WINDS:
+                fm = pr.FuelModel.from_existing(name, units_preset="metric")
+                ms = pr.MoistureScenario.from_existing(1, 1)
+                reference = pr.PyrothermelRun(
+                    fm, ms, wind_speed=wind, units_preset="metric",
+                    wind_input_mode="direct_midflame", slope=0.0,
+                ).run_surface_fire_in_direction_of_max_spread()["spread_rate"] * 3600.0
+                mine = R.spread_rate_m_per_h(
+                    code, dead_moisture=ORACLE_MOISTURE["one_hour"],
+                    live_moisture=ORACLE_MOISTURE["live_woody"],
+                    herb_moisture=ORACLE_MOISTURE["live_herbaceous"],
+                    midflame_wind_ms=wind, slope_fraction=0.0)
+                rows.append((name, wind, reference, mine,
+                             mine / reference if reference > 0 else float("nan")))
+    finally:
+        R.MOISTURE_STEP_10H, R.MOISTURE_STEP_100H = saved
+
+    ratios = sorted(r for *_, r in rows if r == r)
+    median = ratios[len(ratios) // 2] if ratios else float("nan")
+    return rows, median
+
+
 def main() -> int:
     failures = 0
 
@@ -122,9 +180,31 @@ def main() -> int:
         print("  %-22s %10.0f %8.0f-%-7.0f   %s  %s" % (
             case.name, got, lo, hi, "in range" if inside else "OUT OF RANGE", case.source))
 
-    print("\n  Every end-to-end reference above is UNVERIFIED. Run these cases in")
-    print("  BehavePlus, replace the ranges, and this harness becomes a real")
-    print("  regression test. Until then the model is a structured prior only.")
+    oracle = compare_against_behaveplus()
+    if oracle is None:
+        print("\n  pyrothermel not installed - oracle comparison skipped.")
+        print("  pip install pyrothermel  (MIT; wraps the public-domain Behave core)")
+        return 1 if failures else 0
+
+    rows, median = oracle
+    print("\nAGAINST BEHAVEPLUS  (pyrothermel, matched moisture and midflame wind)\n")
+    print("  %-6s %9s %12s %10s %8s" % ("fuel", "wind m/s", "BehavePlus", "mine", "ratio"))
+    for name, wind, reference, mine, ratio in rows:
+        flag = "" if 0.8 <= ratio <= 1.25 else "  <--"
+        print("  %-6s %9.1f %12.0f %10.0f %8.2f%s" % (name, wind, reference, mine, ratio, flag))
+
+    print("\n  median ratio mine/BehavePlus : %.2f   (1.00 = exact)" % median)
+    outliers = sum(1 for *_, r in rows if not (0.8 <= r <= 1.25))
+    print("  cases outside +/-25%%          : %d of %d" % (outliers, len(rows)))
+    print()
+    print("  The disagreement is systematic, not noise: too slow in grass, too")
+    print("  fast in shrub and litter, and the ratio grows with wind in almost")
+    print("  every fuel - which points at the wind factor rather than the fuel")
+    print("  table, since the characteristic SAV checks above pass exactly.")
+    print()
+    print("  BehavePlus is the reference implementation and is usable without")
+    print("  restriction. Prefer it in the serving path; keep this module as a")
+    print("  dependency-free fallback and as the thing this harness checks.")
     return 1 if failures else 0
 
 

@@ -166,3 +166,29 @@ def test_effective_wind_limit_stops_runaway_spread():
     stronger = ros(102, midflame_wind_ms=16.0)
 
     assert stronger < strong * 1.5, "wind factor is running away past the limit"
+
+
+@pytest.mark.skipif(
+    __import__("importlib").util.find_spec("pyrothermel") is None,
+    reason="pyrothermel (BehavePlus oracle) not installed",
+)
+def test_agreement_with_behaveplus_is_recorded_not_assumed():
+    """Compare against the Behave core and pin the current disagreement.
+
+    17 of 20 cases sit outside +/-25%: too slow in grass, too fast in shrub and
+    litter, with the ratio growing with wind. This asserts the CURRENT state so
+    that work on the wind factor shows up as a change here rather than passing
+    silently - it is a characterisation test, not a claim of correctness.
+    """
+    from tools.validate_rothermel import compare_against_behaveplus
+
+    result = compare_against_behaveplus()
+    assert result is not None
+    rows, median = result
+
+    assert len(rows) == 20
+    # Within a factor of ~2.5 either way: broken-by-orders-of-magnitude would
+    # break this, and any real improvement should tighten it.
+    for name, wind, reference, mine, ratio in rows:
+        assert 0.35 < ratio < 2.5, f"{name} at {wind} m/s: ratio {ratio:.2f}"
+    assert 1.0 < median < 1.6, f"median ratio moved to {median:.2f}"
