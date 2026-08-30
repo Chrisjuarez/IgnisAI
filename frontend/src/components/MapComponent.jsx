@@ -63,6 +63,7 @@ const FOOTPRINT_FILL_COLOR = [
   '#ffd977'
 ];
 const SPREAD_BAND_FILL_OPACITY = 0.62;
+const SPREAD_OBSERVED_FILL_OPACITY = 0.55;
 const SPREAD_BAND_LINE_WIDTH = 1.4;
 const FOOTPRINT_FILL_OPACITY = [
   'interpolate', ['linear'], ['get', 'confidencePct'],
@@ -1270,15 +1271,28 @@ const MapComponent = forwardRef(({
   // so a caller can drive a legend from the same data the map drew.
   const showSpreadBands = useCallback(async ({ lat, lon, days = 3, date } = {}) => {
     const payload = await getSpreadBands({ lat, lon, days, date });
-    const bands = payload?.bands || emptyFeatureCollection();
-    const src = mapRef.current?.getSource?.('spread-bands-source');
-    if (src) src.setData(bands);
+    const map = mapRef.current;
+    const paint = (sourceId, data) => {
+      const src = map?.getSource?.(sourceId);
+      if (src) src.setData(data || emptyFeatureCollection());
+    };
+
+    // Three layers, three different kinds of claim: an input, an observation,
+    // and a model output.
+    paint('spread-observed-source', payload?.observed);
+    paint('spread-bands-source', payload?.forecast);
+    paint('spread-ignition-source', payload?.ignition
+      ? { type: 'FeatureCollection', features: [payload.ignition] }
+      : null);
+
     return payload;
   }, []);
 
   const clearSpreadBands = useCallback(() => {
-    const src = mapRef.current?.getSource?.('spread-bands-source');
-    if (src) src.setData(emptyFeatureCollection());
+    ['spread-observed-source', 'spread-bands-source', 'spread-ignition-source'].forEach((id) => {
+      const src = mapRef.current?.getSource?.(id);
+      if (src) src.setData(emptyFeatureCollection());
+    });
   }, []);
 
   useImperativeHandle(ref, () => ({
@@ -1323,6 +1337,8 @@ const MapComponent = forwardRef(({
       'wildfire-footprints-source',
       'fire-perimeters-source',
       'spread-bands-source',
+      'spread-observed-source',
+      'spread-ignition-source',
     ].forEach(id => {
       if (map.getSource(id)) map.removeSource(id);
     });
@@ -1390,6 +1406,29 @@ const MapComponent = forwardRef(({
     // Spread day bands. One source, colour driven by the feature's own `color`
     // property, so the palette lives with the data that defines it rather than
     // being duplicated here and drifting.
+    // Already-burned footprint. Drawn beneath the forecast and in a neutral
+    // colour: it is observation, not model output, and a viewer deciding
+    // anything needs to know which part of the shape is which.
+    map.addSource('spread-observed-source', {
+      type: 'geojson',
+      data: emptyFeatureCollection(),
+    });
+    map.addLayer({
+      id: 'spread-observed-fill',
+      type: 'fill',
+      source: 'spread-observed-source',
+      paint: {
+        'fill-color': ['get', 'color'],
+        'fill-opacity': SPREAD_OBSERVED_FILL_OPACITY,
+      },
+    });
+    map.addLayer({
+      id: 'spread-observed-outline',
+      type: 'line',
+      source: 'spread-observed-source',
+      paint: { 'line-color': ['get', 'color'], 'line-width': 1.2, 'line-opacity': 0.85 },
+    });
+
     map.addSource('spread-bands-source', {
       type: 'geojson',
       data: emptyFeatureCollection(),
@@ -1420,6 +1459,24 @@ const MapComponent = forwardRef(({
         'line-color': ['get', 'color'],
         'line-width': SPREAD_BAND_LINE_WIDTH,
         'line-opacity': 0.9,
+      },
+    });
+
+    // The seed point. Drawn last so it stays visible over both the burned
+    // footprint and the forecast.
+    map.addSource('spread-ignition-source', {
+      type: 'geojson',
+      data: emptyFeatureCollection(),
+    });
+    map.addLayer({
+      id: 'spread-ignition-point',
+      type: 'circle',
+      source: 'spread-ignition-source',
+      paint: {
+        'circle-radius': 6,
+        'circle-color': ['get', 'color'],
+        'circle-stroke-width': 2.5,
+        'circle-stroke-color': '#ffffff',
       },
     });
 
