@@ -2135,6 +2135,13 @@ def predict_multistep(
         # comparison could report two runs of the same thing and look like the
         # baseline had simply matched it. Echoed here so that is visible.
         "model": resolved_model,
+        # Whether these numbers are calibrated probabilities or raw model
+        # scores. With no calibration loaded the service maps scores through
+        # the identity curve, so a "0.7" is whatever the network's sigmoid
+        # emitted and not a claim that seven in ten such cells burn. /predict
+        # reported this already; the endpoint the app actually calls did not,
+        # which is the one place it matters.
+        "calibration": calibration_status(model_sha256=_sha),
         "bounds": list(map(float, cropped_bounds)),
         "coordinates": crop_window["coordinates"],
         "threshold": threshold,
