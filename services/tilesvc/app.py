@@ -30,6 +30,7 @@ from .dynamic_builder import DEFAULT_DYNAMIC_ORDER, build_dynamic_for_tile, fetc
 from .static_builder import CHANNEL_ORDER
 from .cache_health import firms_snapshot_status, noaa_cycle_status
 from .validation_reports import list_reports, report_dir
+from .spread_bands import DEFAULT_BAND_THRESHOLD, spread_bands
 from .calibration import calibrate_probability, calibration_status
 from .ml_runtime import file_sha256, runtime_imports, source_version_info
 from .prediction_contract import next_fire_from_delta, risk_class_summary
@@ -1600,6 +1601,64 @@ def validation_runs(limit: int = Query(10, ge=1, le=50)):
         "directory": str(report_dir()),
         "count": len(runs),
         "runs": runs,
+    }
+
+
+@app.get("/spread_bands")
+def spread_bands_endpoint(
+    lat: float = Query(...),
+    lon: float = Query(...),
+    days: int = Query(3, ge=1, le=6),
+    Tseq: int = Query(MODEL_TSEQ),
+    step_hours: int = Query(MODEL_STEP_HOURS),
+    band_threshold: float = Query(DEFAULT_BAND_THRESHOLD, ge=0.0, le=1.0),
+    thr: float = Query(None),
+    ignition: bool = Query(True),
+    date: str = Query(None),
+):
+    """Spread as dated nested polygons instead of a heat raster.
+
+    Same rollout the raster endpoints run; the difference is the shape it comes
+    back as. Published progression maps draw dated bands, not a blur, because
+    the question is how far the fire gets and when.
+    """
+    ref_time = _parse_date_param(date)
+    threshold = float(thr) if thr is not None else MODEL_THRESHOLD
+
+    bounds, _crop, rollout = _rollout_multistep_predictions(
+        lat,
+        lon,
+        Tseq=Tseq,
+        steps=int(days),
+        step_hours=step_hours,
+        crop_frac=1.0,
+        ignition=ignition,
+        ref_time=ref_time,
+        threshold=threshold,
+    )
+
+    # Bands are cut from the calibrated score, so a band edge means the same
+    # thing as the number the site exposure panel quotes for that spot.
+    calibrated = []
+    model_sha = file_sha256(MODEL_PATH)
+    for step in rollout:
+        score, _risk, _meta = calibrate_probability(step["prob"], model_sha256=model_sha)
+        calibrated.append({**step, "prob": score})
+
+    weather_quality = weather_quality_status()
+    return {
+        "bounds": [float(v) for v in bounds],
+        "horizon_days": int(days),
+        "step_hours": int(step_hours),
+        "bands": spread_bands(calibrated, lonlat_to_tile(lon, lat), _TO_WGS84.transform,
+                              threshold=float(band_threshold)),
+        "model_meta": _model_metadata(),
+        "quality": {
+            "status": weather_quality.get("status", "degraded"),
+            "degraded": weather_quality.get("status") != "ok",
+            "reasons": [] if weather_quality.get("status") == "ok"
+                       else [weather_quality.get("reason") or "open_meteo_weather_fallback"],
+        },
     }
 
 

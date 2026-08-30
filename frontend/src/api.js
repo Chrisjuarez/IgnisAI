@@ -185,6 +185,36 @@ export const getSiteExposure = async ({
   return data;
 };
 
+/**
+ * Fire spread as dated, non-overlapping day bands.
+ * Backend expects: /predict-fire-spread/bands?lat=&lon=&days=
+ *
+ * Each cell belongs to the day it first burned, so the bands can be drawn at
+ * full opacity without colours stacking.
+ */
+export const getSpreadBands = async ({ lat, lng, lon, days, bandThreshold, Tseq, date, ignition } = {}) => {
+  const latitude = lat != null ? Number(lat) : null;
+  const longitude = lon != null ? Number(lon) : (lng != null ? Number(lng) : null);
+  if (latitude == null || Number.isNaN(latitude) || longitude == null || Number.isNaN(longitude)) {
+    throw new Error(`getSpreadBands missing lat/lon (lat=${lat}, lng=${lng}, lon=${lon})`);
+  }
+
+  const { data } = await api.get("/predict-fire-spread/bands", {
+    timeout: MULTISTEP_TIMEOUT_MS,
+    params: {
+      lat: latitude,
+      lon: longitude,
+      ...(days ? { days } : {}),
+      ...(bandThreshold != null ? { band_threshold: Number(bandThreshold) } : {}),
+      ...(Tseq ? { Tseq } : {}),
+      ...(date ? { date } : {}),
+      ...(ignition != null ? { ignition } : {}),
+    },
+  });
+
+  return data;
+};
+
 // Keep your old name if the UI calls it:
 export const predictFireSpread = async ({ lat, lng, thr, date } = {}) =>
   predictFireSpreadVector({ lat, lng, thr, date });
