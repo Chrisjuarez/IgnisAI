@@ -263,15 +263,37 @@ function decorateFire(fire = {}) {
   };
 }
 
-async function loadCachedFires({ predictableOnly = false } = {}) {
+// Serving the whole archive was the reason the map could take the instance
+// down: every load returned every stored detection regardless of where the
+// user was looking. Reads are now scoped to the viewport and a time window,
+// which is also all the map can draw.
+const READ_LIMIT_DEFAULT = Number(process.env.WILDFIRE_READ_LIMIT || 4000);
+const READ_DAYS_DEFAULT = Number(process.env.WILDFIRE_READ_DAYS || 2);
+
+function boundsFilter(bbox) {
+  const [w, s, e, n] = String(bbox).split(',').map(Number);
+  return {
+    longitude: { $gte: w, $lte: e },
+    latitude: { $gte: s, $lte: n },
+  };
+}
+
+async function loadCachedFires({ predictableOnly = false, bbox, days, limit } = {}) {
   if (typeof Wildfire.find !== 'function') {
     return [];
   }
 
+  const window = clampDays(days ?? READ_DAYS_DEFAULT);
+  const since = new Date(Date.now() - window * 24 * 60 * 60 * 1000);
+  const cap = Math.max(1, Number(limit) || READ_LIMIT_DEFAULT);
+
   try {
-    let query = Wildfire.find({});
+    let query = Wildfire.find({
+      ...boundsFilter(parseBbox(bbox)),
+      timestamp: { $gte: since },
+    });
     if (query && typeof query.sort === 'function') query = query.sort({ timestamp: -1 });
-    if (query && typeof query.limit === 'function') query = query.limit(5000);
+    if (query && typeof query.limit === 'function') query = query.limit(cap);
     if (query && typeof query.lean === 'function') query = query.lean();
 
     const docs = await query;
@@ -400,61 +422,139 @@ async function fetchCurrentFires(opts = {}) {
 
 // --- Route ----------------------------------------------------------------
 
+// Reads what the ingest has already stored. This used to call FIRMS and upsert
+// every detection inline, so a map load spent a NASA round trip and a
+// 2,000-row write before it could answer, and four of those arriving together
+// on a 512 MB instance is what returned 503s. Ingest is a background job now;
+// this endpoint only reads.
+// ---------------------------------------------------------------------------
+// Ingest
+//
+// Kept off the request path deliberately. FIRMS re-serves the same detections
+// on every poll, so the useful cadence is a timer, not a page load, and the
+// cost (a NASA round trip plus a few thousand upserts) is far too much to pay
+// while a user waits for a map.
+// ---------------------------------------------------------------------------
+const INGEST_INTERVAL_MS = Number(process.env.FIRMS_INGEST_INTERVAL_MS || 10 * 60 * 1000);
+
+const ingest = {
+  running: false,
+  lastRunAt: null,
+  lastError: null,
+  lastInserted: 0,
+  lastParsed: 0,
+  timer: null,
+};
+
+function ingestStatus() {
+  return {
+    lastRunAt: ingest.lastRunAt ? new Date(ingest.lastRunAt).toISOString() : null,
+    ageSeconds: ingest.lastRunAt ? Math.round((Date.now() - ingest.lastRunAt) / 1000) : null,
+    parsed: ingest.lastParsed,
+    inserted: ingest.lastInserted,
+    error: ingest.lastError,
+  };
+}
+
+async function refreshDetections({ reason = 'scheduled' } = {}) {
+  // One at a time: overlapping runs would upsert the same snapshot twice and
+  // double the write load for nothing.
+  if (ingest.running) return ingestStatus();
+  ingest.running = true;
+  try {
+    const result = await fetchCurrentFires({});
+    if (!result.fetched) {
+      ingest.lastError = result.message;
+      return ingestStatus();
+    }
+    const inserted = result.fires.length ? await storeDetections(result.fires) : 0;
+    ingest.lastParsed = result.fires.length;
+    ingest.lastInserted = inserted;
+    ingest.lastError = null;
+    ingest.lastRunAt = Date.now();
+    console.log(`🔥 ingest(${reason}): parsed ${result.fires.length}, new ${inserted}`);
+  } catch (err) {
+    ingest.lastError = err.message;
+    console.warn('⚠️  ingest failed:', err.message);
+  } finally {
+    ingest.running = false;
+  }
+  return ingestStatus();
+}
+
+function startIngest() {
+  if (ingest.timer) return ingest.timer;
+  ingest.timer = setInterval(() => { refreshDetections({ reason: 'scheduled' }); }, INGEST_INTERVAL_MS);
+  // Do not hold the process open for a background refresh.
+  if (typeof ingest.timer.unref === 'function') ingest.timer.unref();
+  return ingest.timer;
+}
+
+function stopIngest() {
+  if (ingest.timer) clearInterval(ingest.timer);
+  ingest.timer = null;
+}
+
+
 router.get('/wildfires', wildfireLimiter, async (req, res) => {
   try {
-    const excludeFlares   = (req.query.excludeFlares ?? 'true') !== 'false';
     const predictableOnly = (req.query.predictableOnly ?? 'false') === 'true';
+    const fires = await loadCachedFires({
+      predictableOnly,
+      bbox: req.query.bbox,
+      days: req.query.days,
+      limit: req.query.limit,
+    });
 
-    const result = await fetchCurrentFires({ excludeFlares, predictableOnly });
-    if (!result.fetched) {
+    // A cold database has nothing to serve, so prime it once rather than
+    // returning empty until the first scheduled tick.
+    if (!fires.length && !ingest.lastRunAt) {
+      await refreshDetections({ reason: 'cold-read' });
+      const primed = await loadCachedFires({
+        predictableOnly,
+        bbox: req.query.bbox,
+        days: req.query.days,
+        limit: req.query.limit,
+      });
       return res.status(200).json({
-        message: result.message,
-        count: result.fires.length,
-        data: result.fires,
-        stale: true,
+        message: 'Wildfire data primed',
+        count: primed.length,
+        data: primed,
+        ingest: ingestStatus(),
       });
     }
 
-    if (!result.fires.length) {
-      return res.status(200).json({ message: 'No valid fire data', count: 0, data: [] });
-    }
-
-    const insertedCount = await storeDetections(result.fires);
-    console.log(`🔥 Parsed ${result.fires.length} (new ${insertedCount})`);
-
-    const message = insertedCount > 0
-      ? 'Wildfire data fetched & stored'
-      : 'Wildfire data fetched';
-
     return res.status(200).json({
-      message,
-      count: result.fires.length,
-      inserted: insertedCount,
-      data: result.fires,              // ✅ what the frontend expects
+      message: 'Wildfire data',
+      count: fires.length,
+      data: fires,
+      ingest: ingestStatus(),
     });
   } catch (err) {
-    console.error('❌ Error fetching wildfire data:', err);
+    console.error('❌ Error reading wildfire data:', err);
     return res.status(500).json({ error: err.message });
   }
 });
 
+// Same shape as /wildfires: reads stored detections rather than calling FIRMS,
+// so the map's two load-time requests cost two indexed queries instead of two
+// NASA round trips and two bulk upserts.
 router.get('/wildfires/footprints', wildfireLimiter, async (req, res) => {
   try {
-    const excludeFlares = (req.query.excludeFlares ?? 'true') !== 'false';
     const predictableOnly = (req.query.predictableOnly ?? 'false') === 'true';
-    const result = await fetchCurrentFires({
-      excludeFlares,
+    const fires = await loadCachedFires({
       predictableOnly,
       bbox: req.query.bbox,
       days: req.query.days,
+      limit: req.query.limit,
     });
 
-    const geojson = firesToFootprintGeoJSON(result.fires);
+    const geojson = firesToFootprintGeoJSON(fires);
     return res.status(200).json({
       geojson,
       count: geojson.features.length,
-      stale: result.stale === true,
-      message: result.message,
+      stale: false,
+      ingest: ingestStatus(),
       caveat: 'FIRMS detections are satellite pixel footprints, not exact fire perimeters.',
     });
   } catch (err) {
@@ -464,7 +564,13 @@ router.get('/wildfires/footprints', wildfireLimiter, async (req, res) => {
 });
 
 module.exports = router;
+module.exports.startIngest = startIngest;
+module.exports.stopIngest = stopIngest;
+module.exports.refreshDetections = refreshDetections;
 module.exports._private = {
+  ingest,
+  ingestStatus,
+  loadCachedFires,
   parseCSV,
   fetchCurrentFires,
   fireToFootprintFeature,
