@@ -150,6 +150,49 @@ def compare_against_behaveplus():
     return rows, median
 
 
+def compare_reference_implementations():
+    """BehavePlus against pyretechnics on identical inputs.
+
+    Worth doing before trusting either as an oracle. They implement the same
+    published equations and still disagree by up to a factor of two, mostly on
+    whether the effective wind speed limit is applied - GR1 at 3 m/s is 1220
+    m/h in BehavePlus, 168 with pyretechnics' limit on and 1723 with it off.
+    Shrub and litter differ substantially either way.
+
+    The conclusion that matters: there is no single implementation ground
+    truth. Matching one is a statement about configuration, not correctness,
+    and only observed fires settle the question.
+    """
+    try:
+        import pyretechnics.conversion as cv
+        import pyretechnics.fuel_models as pfm
+        import pyretechnics.surface_fire as psf
+        import pyrothermel as pr
+    except ImportError:
+        return None
+
+    MPS_TO_FPM = 196.85
+    moisture = (ORACLE_MOISTURE["one_hour"], ORACLE_MOISTURE["ten_hour"],
+                ORACLE_MOISTURE["hundred_hour"], 0.0,
+                ORACLE_MOISTURE["live_herbaceous"], ORACLE_MOISTURE["live_woody"])
+    rows = []
+    for name, code in ORACLE_FUELS:
+        for wind in ORACLE_WINDS:
+            behave = pr.PyrothermelRun(
+                pr.FuelModel.from_existing(name, units_preset="metric"),
+                pr.MoistureScenario.from_existing(1, 1), wind_speed=wind,
+                units_preset="metric", wind_input_mode="direct_midflame", slope=0.0,
+            ).run_surface_fire_in_direction_of_max_spread()["spread_rate"] * 3600.0
+            base = psf.calc_surface_fire_behavior_no_wind_no_slope(
+                pfm.moisturize(pfm.get_fuel_model(code), moisture))
+            def pyre(limit):
+                return cv.fpm_to_mps(psf.calc_surface_fire_behavior_max(
+                    base, wind * MPS_TO_FPM, 0.0, 0.0, 0.0,
+                    use_wind_limit=limit)["max_spread_rate"]) * 3600.0
+            rows.append((name, wind, behave, pyre(True), pyre(False)))
+    return rows
+
+
 def main() -> int:
     failures = 0
 
@@ -202,9 +245,20 @@ def main() -> int:
     print("  every fuel - which points at the wind factor rather than the fuel")
     print("  table, since the characteristic SAV checks above pass exactly.")
     print()
-    print("  BehavePlus is the reference implementation and is usable without")
-    print("  restriction. Prefer it in the serving path; keep this module as a")
-    print("  dependency-free fallback and as the thing this harness checks.")
+    cross = compare_reference_implementations()
+    if cross:
+        print("\nTHE TWO REFERENCE IMPLEMENTATIONS AGAINST EACH OTHER\n")
+        print("  %-6s %9s %12s %13s %13s" % (
+            "fuel", "wind m/s", "BehavePlus", "pyre limited", "pyre unlimited"))
+        for name, wind, behave, limited, unlimited in cross:
+            print("  %-6s %9.1f %12.0f %13.0f %13.0f" % (name, wind, behave, limited, unlimited))
+        print()
+        print("  They implement the same published equations and still differ by up")
+        print("  to a factor of two, largely on whether the effective wind speed")
+        print("  limit is applied. There is no single implementation ground truth:")
+        print("  matching one is a statement about configuration, not correctness.")
+        print("  Only observed fires settle it - see the five held-out events in")
+        print("  wsts_inputs, which no checkpoint has trained on.")
     return 1 if failures else 0
 
 
