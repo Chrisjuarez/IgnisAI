@@ -71,3 +71,49 @@ def test_load_catalog_reuses_parsed_catalog_until_file_changes(tmp_path, monkeyp
 
     assert reloaded is not first
     assert reloaded["version"] == "v2-rebuilt"
+
+import numpy as np
+
+
+def _channel(name):
+    return static_catalog.StaticChannel(name=name, uri=f"/tmp/{name}.tif")
+
+
+def _all_zero():
+    return np.zeros((static_catalog.SIZE, static_catalog.SIZE), dtype=np.float32)
+
+
+def _varied():
+    return np.linspace(1.0, 100.0, static_catalog.SIZE ** 2, dtype=np.float32).reshape(
+        static_catalog.SIZE, static_catalog.SIZE
+    )
+
+
+def test_wilderness_tiles_are_not_treated_as_broken_rasters():
+    # No roads, nobody living there, no standing water. All correct values for
+    # backcountry, and previously each one refused the prediction outright.
+    for name in ("impervious", "population", "water"):
+        stats = static_catalog._validate_channel(name, _all_zero(), _channel(name))
+        assert stats["pct_zero"] == 1.0
+
+
+def test_an_empty_raster_is_still_caught_for_channels_that_cannot_be_zero():
+    # Elevation is never uniformly zero over a real 32 km tile, so all-zero
+    # here still means the static build produced nothing.
+    for name in ("elev", "ndvi", "bi", "erc", "chili"):
+        with pytest.raises(InputUnavailable) as exc:
+            static_catalog._validate_channel(name, _all_zero(), _channel(name))
+        assert exc.value.reason == "static_channel_placeholder"
+
+
+def test_sparse_channels_with_real_values_still_validate():
+    stats = static_catalog._validate_channel("impervious", _varied(), _channel("impervious"))
+
+    assert stats["pct_zero"] == 0.0
+    assert stats["finite_ratio"] == 1.0
+
+
+def test_the_exempt_set_is_only_presence_channels():
+    # Guard against someone widening this until the check stops protecting
+    # anything. These three measure presence; absence is a real reading.
+    assert static_catalog.SPARSE_STATIC_CHANNELS == {"water", "impervious", "population"}
