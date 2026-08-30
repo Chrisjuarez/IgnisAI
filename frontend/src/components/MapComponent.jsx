@@ -856,6 +856,25 @@ const MapComponent = forwardRef(({
     paint('spread-ignition-source', scene?.ignition
       ? { type: 'FeatureCollection', features: [scene.ignition] }
       : null);
+
+    // These layers are created when the map initialises, but the raster
+    // overlay is added later - when a prediction runs - and Mapbox appends a
+    // layer with no beforeId to the top of the stack. So the heatmap was
+    // painting straight over the bands at full opacity and they were never
+    // visible. Raise them explicitly rather than depending on creation order,
+    // which the overlay code is free to change.
+    //
+    // Order matters within the group too: burned area underneath, forecast
+    // over it, seed point on top.
+    ['spread-observed-fill', 'spread-observed-outline',
+     'spread-bands-fill', 'spread-bands-outline',
+     'spread-ignition-point'].forEach((layerId) => {
+      try {
+        if (map?.getLayer?.(layerId)) map.moveLayer(layerId);
+      } catch (_) {
+        // A style reload can race this; the next paint re-raises them.
+      }
+    });
   }, []);
 
   const loadForecastTimeline = useCallback(async ({
