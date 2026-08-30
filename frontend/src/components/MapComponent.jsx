@@ -833,7 +833,29 @@ const MapComponent = forwardRef(({
     setActiveForecastIndex(0);
     setForecastLayerMode('new_burn');
     removePredictionOverlays(mapRef.current);
+    // The scene layers are separate sources from the raster overlays, so
+    // clearing the timeline has to clear them too or a stale forecast keeps
+    // sitting on the map under a cleared one.
+    ['spread-observed-source', 'spread-bands-source', 'spread-ignition-source'].forEach((id) => {
+      const src = mapRef.current?.getSource?.(id);
+      if (src) src.setData({ type: 'FeatureCollection', features: [] });
+    });
     setObservedLayerMode('normal');
+  }, []);
+
+  // Paint the three scene layers. Kept separate from the fetch so the timeline
+  // (which already has the payload) does not have to run the model again.
+  const paintSpreadScene = useCallback((scene) => {
+    const map = mapRef.current;
+    const paint = (sourceId, data) => {
+      const src = map?.getSource?.(sourceId);
+      if (src) src.setData(data || emptyFeatureCollection());
+    };
+    paint('spread-observed-source', scene?.observed);
+    paint('spread-bands-source', scene?.forecast);
+    paint('spread-ignition-source', scene?.ignition
+      ? { type: 'FeatureCollection', features: [scene.ignition] }
+      : null);
   }, []);
 
   const loadForecastTimeline = useCallback(async ({
@@ -883,6 +905,12 @@ const MapComponent = forwardRef(({
         firstStepHasImage: !!payload?.steps?.[0]?.image_base64,
       });
 
+      // Paint the dated scene from the same response: where it started, what
+      // has already burned, and the forecast as day bands. This is the shape
+      // people read a fire map for; the raster frames stay for the timeline
+      // scrub underneath it.
+      paintSpreadScene(payload?.scene);
+
       const prepared = await prepareMultistepRasterFrames(payload, {
         opacity: 0.75,
         smooth: true,
@@ -927,7 +955,7 @@ const MapComponent = forwardRef(({
       if (timeoutHandle) clearTimeout(timeoutHandle);
       setIsForecastLoading(false);
     }
-  }, []);
+  }, [paintSpreadScene]);
 
   // ---------- Prediction ----------
   const handlePredictFireSpread = async (fireProps) => {
@@ -1271,22 +1299,9 @@ const MapComponent = forwardRef(({
   // so a caller can drive a legend from the same data the map drew.
   const showSpreadBands = useCallback(async ({ lat, lon, days = 3, date } = {}) => {
     const payload = await getSpreadBands({ lat, lon, days, date });
-    const map = mapRef.current;
-    const paint = (sourceId, data) => {
-      const src = map?.getSource?.(sourceId);
-      if (src) src.setData(data || emptyFeatureCollection());
-    };
-
-    // Three layers, three different kinds of claim: an input, an observation,
-    // and a model output.
-    paint('spread-observed-source', payload?.observed);
-    paint('spread-bands-source', payload?.forecast);
-    paint('spread-ignition-source', payload?.ignition
-      ? { type: 'FeatureCollection', features: [payload.ignition] }
-      : null);
-
+    paintSpreadScene(payload);
     return payload;
-  }, []);
+  }, [paintSpreadScene]);
 
   const clearSpreadBands = useCallback(() => {
     ['spread-observed-source', 'spread-bands-source', 'spread-ignition-source'].forEach((id) => {
