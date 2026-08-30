@@ -144,3 +144,55 @@ def test_a_cell_that_reburns_stays_with_its_first_day():
 
     assert bands[0].sum() == 36
     assert bands[1].sum() == 0, "day 2 adds nothing new, so it draws nothing"
+
+
+def _observed(rows, cols):
+    m = np.zeros((SIZE, SIZE), dtype=np.float32)
+    m[rows, cols] = 1.0
+    return m
+
+
+def test_scene_separates_what_burned_from_what_might():
+    rollout = [_step(1, _blob(slice(24, 30), slice(24, 30)))]
+    scene = sb.spread_scene(rollout, _observed(slice(30, 36), slice(30, 36)),
+                            lonlat_to_tile(LON, LAT), IDENTITY,
+                            ignition_lon=LON, ignition_lat=LAT)
+
+    assert scene["observed"]["features"], "burned area must be its own layer"
+    assert scene["forecast"]["features"], "forecast must be its own layer"
+    # Only one of these is worth evacuating on, so they must be distinguishable.
+    observed_colors = {f["properties"]["color"] for f in scene["observed"]["features"]}
+    forecast_colors = {f["properties"]["color"] for f in scene["forecast"]["features"]}
+    assert not (observed_colors & forecast_colors)
+
+
+def test_observed_area_is_not_given_a_forecast_day():
+    scene = sb.spread_scene([_step(1, _blob(slice(24, 30), slice(24, 30)))],
+                            _observed(slice(30, 36), slice(30, 36)),
+                            lonlat_to_tile(LON, LAT), IDENTITY,
+                            ignition_lon=LON, ignition_lat=LAT)
+
+    for f in scene["observed"]["features"]:
+        assert f["properties"]["kind"] == "observed"
+        assert "day" not in f["properties"], "observation is not a lead time"
+
+
+def test_ignition_point_is_reported_where_the_forecast_was_seeded():
+    scene = sb.spread_scene([_step(1, _blob(slice(28, 34), slice(28, 34)))], None,
+                            lonlat_to_tile(LON, LAT), IDENTITY,
+                            ignition_lon=LON, ignition_lat=LAT)
+
+    ign = scene["ignition"]
+    assert ign["geometry"]["type"] == "Point"
+    assert ign["geometry"]["coordinates"] == [LON, LAT]
+    assert ign["properties"]["kind"] == "ignition"
+
+
+def test_a_fire_with_no_observed_footprint_still_produces_a_scene():
+    scene = sb.spread_scene([_step(1, _blob(slice(28, 34), slice(28, 34)))], None,
+                            lonlat_to_tile(LON, LAT), IDENTITY,
+                            ignition_lon=LON, ignition_lat=LAT)
+
+    assert scene["observed"]["features"] == []
+    assert scene["forecast"]["features"]
+    assert scene["ignition"]

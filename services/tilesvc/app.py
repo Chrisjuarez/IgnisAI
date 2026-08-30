@@ -31,7 +31,7 @@ from .static_builder import CHANNEL_ORDER
 from .cache_health import firms_snapshot_status, noaa_cycle_status
 from .wind_summary import wind_from_channels
 from .validation_reports import list_reports, report_dir
-from .spread_bands import DEFAULT_BAND_THRESHOLD, spread_bands
+from .spread_bands import DEFAULT_BAND_THRESHOLD, spread_scene
 from .calibration import calibrate_probability, calibration_status
 from .ml_runtime import file_sha256, runtime_imports, source_version_info
 from .prediction_contract import next_fire_from_delta, risk_class_summary
@@ -1644,6 +1644,13 @@ def spread_bands_endpoint(
         threshold=threshold,
     )
 
+    # What has already burned, from the fire channel the rollout started from.
+    # Observation and forecast are kept apart deliberately - see spread_scene.
+    dyn, _stat, _b, _bt, _ss = _prepare_prediction_inputs_with_summary(
+        lat, lon, Tseq, ignition=ignition, ref_time=ref_time, hours_step=step_hours,
+    )
+    observed_fire = _observed_fire_from_dyn(dyn)
+
     # Bands are cut from the calibrated score, so a band edge means the same
     # thing as the number the site exposure panel quotes for that spot.
     calibrated = []
@@ -1657,8 +1664,15 @@ def spread_bands_endpoint(
         "bounds": [float(v) for v in bounds],
         "horizon_days": int(days),
         "step_hours": int(step_hours),
-        "bands": spread_bands(calibrated, lonlat_to_tile(lon, lat), _TO_WGS84.transform,
-                              threshold=float(band_threshold)),
+        **spread_scene(
+            calibrated,
+            observed_fire,
+            lonlat_to_tile(lon, lat),
+            _TO_WGS84.transform,
+            ignition_lon=lon,
+            ignition_lat=lat,
+            threshold=float(band_threshold),
+        ),
         "model_meta": _model_metadata(),
         "quality": {
             "status": weather_quality.get("status", "degraded"),

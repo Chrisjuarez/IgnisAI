@@ -150,3 +150,69 @@ def spread_bands(
                      "overlap; the union of days 1..N is the area burned by day N."),
         },
     }
+
+#: The already-burned area is drawn as ground truth, not forecast, so it takes
+#: a neutral char colour rather than a place on the forecast ramp. Mixing it
+#: into the YlOrRd scale would imply it is another lead time.
+OBSERVED_COLOR = "#3f3f46"
+
+#: Where the fire is treated as having started, for the marker.
+IGNITION_COLOR = "#111827"
+
+
+def observed_polygons(observed: np.ndarray, tile, to_wgs84, *, threshold: float = 0.5) -> Dict[str, Any]:
+    """The footprint that has already burned, as GeoJSON.
+
+    Separating this from the forecast is the difference between "this is gone"
+    and "this might go". Drawn together without distinction, a viewer cannot
+    tell which part of the shape is observation and which is a model output -
+    and only one of those is worth evacuating on.
+    """
+    mask = np.asarray(observed, dtype=np.float32) >= threshold
+    return {
+        "type": "FeatureCollection",
+        "features": [
+            {
+                "type": "Feature",
+                "geometry": geometry,
+                "properties": {"kind": "observed", "color": OBSERVED_COLOR,
+                               "label": "Already burned"},
+            }
+            for geometry in _polygonize(mask, tile, to_wgs84)
+        ],
+    }
+
+
+def ignition_feature(lon: float, lat: float, *, label: str = "Ignition") -> Dict[str, Any]:
+    """The point the forecast was seeded from."""
+    return {
+        "type": "Feature",
+        "geometry": {"type": "Point", "coordinates": [float(lon), float(lat)]},
+        "properties": {"kind": "ignition", "color": IGNITION_COLOR, "label": label},
+    }
+
+
+def spread_scene(
+    rollout: Sequence[Dict[str, Any]],
+    observed: Optional[np.ndarray],
+    tile,
+    to_wgs84,
+    *,
+    ignition_lon: float,
+    ignition_lat: float,
+    threshold: float = DEFAULT_BAND_THRESHOLD,
+) -> Dict[str, Any]:
+    """The whole picture: where it started, what has burned, where it may go.
+
+    Three layers rather than one, because they carry different authority.
+    The ignition point is an input, the burned area is observation, and the
+    bands are a model output - and a viewer deciding anything needs to know
+    which is which.
+    """
+    return {
+        "ignition": ignition_feature(ignition_lon, ignition_lat),
+        "observed": (observed_polygons(observed, tile, to_wgs84)
+                     if observed is not None
+                     else {"type": "FeatureCollection", "features": []}),
+        "forecast": spread_bands(rollout, tile, to_wgs84, threshold=threshold),
+    }
