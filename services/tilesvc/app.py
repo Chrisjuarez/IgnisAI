@@ -29,6 +29,7 @@ from .grid import (
 from .dynamic_builder import DEFAULT_DYNAMIC_ORDER, build_dynamic_for_tile, fetch_weather_grids, weather_quality_status
 from .static_builder import CHANNEL_ORDER
 from .cache_health import firms_snapshot_status, noaa_cycle_status
+from .wind_summary import wind_from_channels
 from .validation_reports import list_reports, report_dir
 from .spread_bands import DEFAULT_BAND_THRESHOLD, spread_bands
 from .calibration import calibrate_probability, calibration_status
@@ -751,6 +752,12 @@ def _tensor_input_summary(
         "model_dynamic_order": dynamic_preparation.get("model_dynamic_order") if dynamic_preparation else None,
         "static_order": list(MODEL_STATIC_ORDER),
         "dynamic_channels": dynamic_channels,
+        # The forecast is wind-dominated, so the first question asked of any
+        # output is whether it runs the way the wind blows. The vector was
+        # already here, but only as a raw channel mean whose sign convention a
+        # client would have to know. Named and resolved once, here, so every
+        # response that carries an input summary can answer it.
+        "wind": wind_from_channels(dynamic_channels),
         "static_channels": static_channels,
         "static_catalog": static_summary.get("catalog") if static_summary else None,
         "missing_or_placeholder_static": [
