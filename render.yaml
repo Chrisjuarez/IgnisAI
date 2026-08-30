@@ -15,6 +15,14 @@ services:
     rootDir: frontend
     buildCommand: npm ci && npm run build
     staticPublishPath: build
+    # The app routes client-side, so every path except / is a route rather than
+    # a file. Without this the host looks for a file that was never built and
+    # serves its own 404 - which is what a reload on /dashboard hit. The app
+    # only ever survived being opened at the root.
+    routes:
+      - type: rewrite
+        source: /*
+        destination: /index.html
     envVars:
       - key: REACT_APP_API_URL
         value: https://ignisai-backend.onrender.com/api
@@ -50,11 +58,16 @@ services:
       - key: CORS_ORIGIN
         value: https://ignisai-frontend.onrender.com
       # Bound the in-memory map bootstrap cache so a long-uptime instance
-      # cannot OOM. Tune up if you observe a low hit rate at /metrics.
+      # cannot OOM. The byte budget is the real bound - entries range from
+      # ~0.4 MB for a city bbox to far more at full extent, so counting them
+      # was never the right unit. This pinned 200 and silently overrode the
+      # code default of 12.
       - key: MAP_BOOTSTRAP_CACHE_MS
         value: "180000"
       - key: MAP_BOOTSTRAP_CACHE_MAX
-        value: "200"
+        value: "12"
+      - key: MAP_BOOTSTRAP_CACHE_BYTES
+        value: "67108864"
 
   # ---- Python/FastAPI Tile Service (Starter $7/mo) ----
   - type: web
