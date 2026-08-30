@@ -21,8 +21,34 @@ _to_wgs84  = Transformer.from_crs(CRS_ALBERS, CRS_WGS84, always_xy=True)
 
 @dataclass(frozen=True)
 class TileID:
-    ix: int
-    iy: int
+    """A SIZE x SIZE window in EPSG:5070, named by its upper-left corner.
+
+    The origin is metres, not a grid index, because serving windows are centred
+    on the fire and so do not generally start on a TILE_M boundary. ix/iy are
+    derived and only identify a window that happens to be grid-aligned; they
+    exist for the pre-generated static tiles and the TS-SatFire ingest, which
+    both address the fixed grid.
+    """
+
+    x0: float   # easting at the upper-left corner
+    y0: float   # northing at the upper-left corner
+
+    @classmethod
+    def from_grid(cls, ix: int, iy: int) -> "TileID":
+        return cls(float(ix) * TILE_M, float(iy + 1) * TILE_M)
+
+    @property
+    def ix(self) -> int:
+        return int(np.floor(self.x0 / TILE_M))
+
+    @property
+    def iy(self) -> int:
+        return int(np.floor(self.y0 / TILE_M)) - 1
+
+    @property
+    def key(self) -> str:
+        """Stable identity for caching, in whole pixels from the CRS origin."""
+        return f"x{int(round(self.x0 / PIX))}_y{int(round(self.y0 / PIX))}"
 
 
 def lonlat_to_xy_m(lon: float, lat: float):
@@ -32,27 +58,44 @@ def lonlat_to_xy_m(lon: float, lat: float):
 
 
 def lonlat_to_tile(lon: float, lat: float) -> TileID:
-    """Map a lon/lat point to the containing 64 km tile index in EPSG:5070 meters."""
+    """The prediction window CENTRED on a point, snapped to the pixel lattice.
+
+    Centring is what makes serving match training. Training tiles come from
+    NDWS samples that are built around the fire and then centre-cropped, so
+    every one has the fire at the middle cell. Serving used to snap to a fixed
+    TILE_M grid and take whichever cell the fire fell in, which put 9 of 10
+    real fires within 6 km of an edge - Palisades landed at column 2 with one
+    kilometre of room to the west while the Santa Ana blew west-southwest. The
+    model was being asked to spread fire into cells that were not in its input.
+
+    Snapping the origin to whole pixels keeps the raster aligned to a single
+    500 m lattice, so statics resample consistently and nearby requests share
+    cache entries. The fire lands within half a pixel of the centre.
+    """
     x, y = lonlat_to_xy_m(lon, lat)
-    ix = int(np.floor(x / TILE_M))
-    iy = int(np.floor(y / TILE_M))
-    return TileID(ix, iy)
+    x0 = round((x - TILE_M / 2.0) / PIX) * PIX
+    y0 = round((y + TILE_M / 2.0) / PIX) * PIX
+    return TileID(float(x0), float(y0))
+
+
+def snapped_tile(lon: float, lat: float) -> TileID:
+    """The grid-aligned tile containing a point.
+
+    For the fixed-grid addressing that pre-generated static tiles and the
+    TS-SatFire ingest use. Prediction should use lonlat_to_tile.
+    """
+    x, y = lonlat_to_xy_m(lon, lat)
+    return TileID.from_grid(int(np.floor(x / TILE_M)), int(np.floor(y / TILE_M)))
 
 
 def tile_affine(tile: TileID) -> Affine:
     """Affine transform for pixel→map (EPSG:5070) for this tile (upper-left origin)."""
-    x0 = tile.ix * TILE_M
-    y0 = (tile.iy + 1) * TILE_M  # northing at upper-left
-    return Affine(PIX, 0.0, x0, 0.0, -PIX, y0)
+    return Affine(PIX, 0.0, tile.x0, 0.0, -PIX, tile.y0)
 
 
 def tile_bounds_albers(tile: TileID):
     """Return (minx, miny, maxx, maxy) in EPSG:5070 meters for the tile."""
-    x0 = tile.ix * TILE_M
-    y1 = (tile.iy + 1) * TILE_M
-    x1 = x0 + TILE_M
-    y0 = y1 - TILE_M
-    return x0, y0, x1, y1
+    return tile.x0, tile.y0 - TILE_M, tile.x0 + TILE_M, tile.y0
 
 
 def tile_coordinates_lonlat(tile: TileID):
