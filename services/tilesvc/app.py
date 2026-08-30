@@ -2069,7 +2069,26 @@ def predict_multistep(
         debug_payload["dump_dir"] = str(out_dir)
 
     dyn_model, dyn_prep = _prepare_dynamic_for_model(debug_sink["dyn"])
+
+    # The same rollout, also expressed as dated polygons. Carried on this
+    # response rather than behind its own endpoint so a client gets both
+    # representations from one prediction - asking separately would run the
+    # model twice for one answer.
+    calibrated_rollout = []
+    _sha = file_sha256(MODEL_PATH)
+    for step in rollout:
+        _score, _risk, _meta = calibrate_probability(step["prob"], model_sha256=_sha)
+        calibrated_rollout.append({**step, "prob": _score})
+
     response: Dict[str, Any] = {
+        "scene": spread_scene(
+            calibrated_rollout,
+            observed_fire_full,
+            lonlat_to_tile(lon, lat),
+            _TO_WGS84.transform,
+            ignition_lon=lon,
+            ignition_lat=lat,
+        ),
         "bounds": list(map(float, cropped_bounds)),
         "coordinates": crop_window["coordinates"],
         "threshold": threshold,
