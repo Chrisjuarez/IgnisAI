@@ -81,10 +81,32 @@ def feature_centroids(features: List[Dict[str, Any]]) -> List[Tuple[float, float
     return out
 
 
-def spread_bearing(scene: Dict[str, Any], ignition: Tuple[float, float]) -> Optional[float]:
-    """Direction from the ignition to where the forecast put its mass.
+def mean_centroid(features: List[Dict[str, Any]]) -> Optional[Tuple[float, float]]:
+    centroids = feature_centroids(features)
+    if not centroids:
+        return None
+    return (sum(c[0] for c in centroids) / len(centroids),
+            sum(c[1] for c in centroids) / len(centroids))
 
-    Uses the latest day only: earlier bands sit on top of the ignition by
+
+def growth_origin(scene: Dict[str, Any], ignition: Tuple[float, float]) -> Tuple[float, float]:
+    """Where the forecast growth starts from.
+
+    The ignition point is the wrong origin once a fire has been burning: by
+    forecast time the front is on the perimeter, kilometres from where it
+    started, and growth is measured from there. Using the ignition instead
+    mixes in all the spread that already happened, which shortens the vector
+    and makes the bearing noise-dominated - most visibly for a forecast that
+    grows outward on every side, whose bands stay centred on the origin no
+    matter which way the front is actually running.
+    """
+    return mean_centroid((scene.get("observed") or {}).get("features") or []) or ignition
+
+
+def spread_bearing(scene: Dict[str, Any], ignition: Tuple[float, float]) -> Optional[float]:
+    """Direction the forecast pushes the fire, measured from the current front.
+
+    Uses the latest day only: earlier bands sit on top of the footprint by
     construction, so including them pulls the vector toward zero and would
     flatter a model that has not moved the fire anywhere.
     """
@@ -92,15 +114,15 @@ def spread_bearing(scene: Dict[str, Any], ignition: Tuple[float, float]) -> Opti
     if not features:
         return None
     latest = max(f["properties"]["day"] for f in features)
-    centroids = feature_centroids([f for f in features if f["properties"]["day"] == latest])
-    if not centroids:
+    target = mean_centroid([f for f in features if f["properties"]["day"] == latest])
+    if target is None:
         return None
 
-    lon0, lat0 = ignition
+    lon0, lat0 = growth_origin(scene, ignition)
     # Local flat-earth is fine over a 32 km tile; longitude shrinks with latitude.
     scale = math.cos(math.radians(lat0)) or 1.0
-    dx = sum((c[0] - lon0) * scale for c in centroids) / len(centroids)
-    dy = sum((c[1] - lat0) for c in centroids) / len(centroids)
+    dx = (target[0] - lon0) * scale
+    dy = target[1] - lat0
     if math.hypot(dx, dy) < 1e-9:
         return None
     return (math.degrees(math.atan2(dx, dy)) + 360.0) % 360.0
@@ -111,13 +133,22 @@ def angular_difference(a: float, b: float) -> float:
     return abs((a - b + 180.0) % 360.0 - 180.0)
 
 
-def audit_one(name: str, lat: float, lon: float, date: Optional[str], steps: int) -> Dict[str, Any]:
+def audit_one(name: str, lat: float, lon: float, date: Optional[str], steps: int,
+              model: str = "ignis") -> Dict[str, Any]:
     try:
         payload = get_json(f"{TILESVC}/predict_multistep", {
             "lat": lat, "lon": lon, "steps": steps, "ignition": "true", "date": date,
+            "model": model,
         })
     except Exception as exc:  # noqa: BLE001 - the failure itself is a result
         return {"name": name, "status": "error", "detail": str(exc)[:90]}
+
+    # A build that predates ?model= drops it silently and answers with the
+    # learned model whatever was asked for, which once produced a baseline
+    # comparison where both arms were the same forecaster.
+    served = payload.get("model")
+    if served != model:
+        return {"name": name, "status": f"served {served or 'unknown'}, asked {model}"}
 
     wind = (payload.get("input_summary") or {}).get("wind") or {}
     if not wind.get("available"):
@@ -135,6 +166,7 @@ def audit_one(name: str, lat: float, lon: float, date: Optional[str], steps: int
     return {
         "name": name,
         "status": "ok",
+        "model": served,
         "wind_toward_deg": round(wind_toward, 1),
         "wind_toward": wind.get("toward"),
         "wind_ms": wind.get("speed_ms"),
@@ -161,6 +193,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap.add_argument("--limit", type=int, default=8, help="How many live incidents to audit")
     ap.add_argument("--preset", choices=sorted(PRESETS), help="Audit one known event instead")
     ap.add_argument("--steps", type=int, default=3)
+    ap.add_argument("--model", default="ignis", choices=("ignis", "downwind"),
+                    help="Which forecaster to score. 'downwind' is the bar to clear.")
     args = ap.parse_args(argv)
 
     if args.preset:
@@ -178,7 +212,7 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     results = []
     for name, lat, lon, date in targets:
-        r = audit_one(name, lat, lon, date, args.steps)
+        r = audit_one(name, lat, lon, date, args.steps, args.model)
         results.append(r)
         if r["status"] != "ok":
             print(f"{name:<24}{'—':>7}{'—':>9}{'—':>9}{'—':>8}  {r['status']}")
@@ -196,9 +230,9 @@ def main(argv: Optional[List[str]] = None) -> int:
     print(f"\n  scored           : {len(scored)} of {len(results)}")
     print(f"  mean alignment   : {mean_alignment:+.3f}   (+1 downwind, -1 upwind)")
     print(f"  running upwind   : {upwind} of {len(scored)}")
-    print("\n  Baseline for comparison: a forecast that simply pushed straight")
-    print("  downwind would score +1.000. That is the bar this has to clear to")
-    print("  be worth its complexity.")
+    print(f"  forecaster       : {args.model}")
+    if args.model == "ignis":
+        print("\n  Run again with --model downwind for the bar this has to clear.")
     return 0
 
 

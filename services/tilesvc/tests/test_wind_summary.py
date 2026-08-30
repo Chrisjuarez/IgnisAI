@@ -68,3 +68,35 @@ def test_all_sixteen_compass_points_are_reachable():
     seen = {compass_point(deg) for deg in range(0, 360, 5)}
 
     assert len(seen) == 16
+
+
+def test_sequence_wind_uses_the_driving_hour_not_the_history_mean():
+    import numpy as np
+
+    from services.tilesvc.wind_summary import wind_from_sequence
+
+    order = ["fire_t", "u", "v", "gust"]
+    # Five calm frames then the wind event that actually drives the forecast -
+    # the Palisades shape. Averaging these reported a quarter of the real speed.
+    dyn = np.zeros((6, 4, 4, 4), dtype=np.float32)
+    dyn[:5, 1] = -0.4
+    dyn[:5, 2] = 0.4
+    dyn[5, 1] = -4.84
+    dyn[5, 2] = -4.96
+    dyn[5, 3] = 14.0
+
+    w = wind_from_sequence(dyn, order)
+
+    assert w["speed_ms"] == pytest.approx(6.93, abs=0.05)
+    assert w["toward"] == "SW"
+    assert w["gust_ms"] == pytest.approx(14.0)
+
+
+def test_sequence_wind_reports_missing_channels_rather_than_guessing():
+    import numpy as np
+
+    from services.tilesvc.wind_summary import wind_from_sequence
+
+    out = wind_from_sequence(np.zeros((2, 2, 4, 4)), ["fire_t", "precip"])
+
+    assert out == {"available": False, "reason": "wind_channels_missing"}
