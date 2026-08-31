@@ -127,3 +127,27 @@ def test_a_pure_downwind_band_scores_near_plus_one():
     wind_toward = 225.0
 
     assert math.cos(math.radians(angular_difference(bearing, wind_toward))) > 0.95
+
+
+def test_growth_event_file_parses_the_wfigs_selection_format():
+    """--events accepts the row shape the WFIGS query produces.
+
+    Five fires is enough to notice a negative correlation and not enough to
+    trust one, so the harness has to run over a set pulled from an
+    authoritative source rather than one recalled by hand. Extra columns (the
+    acreage the selection carries) must be ignored, not rejected.
+    """
+    import json
+    import tempfile
+    from pathlib import Path
+
+    from tools.validate_growth import load_event_file
+
+    rows = [["big_grass", 42.6292, -117.335, "2026-07-29T00:00:00Z", 575163.0]]
+    with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as fh:
+        json.dump(rows, fh)
+        path = Path(fh.name)
+
+    events = load_event_file(path)
+
+    assert events == {"big_grass": (42.6292, -117.335, "2026-07-29T00:00:00Z")}
