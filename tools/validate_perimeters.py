@@ -96,7 +96,72 @@ def containment(predicted: np.ndarray, burned: np.ndarray, observed: np.ndarray)
     }
 
 
-def evaluate(name: str, steps: int = 3) -> Optional[Dict[str, Any]]:
+def learned_rollout(checkpoint: Path, x_dyn: np.ndarray, tile, steps: int) -> Optional[list]:
+    """The ConvLSTM's forecast, in the same rollout shape as the physics engines.
+
+    Without this the comparison is physics against physics, which answers the
+    wrong question. What matters is whether any engine beats the model the
+    project already has.
+    """
+    try:
+        import torch
+
+        from ignis_ml.scripts.validate_checkpoint import normalize_dynamic
+        from ignis_ml.src.data.features import append_derived_features
+        from ignis_ml.src.models.convlstm_unet import ConvLSTMUNet
+        from services.tilesvc.static_catalog import load_static_tensor_for_model
+    except ImportError as exc:
+        print("      (learned model unavailable: %s)" % exc)
+        return None
+
+    ck = torch.load(checkpoint, map_location="cpu", weights_only=False)
+    Cd, Cs = int(ck["cd"]), int(ck["cs"])
+    T = int(ck.get("seq_len") or x_dyn.shape[0])
+    dyn_order = list(ck.get("dyn_order") or
+                     ["fire_t", "u", "v", "gust", "tempC", "q", "precip"])
+    # Loud, not silent. A skipped model reads as "the physics engines are the
+    # only options", which is the wrong conclusion to draw from a missing
+    # credential.
+    try:
+        stat, _ = load_static_tensor_for_model(tile, list(ck.get("stat_order") or []))
+    except Exception as exc:  # noqa: BLE001 - the reason is the point
+        print("      (learned model skipped: statics unavailable - %s: %s)"
+              % (type(exc).__name__, str(exc)[:70]))
+        return None
+    stat = np.asarray(stat, dtype=np.float32)
+    if stat.shape[0] != Cs:
+        print("      (learned model skipped: checkpoint wants Cs=%d, statics gave %d)"
+              % (Cs, stat.shape[0]))
+        return None
+
+    model = ConvLSTMUNet(Cd=Cd, Cs=Cs, hidden=int(ck.get("hidden", 64)),
+                         drop=0.0, drop_decoder=0.0)
+    model.load_state_dict(ck["state_dict"])
+    model.eval()
+
+    threshold = float(ck.get("best_threshold", 0.5))
+    window = x_dyn[-T:].copy()
+    out = []
+    for index in range(steps):
+        xn = normalize_dynamic(window, dyn_order[:7])
+        if xn.shape[1] < Cd:
+            xn, _ = append_derived_features(xn, dyn_order=dyn_order[:7],
+                                            include=None, days_since_fire_cap=None)
+        with torch.no_grad():
+            prob = torch.sigmoid(model(torch.from_numpy(xn[None]).float(),
+                                       torch.from_numpy(stat[None]).float()))[0, 0].numpy()
+        lead = (index + 1) * 24
+        out.append({"index": index, "lead_hours": lead, "label": f"{lead // 24} day",
+                    "prob": prob.astype(np.float32)})
+        # Autoregressive feedback, as the service does: the prediction becomes
+        # the next step's fire channel.
+        nxt = window[-1].copy()
+        nxt[0] = np.maximum(window[-1, 0], (prob >= threshold).astype(np.float32))
+        window = np.concatenate([window[1:], nxt[None]], axis=0)
+    return out
+
+
+def evaluate(name: str, steps: int = 3, checkpoint: Optional[Path] = None) -> Optional[Dict[str, Any]]:
     from services.tilesvc.baseline_spread import baseline_rollout
     from services.tilesvc.dynamic_builder import build_dynamic_for_tile
     from services.tilesvc.fuel_raster import fuel_codes_for_tile
@@ -147,6 +212,11 @@ def evaluate(name: str, steps: int = 3) -> Optional[Dict[str, Any]]:
         "pyretechnics": (pyretechnics_rollout(observed.astype(np.float32), fuel_codes=codes,
                                               wind_series=series, steps=steps, step_hours=24), 0.5),
     }
+    if checkpoint is not None:
+        learned = learned_rollout(checkpoint, x, tile, steps)
+        if learned is not None:
+            engines["ignis (learned)"] = (learned, 0.5)
+
     results = {}
     for engine, (rollout, threshold) in engines.items():
         predicted = rollout[-1]["prob"] >= threshold
@@ -165,6 +235,12 @@ def evaluate(name: str, steps: int = 3) -> Optional[Dict[str, Any]]:
 
 
 def main(argv: Optional[List[str]] = None) -> int:
+    import argparse
+    ap = argparse.ArgumentParser(prog="python tools/validate_perimeters.py")
+    ap.add_argument("--checkpoint", type=Path, default=None,
+                    help="Score the learned model alongside the physics engines")
+    args = ap.parse_args(argv)
+
     print("Predicted 3-day growth against the final fire perimeter")
     print("Held out by construction: NDWS training data ends in 2020.")
     print()
@@ -174,7 +250,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     print("that has already been burning for days.\n")
     rows = []
     for name in EVENTS:
-        result = evaluate(name)
+        result = evaluate(name, checkpoint=args.checkpoint)
         if not result or result["status"] != "ok":
             print("  %-11s %s" % (name, (result or {}).get("status", "failed")))
             continue
@@ -192,7 +268,7 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     if rows:
         print("  %-13s %11s %10s %12s" % ("engine", "containment", "reached", "predicted km2"))
-        for engine in ("downwind", "rothermel", "pyretechnics"):
+        for engine in ("downwind", "rothermel", "pyretechnics", "ignis (learned)"):
             vals = [(c, v, a) for e, c, v, a in rows if e == engine]
             if not vals:
                 continue
