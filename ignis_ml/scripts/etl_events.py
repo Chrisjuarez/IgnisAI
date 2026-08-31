@@ -46,7 +46,10 @@ SEQ_LEN = 3
 
 #: A sample needs SEQ_LEN frames of history and a target the day after, so a
 #: window of N days yields N - SEQ_LEN samples.
-CACHE_ROOT = _REPO / ".cache" / "runtime_cache"
+#: Same override the cache builder uses, so the ETL reads wherever the
+#: backfill wrote - typically an external volume, since these do not belong on
+#: a boot drive.
+CACHE_ROOT = Path(os.getenv("IGNIS_CACHE_ROOT", str(_REPO / ".cache" / "runtime_cache")))
 
 
 def use_profile(profile: str) -> bool:
