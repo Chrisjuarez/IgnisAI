@@ -203,8 +203,14 @@ def main(argv: Optional[List[str]] = None) -> int:
     if totals:
         print("  %-15s %10s %9s %8s %12s" % ("engine", "precision", "recall", "IoU", "over-predict"))
         for name, rows in totals.items():
-            ok = [r for r in rows if r["iou"] is not None]
+            # A fire where the engine predicted nothing has no precision to
+            # average - IoU is defined (zero) but precision is not. Dropping
+            # those silently would flatter an engine for staying quiet, so they
+            # are counted and reported instead.
+            ok = [r for r in rows if r["precision"] is not None and r["iou"] is not None]
+            silent = len(rows) - len(ok)
             if not ok:
+                print("      %-15s predicted nothing on all %d fires" % (name, len(rows)))
                 continue
             ratio = sum(r["predicted_km2"] for r in ok) / max(sum(r["actual_km2"] for r in ok), 1e-9)
             print("      %-15s %9.3f %9.3f %8.3f %11.1fx" % (
@@ -212,7 +218,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                 sum(r["precision"] for r in ok) / len(ok),
                 sum(r["recall"] for r in ok) / len(ok),
                 sum(r["iou"] for r in ok) / len(ok),
-                ratio))
+                ratio) + ("   (silent on %d)" % silent if silent else ""))
 
         # The aggregate ratio hides the finding that matters. Per fire the
         # ratios run 0.3x to 21x and predicted growth is NEGATIVELY correlated
