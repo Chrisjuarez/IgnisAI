@@ -55,8 +55,8 @@ def _build_parser() -> argparse.ArgumentParser:
     build.add_argument("--lat", type=float, default=PALISADES_LAT)
     build.add_argument("--lon", type=float, default=PALISADES_LON)
     build.add_argument("--ref-time", default=PALISADES_REF_TIME)
-    build.add_argument("--out-dir", type=Path, default=Path(".cache/runtime_cache/palisades"))
-    build.add_argument("--work-dir", type=Path, default=Path(".cache/runtime_cache/work"))
+    build.add_argument("--out-dir", type=Path, default=_cache_root() / "palisades")
+    build.add_argument("--work-dir", type=Path, default=_cache_root() / "work")
     build.add_argument("--no-upload", action="store_true")
     build.add_argument("--skip-firms", action="store_true")
     build.add_argument("--skip-noaa", action="store_true")
@@ -80,8 +80,10 @@ def _build_parser() -> argparse.ArgumentParser:
     event.add_argument("--lon", type=float, required=True)
     event.add_argument("--ref-time", required=True, help="ISO timestamp, e.g. 2025-01-07T18:30:00Z.")
     event.add_argument("--bucket", default=default_runtime_bucket_uri())
-    event.add_argument("--out-dir", type=Path, default=None, help="Defaults to .cache/runtime_cache/{profile}/.")
-    event.add_argument("--work-dir", type=Path, default=Path(".cache/runtime_cache/work"))
+    event.add_argument("--out-dir", type=Path, default=None,
+                       help="Defaults to $IGNIS_CACHE_ROOT/{profile}/, or "
+                            ".cache/runtime_cache/{profile}/ when unset.")
+    event.add_argument("--work-dir", type=Path, default=_cache_root() / "work")
     event.add_argument("--no-upload", action="store_true")
     event.add_argument("--skip-firms", action="store_true")
     event.add_argument("--skip-noaa", action="store_true")
@@ -131,13 +133,18 @@ def main() -> None:
         print(summarize_result(result))
         return
     if args.command == "build-event":
+        # Resolve the default here rather than leaving it None. The callee
+        # falls back to a hard-coded .cache/runtime_cache/{profile}, which
+        # ignores IGNIS_CACHE_ROOT and quietly writes to the boot drive even
+        # when the cache root points at an external volume.
+        out_dir = args.out_dir or (_cache_root() / args.profile)
         result = build_event_runtime_cache(
             profile=args.profile,
             lat=args.lat,
             lon=args.lon,
             ref_time=args.ref_time,
             bucket_uri=args.bucket,
-            out_dir=args.out_dir,
+            out_dir=out_dir,
             work_dir=args.work_dir,
             upload=not args.no_upload,
             build_firms=not args.skip_firms,

@@ -42,3 +42,28 @@ def test_keeping_intermediates_is_opt_in(tmp_path, monkeypatch):
 def test_unreadable_path_does_not_break_the_build(tmp_path):
     # Cleanup runs in a finally; failing there would mask the real error.
     _discard_intermediate(tmp_path)   # a directory, not a file - must not raise
+
+
+def test_event_out_dir_follows_the_cache_root(monkeypatch, tmp_path):
+    """build-event must write where IGNIS_CACHE_ROOT points.
+
+    It defaulted --out-dir to None and the callee substituted a hard-coded
+    .cache/runtime_cache/{profile}. With the cache root set to an external
+    volume the builds still landed on the boot drive, reported success, and
+    refilled the disk that had just been cleared.
+    """
+    import importlib
+
+    monkeypatch.setenv("IGNIS_CACHE_ROOT", str(tmp_path / "external"))
+    module = importlib.reload(importlib.import_module("services.runtime_cache.__main__"))
+
+    assert module._cache_root() == tmp_path / "external"
+
+    parser = module._build_parser()
+    args = parser.parse_args(["build-event", "--profile", "somefire",
+                              "--lat", "40", "--lon", "-120",
+                              "--ref-time", "2026-07-01T00:00:00Z"])
+    resolved = args.out_dir or (module._cache_root() / args.profile)
+
+    assert resolved == tmp_path / "external" / "somefire"
+    assert args.work_dir == tmp_path / "external" / "work"
