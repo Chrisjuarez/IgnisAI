@@ -882,6 +882,24 @@ def _list_s3_keys(client: Any, *, bucket: str, prefix: str) -> List[str]:
         token = response.get("NextContinuationToken")
 
 
+class ProfileCollision(RuntimeError):
+    """A cache directory already holds a different event's snapshots."""
+
+
+def _guard_profile_marker(directory: Path, profile: str) -> None:
+    marker = directory / ".runtime_cache_profile"
+    if marker.is_file():
+        existing = marker.read_text(encoding="utf-8").strip()
+        if existing and existing != profile:
+            raise ProfileCollision(
+                f"{directory} already holds profile {existing!r}; refusing to sync "
+                f"{profile!r} over it. Snapshot filenames collide across events, so "
+                f"the two cannot share a directory - point FIRMS_SNAPSHOT_DIR / "
+                f"NOAA_GRID_CACHE_DIR at a per-profile path, or clear this one first."
+            )
+    marker.write_text(profile, encoding="utf-8")
+
+
 def sync_runtime_cache(
     *,
     bucket_uri: str = DEFAULT_RUNTIME_BUCKET,
@@ -893,6 +911,16 @@ def sync_runtime_cache(
     parsed = parse_s3_uri(bucket_uri)
     firms_dir.mkdir(parents=True, exist_ok=True)
     noaa_dir.mkdir(parents=True, exist_ok=True)
+
+    # Snapshot filenames are dates and nothing else, but their contents are
+    # scoped to the event's bounding box: palisades_mid and eaton_mid both hold
+    # a 2025-01-08.csv, with 1255 and 699 rows over different longitudes.
+    # Syncing a second profile into a directory that already holds a first
+    # would silently overwrite it, and that fire's forecast would then be built
+    # from another fire's detections. Refuse instead.
+    _guard_profile_marker(firms_dir, profile)
+    _guard_profile_marker(noaa_dir, profile)
+
     result = {
         "bucket": parsed.bucket,
         "profile": profile,

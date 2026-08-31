@@ -104,8 +104,18 @@ services:
         value: ignis/static
       - key: IGNIS_RUNTIME_CACHE_BUCKET
         value: s3://ignisai-static-chrisjuarez-2026/runtime
+      # palisades_full spans 2025-01-01..01-10, so one cache serves both the
+      # ignition-time preset (ref 01-07, which needs six frames back to 01-02)
+      # and a mid-fire reference three days in. The older `palisades` profile
+      # stopped at 01-07 and `palisades_mid` started at 01-04, so neither
+      # covers both - switching to _mid would have silently dropped two frames
+      # from the ignition preset.
+      #
+      # One profile per service, deliberately. Snapshot files are named by date
+      # but scoped to the event's bounding box, so two profiles sharing these
+      # directories would overwrite each other.
       - key: IGNIS_RUNTIME_CACHE_PROFILE
-        value: palisades
+        value: palisades_full
       - key: IGNIS_RUNTIME_CACHE_REQUIRED
         value: "0"
       - key: CALIBRATION_REQUIRED
