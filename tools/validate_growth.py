@@ -43,6 +43,8 @@ EVENTS = {
     "caldor_mid":     (38.5900, -120.5400, "2021-08-18T18:00:00Z"),
 }
 
+#: Forecast horizon in days. Overridable, because whether skill survives to
+#: three days is the question that decides the product.
 HORIZON_DAYS = 3
 
 #: Three input frames, matching the deployed control60 checkpoint. Six would
@@ -74,7 +76,8 @@ def growth_scores(predicted: np.ndarray, truth: np.ndarray, prior: np.ndarray) -
     }
 
 
-def evaluate(profile: str, checkpoint: Optional[Path]) -> Optional[Dict[str, Any]]:
+def evaluate(profile: str, checkpoint: Optional[Path],
+             horizon: int = HORIZON_DAYS) -> Optional[Dict[str, Any]]:
     from services.tilesvc.baseline_spread import baseline_rollout
     from services.tilesvc.dynamic_builder import build_dynamic_for_tile
     from services.tilesvc.fuel_raster import fuel_codes_for_tile
@@ -86,7 +89,7 @@ def evaluate(profile: str, checkpoint: Optional[Path]) -> Optional[Dict[str, Any
     lat, lon, iso = EVENTS[profile]
     use_profile(profile)
     verify_at = dt.datetime.fromisoformat(iso.replace("Z", "+00:00"))
-    forecast_at = verify_at - dt.timedelta(days=HORIZON_DAYS)
+    forecast_at = verify_at - dt.timedelta(days=horizon)
     tile = lonlat_to_tile(lon, lat)
 
     def frames(ref):
@@ -112,17 +115,17 @@ def evaluate(profile: str, checkpoint: Optional[Path]) -> Optional[Dict[str, Any
 
     engines = {
         "downwind": (baseline_rollout(prior.astype(np.float32), u_ms=u, v_ms=v,
-                                      steps=HORIZON_DAYS, step_hours=24,
+                                      steps=horizon, step_hours=24,
                                       ignition_rc=(SIZE // 2, SIZE // 2)), 0.1),
         "rothermel": (physics_rollout(prior.astype(np.float32), fuel_codes=codes, u_ms=u, v_ms=v,
-                                      steps=HORIZON_DAYS, step_hours=24,
+                                      steps=horizon, step_hours=24,
                                       ignition_rc=(SIZE // 2, SIZE // 2)), 0.1),
         "pyretechnics": (pyretechnics_rollout(prior.astype(np.float32), fuel_codes=codes,
-                                              wind_series=series, steps=HORIZON_DAYS,
+                                              wind_series=series, steps=horizon,
                                               step_hours=24), 0.5),
     }
     if checkpoint is not None:
-        learned = learned_rollout(checkpoint, x, tile, HORIZON_DAYS)
+        learned = learned_rollout(checkpoint, x, tile, horizon)
         if learned is not None:
             engines["ignis (learned)"] = (learned, 0.5)
 
@@ -154,14 +157,16 @@ def _pearson(a: List[float], b: List[float]) -> float:
 def main(argv: Optional[List[str]] = None) -> int:
     ap = argparse.ArgumentParser(prog="python tools/validate_growth.py")
     ap.add_argument("--checkpoint", type=Path, default=None)
+    ap.add_argument("--horizon", type=int, default=HORIZON_DAYS,
+                    help="Forecast horizon in days")
     args = ap.parse_args(argv)
 
-    print(f"{HORIZON_DAYS}-day forecast against the burn observed {HORIZON_DAYS} days later")
+    print(f"{args.horizon}-day forecast against the burn observed {args.horizon} days later")
     print("Prediction and truth come from the same cached FIRMS window.\n")
 
     totals: Dict[str, List[Dict[str, Any]]] = {}
     for profile in EVENTS:
-        result = evaluate(profile, args.checkpoint)
+        result = evaluate(profile, args.checkpoint, args.horizon)
         if not result or result["status"] != "ok":
             print("  %-15s %s" % (profile, (result or {}).get("status", "failed")))
             continue
