@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
+import json
 import os
 import sys
 from pathlib import Path
@@ -154,18 +155,36 @@ def _pearson(a: List[float], b: List[float]) -> float:
     return num / den if den else float("nan")
 
 
+def load_event_file(path: Path) -> Dict[str, tuple]:
+    """Extra events as [[profile, lat, lon, iso], ...].
+
+    Five fires is enough to notice a negative correlation and not enough to
+    trust one. This lets the same harness run over a set pulled from WFIGS,
+    where the coordinates and discovery dates are authoritative rather than
+    recalled.
+    """
+    rows = json.loads(Path(path).read_text(encoding="utf-8"))
+    return {r[0]: (float(r[1]), float(r[2]), r[3]) for r in rows}
+
+
 def main(argv: Optional[List[str]] = None) -> int:
     ap = argparse.ArgumentParser(prog="python tools/validate_growth.py")
     ap.add_argument("--checkpoint", type=Path, default=None)
+    ap.add_argument("--events", type=Path, default=None,
+                    help="JSON of [[profile, lat, lon, iso_verify_time], ...] to score "
+                         "instead of the built-in five")
     ap.add_argument("--horizon", type=int, default=HORIZON_DAYS,
                     help="Forecast horizon in days")
     args = ap.parse_args(argv)
+
+    events = load_event_file(args.events) if args.events else EVENTS
+    globals()["EVENTS"] = events
 
     print(f"{args.horizon}-day forecast against the burn observed {args.horizon} days later")
     print("Prediction and truth come from the same cached FIRMS window.\n")
 
     totals: Dict[str, List[Dict[str, Any]]] = {}
-    for profile in EVENTS:
+    for profile in events:
         result = evaluate(profile, args.checkpoint, args.horizon)
         if not result or result["status"] != "ok":
             print("  %-15s %s" % (profile, (result or {}).get("status", "failed")))

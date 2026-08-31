@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import sys
 import datetime as dt
 import io
 import json
@@ -30,7 +31,16 @@ DEFAULT_STEPS = 6
 DEFAULT_STEP_HOURS = 24
 REQUIRED_NOAA_CHANNELS = ("u", "v", "gust", "tempC", "q", "precip")
 FIRMS_COLUMNS = ("latitude", "longitude", "acq_date", "acq_time", "frp")
+#: Standard Processing first - quality controlled, and what the archive holds
+#: for anything more than a couple of months old.
 DEFAULT_FIRMS_PRODUCTS = ("VIIRS_SNPP_SP", "VIIRS_NOAA20_SP", "MODIS_SP")
+
+#: Near Real Time, tried when SP returns nothing. SP lags real time by weeks to
+#: months, so a fire from six weeks ago sits in a gap: too old for the live NRT
+#: window the app uses, too new for the archive. Measured on the 2026-07-25
+#: Big Grass bbox, SP returned 0 rows where NRT returned 321, 190 and 54.
+#: Without this the builder writes empty snapshots and reports success.
+FALLBACK_FIRMS_PRODUCTS = ("VIIRS_SNPP_NRT", "VIIRS_NOAA20_NRT", "MODIS_NRT")
 GFS_AWS_BASE = "https://noaa-gfs-bdp-pds.s3.amazonaws.com"
 HRRR_AWS_BASE = "https://noaa-hrrr-bdp-pds.s3.amazonaws.com"
 # Source labels stamped into the npz so tilesvc's weather_quality_status
@@ -174,17 +184,27 @@ def fetch_firms_rows_for_day(
         raise RuntimeError("NASA_API_KEY/FIRMS_API_KEY is required to build FIRMS runtime snapshots")
     session = session or requests.Session()
     area = ",".join(f"{float(v):.5f}" for v in bbox)
-    rows: List[Dict[str, str]] = []
-    for product in products:
-        url = (
-            f"https://firms.modaps.eosdis.nasa.gov/api/area/csv/{key}/"
-            f"{product}/{area}/1/{day.isoformat()}"
-        )
-        response = session.get(url, headers={"User-Agent": "ignis-ai-runtime-cache"}, timeout=45)
-        if response.status_code == 404:
-            continue
-        response.raise_for_status()
-        rows.extend(_parse_firms_csv(response.text))
+
+    def query(product_list: Sequence[str]) -> List[Dict[str, str]]:
+        found: List[Dict[str, str]] = []
+        for product in product_list:
+            url = (
+                f"https://firms.modaps.eosdis.nasa.gov/api/area/csv/{key}/"
+                f"{product}/{area}/1/{day.isoformat()}"
+            )
+            response = session.get(url, headers={"User-Agent": "ignis-ai-runtime-cache"}, timeout=45)
+            if response.status_code == 404:
+                continue
+            response.raise_for_status()
+            found.extend(_parse_firms_csv(response.text))
+        return found
+
+    rows = query(products)
+    if not rows:
+        # An empty SP result is ambiguous: either nothing burned, or the date
+        # falls in the gap where SP has not published yet. NRT distinguishes
+        # the two, and an empty answer from both is a real answer.
+        rows = query([p for p in FALLBACK_FIRMS_PRODUCTS if p not in set(products)])
 
     # Deduplicate overlapping products.
     deduped: Dict[Tuple[str, str, str, str], Dict[str, str]] = {}
@@ -219,6 +239,7 @@ def build_firms_snapshots(
     bbox = _tile_bbox(lat, lon)
     session = requests.Session()
     written: List[Path] = []
+    total_rows = 0
     for day in firms_snapshot_dates(ref, t_seq=t_seq, step_hours=step_hours):
         path = out_dir / f"{day.isoformat()}.csv"
         if path.exists() and not overwrite:
@@ -226,7 +247,21 @@ def build_firms_snapshots(
             continue
         rows = fetch_firms_rows_for_day(day=day, bbox=bbox, map_key=map_key, products=products, session=session)
         write_firms_snapshot(path, rows)
+        total_rows += len(rows)
         written.append(path)
+
+    # A cache with no detections anywhere is not a fire, and building a forecast
+    # on it produces confident nonsense. This built eighteen empty caches and
+    # reported success on every one, because the dates fell in the gap between
+    # what SP has published and what NRT still serves.
+    if written and total_rows == 0:
+        print(
+            f"WARNING: no FIRMS detections in any of {len(written)} days for "
+            f"{bbox} ending {ref:%Y-%m-%d}. Either nothing burned in this tile, "
+            f"or the window falls outside both the SP archive and the NRT feed. "
+            f"Forecasts built on this cache will have no fire to spread.",
+            file=sys.stderr,
+        )
     return written
 
 
