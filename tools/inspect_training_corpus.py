@@ -64,10 +64,18 @@ def inspect(tiles_dir: Path, sample: int = 200) -> int:
     zeroed = [s for s, z in zip(stat_names, zero_static) if z]
     print(f"  static channels zero in every tile: {zeroed or 'none'}")
 
-    weather = [c for c in constant if c != "fire_t"]
+    # Only the channels that steer spread matter here. precip is legitimately
+    # constant through a dry fire week, and flagging it hides the real case.
+    STEERING = {"u", "v", "gust", "tempC"}
+    weather = [c for c in constant if c in STEERING]
+    benign = [c for c in constant if c not in STEERING and c != "fire_t"]
     print()
+    if benign and not weather:
+        print(f"  Constant but benign: {', '.join(benign)} - unchanged through a dry")
+        print("  week is a real observation, not a corpus defect.")
     if weather:
-        print("  FINDING: the weather channels do not vary across the input sequence.")
+        print("  FINDING: the weather channels that steer spread do not vary across")
+        print("  the input sequence.")
         print("  A recurrent model cannot learn wind-driven spread from frames whose")
         print("  wind is identical - the only thing changing is the fire mask, so the")
         print("  recurrence can only learn the shape of that synthetic growth.")

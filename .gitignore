@@ -97,3 +97,4 @@ data/perimeters/
 models/eval/
 *.tar.gz
 research/wsts/third_party/
+data/events_*/
