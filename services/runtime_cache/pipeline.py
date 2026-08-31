@@ -338,6 +338,16 @@ def _select_gfs_records(records: Sequence[GfsRecord]) -> Dict[str, GfsRecord]:
     return selected
 
 
+def _discard_intermediate(path: Path) -> None:
+    """Remove a downloaded grib once its arrays have been extracted."""
+    if os.getenv("KEEP_GRIB_INTERMEDIATES", "").strip().lower() in {"1", "true", "yes"}:
+        return
+    try:
+        Path(path).unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
 def _download_gfs_subset(hour: dt.datetime, work_dir: Path, *, session: Optional[requests.Session] = None) -> Path:
     session = session or requests.Session()
     base_url = gfs_pgrb2_url(hour)
@@ -509,8 +519,11 @@ def build_gfs_npz_for_hour(
         validate_noaa_npz(out)
         return out
     grib = _download_gfs_subset(hour, work_dir, session=session)
-    arrays = _read_gfs_subset_to_arrays(grib, lat=lat, lon=lon)
-    write_noaa_npz(out, arrays, source=SOURCE_TAG_GFS)
+    try:
+        arrays = _read_gfs_subset_to_arrays(grib, lat=lat, lon=lon)
+        write_noaa_npz(out, arrays, source=SOURCE_TAG_GFS)
+    finally:
+        _discard_intermediate(grib)
     return out
 
 
@@ -646,8 +659,15 @@ def build_hrrr_npz_for_hour(
         validate_noaa_npz(out)
         return out
     grib = _download_hrrr_grib(hour, work_dir, session=session)
-    arrays = _read_hrrr_grib_to_arrays(grib, lat=lat, lon=lon)
-    write_noaa_npz(out, arrays, source=SOURCE_TAG_HRRR)
+    try:
+        arrays = _read_hrrr_grib_to_arrays(grib, lat=lat, lon=lon)
+        write_noaa_npz(out, arrays, source=SOURCE_TAG_HRRR)
+    finally:
+        # The grib is a pure intermediate - the npz is the product, and it is
+        # four orders of magnitude smaller. Left behind these accumulate at
+        # roughly 130 MB per hour per fire, which filled a 460 GB disk during a
+        # 197-fire backfill. Re-downloading on retry is far cheaper than that.
+        _discard_intermediate(grib)
     return out
 
 

@@ -29,6 +29,17 @@ def _path_env(name: str, default: str) -> Path:
     return Path(os.getenv(name, default))
 
 
+def _cache_root() -> Path:
+    """Where runtime caches and grib intermediates live.
+
+    Overridable because these do not belong on a small internal disk. A
+    backfill downloads one grib per hour per fire at roughly 130 MB, and while
+    those are now discarded after extraction, the npz caches still accumulate.
+    Set IGNIS_CACHE_ROOT to an external volume to keep both off the boot drive.
+    """
+    return Path(os.getenv("IGNIS_CACHE_ROOT", ".cache/runtime_cache"))
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="python -m services.runtime_cache",
