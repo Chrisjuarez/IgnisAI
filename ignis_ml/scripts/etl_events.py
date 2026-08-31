@@ -49,11 +49,11 @@ SEQ_LEN = 3
 #: Same override the cache builder uses, so the ETL reads wherever the
 #: backfill wrote - typically an external volume, since these do not belong on
 #: a boot drive.
-CACHE_ROOT = Path(os.getenv("IGNIS_CACHE_ROOT", str(_REPO / ".cache" / "runtime_cache")))
+from services.runtime_cache.paths import cache_root as CACHE_ROOT_FN
 
 
 def use_profile(profile: str) -> bool:
-    base = CACHE_ROOT / profile
+    base = CACHE_ROOT_FN() / profile
     firms, noaa = base / "firms_snapshots", base / "noaa_grid_cache"
     if not firms.is_dir() or not noaa.is_dir():
         return False

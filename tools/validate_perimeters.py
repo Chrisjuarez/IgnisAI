@@ -190,8 +190,8 @@ def evaluate(name: str, steps: int = 3, checkpoint: Optional[Path] = None) -> Op
 
     lat, lon, iso = EVENTS[name]
     ref = dt.datetime.fromisoformat(iso.replace("Z", "+00:00"))
-    snap = _REPO / ".cache" / "runtime_cache" / name / "firms_snapshots"
-    noaa = _REPO / ".cache" / "runtime_cache" / name / "noaa_grid_cache"
+    from services.runtime_cache.paths import firms_dir, noaa_dir
+    snap, noaa = firms_dir(name), noaa_dir(name)
     for key, path, required in (("FIRMS_SNAPSHOT_DIR", snap, "1"),
                                 ("NOAA_GRID_CACHE_DIR", noaa, None)):
         if path.is_dir():

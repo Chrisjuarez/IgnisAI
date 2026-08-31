@@ -55,11 +55,9 @@ T_SEQ = 3
 ORDER = ["fire_t", "u", "v", "gust", "tempC", "q", "precip"]
 
 
-def use_profile(profile: str) -> None:
-    base = _REPO / ".cache" / "runtime_cache" / profile
-    os.environ["FIRMS_SNAPSHOT_DIR"] = str(base / "firms_snapshots")
-    os.environ["FIRMS_SNAPSHOT_REQUIRED"] = "1"
-    os.environ["NOAA_GRID_CACHE_DIR"] = str(base / "noaa_grid_cache")
+def use_profile(profile: str) -> bool:
+    from services.runtime_cache.paths import use_profile as _use
+    return _use(profile)
 
 
 def growth_scores(predicted: np.ndarray, truth: np.ndarray, prior: np.ndarray) -> Dict[str, Any]:
