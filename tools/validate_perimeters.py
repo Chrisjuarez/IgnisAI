@@ -37,19 +37,38 @@ os.environ.setdefault("NOAA_GRIB_ENABLED", "1")
 
 PERIMETER_DIR = _REPO / "data" / "perimeters"
 
-#: Reference times matching the validator's event registry.
+#: Two reference times per fire, because they ask different questions.
+#:
+#: The ignition times come from the existing event registry and sit AT or
+#: BEFORE the first detection - eaton's is four hours before the fire started,
+#: and its cached window holds 4 background detections a day and never sees the
+#: fire. Forecasting from a fire that does not exist yet and scoring against
+#: where it later burned is why every engine scored 6-9% containment there.
+#:
+#: The mid-fire times sit two to six days in, where a real incident lives: an
+#: irregular multi-day footprint, thousands of detections, and weather that has
+#: turned since ignition. This is the case the product actually serves.
 EVENTS = {
-    "palisades": (34.0780, -118.5550, "2025-01-07T18:30:00Z"),
-    "eaton":     (34.1897, -118.1300, "2025-01-07T22:30:00Z"),
-    "camp":      (39.7596, -121.6219, "2018-11-08T14:30:00Z"),
-    "dixie":     (39.8760, -121.3870, "2021-07-14T17:00:00Z"),
-    "caldor":    (38.5900, -120.5400, "2021-08-14T18:00:00Z"),
+    "palisades":     (34.0780, -118.5550, "2025-01-07T18:30:00Z"),
+    "eaton":         (34.1897, -118.1300, "2025-01-07T22:30:00Z"),
+    "camp":          (39.7596, -121.6219, "2018-11-08T14:30:00Z"),
+    "dixie":         (39.8760, -121.3870, "2021-07-14T17:00:00Z"),
+    "caldor":        (38.5900, -120.5400, "2021-08-14T18:00:00Z"),
+    "palisades_mid": (34.0780, -118.5550, "2025-01-10T18:30:00Z"),
+    "eaton_mid":     (34.1897, -118.1300, "2025-01-10T22:30:00Z"),
+    "camp_mid":      (39.7596, -121.6219, "2018-11-10T14:30:00Z"),
+    "dixie_mid":     (39.8760, -121.3870, "2021-07-20T17:00:00Z"),
+    "caldor_mid":    (38.5900, -120.5400, "2021-08-18T18:00:00Z"),
 }
+
+#: Both phases of a fire score against the same final perimeter.
+def perimeter_name(event: str) -> str:
+    return event[:-4] if event.endswith("_mid") else event
 
 
 def perimeter_mask(name: str, tile) -> Optional[np.ndarray]:
     """The final fire perimeter, rasterised onto the tile grid."""
-    path = PERIMETER_DIR / f"{name}.geojson"
+    path = PERIMETER_DIR / f"{perimeter_name(name)}.geojson"
     if not path.is_file():
         return None
 
@@ -239,17 +258,27 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap = argparse.ArgumentParser(prog="python tools/validate_perimeters.py")
     ap.add_argument("--checkpoint", type=Path, default=None,
                     help="Score the learned model alongside the physics engines")
+    ap.add_argument("--mid", action="store_true",
+                    help="Score mid-fire rather than at ignition - the live case, "
+                         "where the fire already has a multi-day footprint")
     args = ap.parse_args(argv)
 
     print("Predicted 3-day growth against the final fire perimeter")
     print("Held out by construction: NDWS training data ends in 2020.")
     print()
-    print("CAVEAT: only palisades has cached FIRMS snapshots. The others start")
-    print("from a seeded ignition blob rather than a real observed footprint,")
-    print("so they test ignition-time behaviour, not the live case of a fire")
-    print("that has already been burning for days.\n")
+    if args.mid:
+        print("Phase: MID-FIRE - two to six days in, real multi-day footprints.")
+        print("This is the case the product serves.\n")
+    else:
+        print("Phase: IGNITION - reference times at or before the first detection.")
+        print("The hardest case and not the product's: eaton's reference time is")
+        print("four hours before that fire started. Use --mid for the live case.\n")
     rows = []
     for name in EVENTS:
+        if name.endswith("_mid") and not args.mid:
+            continue
+        if args.mid and not name.endswith("_mid"):
+            continue
         result = evaluate(name, checkpoint=args.checkpoint)
         if not result or result["status"] != "ok":
             print("  %-11s %s" % (name, (result or {}).get("status", "failed")))
