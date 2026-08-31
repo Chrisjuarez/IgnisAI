@@ -21,7 +21,10 @@ CONSTANT = 1e-9
 
 
 def inspect(tiles_dir: Path, sample: int = 200) -> int:
-    files = sorted(glob.glob(str(tiles_dir / "*.npz")))[:sample]
+    # Exclude macOS AppleDouble sidecars: an external volume writes a ._name
+    # companion per file, and they match *.npz without being npz.
+    files = sorted(p for p in glob.glob(str(tiles_dir / "*.npz"))
+                   if not Path(p).name.startswith("._"))[:sample]
     if not files:
         print(f"no tiles under {tiles_dir}", file=sys.stderr)
         return 1
