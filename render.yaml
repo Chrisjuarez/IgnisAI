@@ -78,16 +78,29 @@ services:
     dockerContext: .
     healthCheckPath: /healthz
     envVars:
+      # control60, not v3. Scored on identical held-out NDWS cells the two are
+      # not close: AP 0.808 vs 0.256, best CSI 0.567 vs 0.213, and v3's Brier
+      # skill is -1.409 - worse than always predicting the base rate. v3's
+      # higher published CSI came from a split that was never recorded as
+      # group-aware, so consecutive days of one fire sat in both train and
+      # validation; every RunPod run used group_aware and measured honestly.
+      #
+      # Tseq, threshold and channel order all come from the checkpoint, so
+      # swapping the file carries the T6 -> T3 change with it.
       - key: MODEL_PATH
-        value: /app/models/convlstm_unet_v3_delta_Cd13_Cs15_H64_T6_nautilus.pt
+        value: /app/models/convlstm_unet_control60_delta_Cd13_Cs15_H64_T3.pt
       - key: REQUIRED_ARCH_VERSION
         value: v3
       - key: NASA_API_KEY
         sync: false # NASA FIRMS API key (same key as FIRMS_API_KEY above)
+      # Public release asset and its checksum - neither is a secret, and holding
+      # them here rather than in dashboard state keeps the model identity under
+      # version control next to the calibration fitted for it. A mismatch is
+      # then a diff rather than an invisible drift.
       - key: MODEL_URL
-        sync: false # URL to download model .pt file (if not baked into Docker image)
+        value: https://github.com/Chrisjuarez/IgnisAI/releases/download/v1.0.0/convlstm_unet_control60_delta_Cd13_Cs15_H64_T3.pt
       - key: MODEL_SHA256
-        sync: false # Optional checksum; accepts bare hex or sha256:<hex>
+        value: a849e1d97b9bec171d3009fbec8b1374e818221d89cb622ef5f56d69209a69a4
       - key: STATIC_CATALOG_PATH
         value: /app/config/static_catalog.production.json
       - key: STATIC_CATALOG_REQUIRED
@@ -118,8 +131,22 @@ services:
         value: palisades_full
       - key: IGNIS_RUNTIME_CACHE_REQUIRED
         value: "0"
+      # Calibrated probabilities, not raw sigmoid scores. Without a calibration
+      # loaded the service maps scores through the identity curve, so a
+      # displayed "0.7" was whatever the network emitted rather than a claim
+      # that seven in ten such cells burn. Measured on held-out tiles the
+      # difference is large: Brier 0.031 -> 0.015, skill 0.147 -> 0.597,
+      # expected calibration error 0.036 -> 0.003.
+      #
+      # The file names the checkpoint sha it was fitted for and the loader
+      # rejects a mismatch, so the pairing cannot drift silently.
+      - key: CALIBRATION_PATH
+        value: /app/config/calibration.control60.json
+      # Required, so an uncalibrated deploy fails loudly instead of quietly
+      # serving uncalibrated numbers as probabilities. That distinction is the
+      # whole point for anything priced off these outputs.
       - key: CALIBRATION_REQUIRED
-        value: "0"
+        value: "1"
       # Production runs with this on; the blueprint said "0" while the
       # dashboard said "1", which made the served weather source impossible to
       # reason about from the repo. Off means the cached NOAA grids are never
