@@ -67,3 +67,49 @@ def test_event_out_dir_follows_the_cache_root(monkeypatch, tmp_path):
 
     assert resolved == tmp_path / "external" / "somefire"
     assert args.work_dir == tmp_path / "external" / "work"
+
+
+def test_hrrr_index_bands_pin_the_altitude():
+    """UGRD appears at several altitudes in the HRRR surface file.
+
+    Matching the variable alone lands on 80 m or a diagnostic max-wind field
+    and produces jet-stream values over a surface fire, which is a documented
+    past bug in this pipeline. The index lookup must pin the level.
+    """
+    from services.runtime_cache.pipeline import HRRR_IDX_BANDS
+
+    levels = dict(HRRR_IDX_BANDS)
+    assert levels["UGRD"] == "10 m above ground"
+    assert levels["VGRD"] == "10 m above ground"
+    assert levels["TMP"] == "2 m above ground"
+
+
+def test_index_parse_yields_ranges_and_last_record_is_open_ended(monkeypatch):
+    """A record's length is the next record's offset; the last runs to EOF."""
+    import services.runtime_cache.pipeline as pipeline
+
+    class FakeResponse:
+        text = (
+            "1:0:d=2026:REFC:entire atmosphere:anl:\n"
+            "9:2705323:d=2026:GUST:surface:anl:\n"
+            "77:43020972:d=2026:UGRD:10 m above ground:anl:\n"
+            "78:45164444:d=2026:VGRD:10 m above ground:anl:\n"
+        )
+        def raise_for_status(self): pass
+
+    class FakeSession:
+        def get(self, url, **kw): return FakeResponse()
+
+    ranges = pipeline._hrrr_index("https://example/x.grib2", FakeSession())
+
+    assert ranges == [(2705323, 43020971), (43020972, 45164443), (45164444, None)]
+
+
+def test_missing_index_falls_back_to_the_whole_file():
+    """A slow correct answer beats a fast missing one."""
+    import services.runtime_cache.pipeline as pipeline
+
+    class Failing:
+        def get(self, url, **kw): raise OSError("no index")
+
+    assert pipeline._hrrr_index("https://example/x.grib2", Failing()) is None
