@@ -124,8 +124,18 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     ap.add_argument("--lr", type=float, default=1e-4)
     ap.add_argument("--wind-weight", type=float, default=0.2)
     ap.add_argument("--seed", type=int, default=42)
+    ap.add_argument("--device", default=None,
+                    help="cuda, mps or cpu. Defaults to the best available - a "
+                         "533-sample rollout is ~20 min per epoch on CPU and "
+                         "seconds on a GPU, so this belongs on RunPod.")
+    ap.add_argument("--batch-size", type=int, default=8,
+                    help="Rollout groups per step. One at a time wastes a GPU.")
     args = ap.parse_args(argv)
 
+    device = torch.device(args.device or
+                          ("cuda" if torch.cuda.is_available()
+                           else "mps" if torch.backends.mps.is_available() else "cpu"))
+    print(f"  device: {device}")
     torch.manual_seed(args.seed)
     rng = np.random.default_rng(args.seed)
 
@@ -137,6 +147,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     model = ConvLSTMUNet(Cd=cd, Cs=cs, hidden=int(ck.get("hidden", 64)),
                          drop=0.0, drop_decoder=0.0)
     model.load_state_dict(ck["state_dict"])
+    model.to(device)
 
     by_fire = load_corpus(args.tiles)
     fires = sorted(by_fire)
@@ -157,12 +168,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     def run_group(group: Sequence[Path], train: bool) -> torch.Tensor:
         xn, stat, _, wind = prepare(group[0], dyn_order, cd, stat_order)
-        x = torch.from_numpy(xn[None]).float()
-        s = torch.from_numpy(stat[None]).float()
-        total = torch.zeros(())
+        x = torch.from_numpy(xn[None]).float().to(device)
+        s = torch.from_numpy(stat[None]).float().to(device)
+        total = torch.zeros((), device=device)
         for step, path in enumerate(group):
             _, _, y_np, wind = prepare(path, dyn_order, cd, stat_order)
-            y = torch.from_numpy(y_np[None, None]).float()
+            y = torch.from_numpy(y_np[None, None]).float().to(device)
             logits = model(x, s)
             base = F.binary_cross_entropy_with_logits(logits, y)
             loss = base + 0.6 * tversky_loss(logits, y, alpha=0.3, beta=0.7)
@@ -170,8 +181,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 fire_last = x[:, -1, 0:1]
                 loss = loss + args.wind_weight * wind_align_loss(
                     logits, fire_last,
-                    torch.tensor([wind[0]], dtype=torch.float32),
-                    torch.tensor([wind[1]], dtype=torch.float32))
+                    torch.tensor([wind[0]], dtype=torch.float32, device=device),
+                    torch.tensor([wind[1]], dtype=torch.float32, device=device))
             total = total + STEP_WEIGHTS[min(step, len(STEP_WEIGHTS) - 1)] * loss
             # Autoregressive feedback: the prediction becomes the next fire
             # channel, which is exactly what the service does at serve time.
@@ -192,7 +203,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             opt.step()
-            train_loss += float(loss)
+            train_loss += float(loss.detach())
         model.eval()
         with torch.no_grad():
             val_loss = sum(float(run_group(g, False)) for g in val_groups) / len(val_groups)
@@ -204,7 +215,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         print(f"  epoch {epoch + 1:2d}  train {train_loss:.4f}  val {val_loss:.4f}{marker}")
 
     out = dict(ck)
-    out["state_dict"] = best_state or model.state_dict()
+    out["state_dict"] = {k: v.cpu() for k, v in (best_state or model.state_dict()).items()}
     out["seq_len"] = int(ck.get("seq_len") or 3)
     out["finetune"] = {
         "base_checkpoint": args.ckpt.name,
@@ -218,6 +229,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         "best_val_loss": best,
         "fires_train": len(train_fires),
         "fires_val": len(val_fires),
+        "device": str(device),
     }
     out["split_stats"] = {"split": "group_aware", "grouped_on": "fire_id",
                           "val_fraction": VAL_FRACTION, "seed": args.seed}
