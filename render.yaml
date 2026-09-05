@@ -88,7 +88,7 @@ services:
       # Tseq, threshold and channel order all come from the checkpoint, so
       # swapping the file carries the T6 -> T3 change with it.
       - key: MODEL_PATH
-        value: /app/models/convlstm_unet_control60_delta_Cd13_Cs15_H64_T3.pt
+        value: /app/models/convlstm_unet_ft_rollout_Cd13_Cs15_H64_T3.pt
       - key: REQUIRED_ARCH_VERSION
         value: v3
       - key: NASA_API_KEY
@@ -98,9 +98,9 @@ services:
       # version control next to the calibration fitted for it. A mismatch is
       # then a diff rather than an invisible drift.
       - key: MODEL_URL
-        value: https://github.com/Chrisjuarez/IgnisAI/releases/download/v1.0.0/convlstm_unet_control60_delta_Cd13_Cs15_H64_T3.pt
+        value: https://github.com/Chrisjuarez/IgnisAI/releases/download/v1.0.0/convlstm_unet_ft_rollout_Cd13_Cs15_H64_T3.pt
       - key: MODEL_SHA256
-        value: a849e1d97b9bec171d3009fbec8b1374e818221d89cb622ef5f56d69209a69a4
+        value: 793d9fe3ff6d1e55fc22bdccd3f2eb6febd8522753ac91db5e81a5222b3fc354
       - key: STATIC_CATALOG_PATH
         value: /app/config/static_catalog.production.json
       - key: STATIC_CATALOG_REQUIRED
@@ -141,7 +141,7 @@ services:
       # The file names the checkpoint sha it was fitted for and the loader
       # rejects a mismatch, so the pairing cannot drift silently.
       - key: CALIBRATION_PATH
-        value: /app/config/calibration.control60.json
+        value: /app/config/calibration.ft_none.json
       # Required, so an uncalibrated deploy fails loudly instead of quietly
       # serving uncalibrated numbers as probabilities. That distinction is the
       # whole point for anything priced off these outputs.

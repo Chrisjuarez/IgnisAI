@@ -20,6 +20,7 @@ authoritative and is not.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import datetime as dt
 import json
 import os
@@ -118,8 +119,13 @@ def brier_skill_score(prob: np.ndarray, label: np.ndarray) -> float:
 def curve_from_pairs(prob: np.ndarray, label: np.ndarray, knots: int = 32) -> List[List[float]]:
     """Thin the isotonic fit to a small monotone lookup the service interpolates."""
     xs, fitted = isotonic_fit(prob, label)
+    # Quantile knots alone put every knot where the mass is, and in a fire
+    # raster 97% of cells sit near zero - the curve came out with points at
+    # 0.05 and then nothing until 0.99, straight through the range the model
+    # actually makes decisions in. Uniform knots cover that range; quantile
+    # knots keep resolution in the crowded low end. Use both.
     qs = np.linspace(0.0, 1.0, knots)
-    raw = np.quantile(xs, qs)
+    raw = np.unique(np.concatenate([np.quantile(xs, qs), np.linspace(0.0, 1.0, knots)]))
     mapped = np.interp(raw, xs, fitted)
     # Force the ends and strip duplicate x, which np.interp needs to be strictly
     # increasing to behave.
@@ -231,7 +237,7 @@ def collect_pairs(ckpt_path: Path, event: str, *, seq_len: Optional[int],
         "days": used,
         "seq_len": T,
         "excluded_prior_fire": EXCLUDE_PRIOR_FIRE,
-        "model_sha256": ck.get("sha256"),
+        "model_sha256": hashlib.sha256(Path(ckpt_path).read_bytes()).hexdigest(),
     }
     return np.concatenate(probs), np.concatenate(labels), meta
 
@@ -345,7 +351,11 @@ def collect_pairs_from_tiles(ckpt_path: Path, tiles: Path, *, seq_len: Optional[
         "seq_len": T,
         "target_mode": target_mode,
         "excluded_prior_fire": EXCLUDE_PRIOR_FIRE,
-        "model_sha256": ck.get("sha256"),
+        # Hash the file, do not read a key from it. Checkpoints written by
+        # training do not carry their own sha, so this was writing null - and
+        # a calibration with a null sha passes the serving guard for ANY
+        # checkpoint, which is the exact mismatch the guard exists to catch.
+        "model_sha256": hashlib.sha256(Path(ckpt_path).read_bytes()).hexdigest(),
     }
     print(f"  scored {len(indices)} held-out tiles of {total}")
     return np.concatenate(probs), np.concatenate(labels), meta
