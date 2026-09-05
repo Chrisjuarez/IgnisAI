@@ -536,11 +536,15 @@ def build_gfs_npz_for_hour(
 # at 25 km but resolved (or at least hinted at) at 3 km. AWS Open Data
 # hosts the full archive at noaa-hrrr-bdp-pds with no auth required.
 #
-# We download the full ``wrfsfcf{FF}.grib2`` because HRRR doesn't publish
-# .idx-style byte-range subsetting on AWS the way GFS does. The file is
-# ~140 MB; for a 6-hour multistep cache that is ~840 MB of transient
-# downloads — acceptable for a backfill, and once the npz cache is built
-# tilesvc never touches the gribs again.
+# HRRR DOES publish .idx byte-range indices on AWS - the earlier note here
+# said otherwise and that was wrong, at a cost of roughly 13x the bandwidth.
+# The surface file is ~110 MB and carries ~170 bands; the six this pipeline
+# reads total ~8.6 MB. A 151-fire backfill downloading whole files is ~232 GB
+# to keep ~142 MB of npz.
+#
+# _hrrr_index fetches the .idx, and _download_hrrr_grib issues one ranged GET
+# per needed band. If the index is unavailable it falls back to the whole
+# file, because a slow correct answer beats a fast missing one.
 
 
 def hrrr_pgrb2_url(hour: dt.datetime, *, forecast_hour: int = 0) -> str:
@@ -559,21 +563,90 @@ def hrrr_pgrb2_url(hour: dt.datetime, *, forecast_hour: int = 0) -> str:
     )
 
 
+#: GRIB variable and level, as they appear in the .idx, for the bands read by
+#: _read_hrrr_grib_to_arrays. Level strings must match the index exactly:
+#: UGRD appears at several altitudes and picking the wrong one yields
+#: jet-stream winds over a surface fire.
+HRRR_IDX_BANDS = (
+    ("UGRD", "10 m above ground"),
+    ("VGRD", "10 m above ground"),
+    ("GUST", "surface"),
+    ("TMP", "2 m above ground"),
+    ("SPFH", "2 m above ground"),
+    ("APCP", "surface"),
+)
+
+
+def _hrrr_index(url: str, session: requests.Session) -> Optional[List[Tuple[int, Optional[int]]]]:
+    """Byte ranges for the bands we need, or None if the index is unavailable.
+
+    Each .idx line is `record:offset:date:VAR:LEVEL:...`; a record's length is
+    the next record's offset, and the last runs to end of file.
+    """
+    try:
+        response = session.get(url + ".idx", timeout=60)
+        response.raise_for_status()
+    except Exception:
+        return None
+
+    records = []
+    for line in response.text.splitlines():
+        parts = line.split(":")
+        if len(parts) < 5:
+            continue
+        try:
+            records.append((int(parts[1]), parts[3], parts[4]))
+        except ValueError:
+            continue
+    if not records:
+        return None
+
+    wanted = set(HRRR_IDX_BANDS)
+    ranges: List[Tuple[int, Optional[int]]] = []
+    for i, (offset, variable, level) in enumerate(records):
+        if (variable, level) in wanted:
+            end = records[i + 1][0] - 1 if i + 1 < len(records) else None
+            ranges.append((offset, end))
+    return ranges or None
+
+
 def _download_hrrr_grib(hour: dt.datetime, work_dir: Path, *, session: Optional[requests.Session] = None) -> Path:
-    """Download the HRRR analysis surface grib for this hour into work_dir."""
+    """Download the HRRR analysis surface grib for this hour into work_dir.
+
+    Only the bands this pipeline reads, when the .idx allows it - about 8.6 MB
+    of a 110 MB file. Concatenated GRIB messages are themselves a valid GRIB,
+    so the reader needs no change.
+    """
     session = session or requests.Session()
     work_dir.mkdir(parents=True, exist_ok=True)
     out = work_dir / f"{parse_ref_time(hour).strftime('%Y%m%dT%H')}_hrrr_sfc.grib2"
     if out.exists():
         return out
     url = hrrr_pgrb2_url(hour, forecast_hour=0)
-    response = session.get(url, headers={"User-Agent": "ignis-ai-runtime-cache"}, timeout=300, stream=True)
-    response.raise_for_status()
+    headers = {"User-Agent": "ignis-ai-runtime-cache"}
     tmp = out.with_suffix(out.suffix + ".part")
-    with tmp.open("wb") as f:
-        for chunk in response.iter_content(chunk_size=4 * 1024 * 1024):
-            if chunk:
-                f.write(chunk)
+
+    ranges = None if os.getenv("HRRR_FULL_DOWNLOAD") else _hrrr_index(url, session)
+    if ranges:
+        # One ranged GET per band, concatenated. GRIB messages are
+        # self-delimiting, so a concatenation of messages is a valid GRIB and
+        # rasterio reads it exactly as it reads the whole file.
+        with tmp.open("wb") as f:
+            for start, end in ranges:
+                span = f"bytes={start}-{end}" if end is not None else f"bytes={start}-"
+                part = session.get(url, headers={**headers, "Range": span},
+                                   timeout=300, stream=True)
+                part.raise_for_status()
+                for chunk in part.iter_content(chunk_size=1024 * 1024):
+                    if chunk:
+                        f.write(chunk)
+    else:
+        response = session.get(url, headers=headers, timeout=300, stream=True)
+        response.raise_for_status()
+        with tmp.open("wb") as f:
+            for chunk in response.iter_content(chunk_size=4 * 1024 * 1024):
+                if chunk:
+                    f.write(chunk)
     tmp.replace(out)
     return out
 
