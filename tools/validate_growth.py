@@ -236,11 +236,27 @@ def main(argv: Optional[List[str]] = None) -> int:
                 name, " ".join("%5.1fx" % (p / a) for p, a in zip(pred, actual)),
                 _pearson(actual, pred)))
         print()
-        print("  A negative correlation is the result to act on. It means no scalar")
-        print("  spread-rate calibration can help: the engines are not uniformly")
-        print("  fast or slow, they are uncorrelated with how these fires actually")
-        print("  ran. Growth over three days is dominated by suppression, weather")
-        print("  change and fuel exhaustion - none of which any engine here models.")
+        # Conditional, because this printed unchanged on a run where downwind
+        # correlated +0.48 - the strongest positive any engine had shown - and
+        # told the reader the opposite of what the table said.
+        corrs = {}
+        for name, rows in totals.items():
+            ok = [r for r in rows if r["iou"] is not None and r["actual_km2"] > 0]
+            if len(ok) >= 3:
+                corrs[name] = _pearson([r["actual_km2"] for r in ok],
+                                       [r["predicted_km2"] for r in ok])
+        if corrs and max(corrs.values()) < 0.2:
+            print("  Nothing here tracks how much these fires grew. No scalar spread-rate")
+            print("  calibration can help: the engines are not uniformly fast or slow, they")
+            print("  are uncorrelated with how the fires actually ran. Three-day growth is")
+            print("  dominated by suppression, weather change and fuel exhaustion, none of")
+            print("  which any engine here models.")
+        else:
+            best = max(corrs, key=corrs.get)
+            print("  %s tracks growth best at %+.2f. A positive correlation means a" % (best, corrs[best]))
+            print("  spread-rate calibration could help THAT engine - it is systematically")
+            print("  off rather than uninformative. Engines near zero are a different")
+            print("  problem and scaling them fixes nothing.")
     return 0
 
 
