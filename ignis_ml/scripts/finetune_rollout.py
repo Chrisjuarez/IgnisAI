@@ -130,6 +130,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                          "seconds on a GPU, so this belongs on RunPod.")
     ap.add_argument("--batch-size", type=int, default=8,
                     help="Rollout groups per step. One at a time wastes a GPU.")
+    ap.add_argument("--freeze", choices=("none", "encoders", "backbone"), default="none",
+                    help="Freeze pretrained weights. The network has 13M parameters and "
+                         "this corpus has a few hundred samples, so training all of them "
+                         "destroys what the base learned from 20,097 NDWS tiles rather "
+                         "than refining it. 'encoders' freezes the 2.3M input stacks; "
+                         "'backbone' also freezes the 9.4M RNN, leaving ~1.3M in the "
+                         "decoder.")
     args = ap.parse_args(argv)
 
     device = torch.device(args.device or
@@ -149,6 +156,24 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     model.load_state_dict(ck["state_dict"])
     model.to(device)
 
+    # Freezing is the standard answer to fine-tuning a large network on a small
+    # corpus: keep the features the base already learned and move only the
+    # layers that map them to this task.
+    FROZEN = {
+        "encoders": ("dyn_enc1", "dyn_down1", "dyn_down2",
+                     "stat_enc1", "stat_down1", "stat_down2"),
+        "backbone": ("dyn_enc1", "dyn_down1", "dyn_down2",
+                     "stat_enc1", "stat_down1", "stat_down2", "rnn"),
+    }.get(args.freeze, ())
+    for name, child in model.named_children():
+        if name in FROZEN:
+            for param in child.parameters():
+                param.requires_grad = False
+    trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    total = sum(p.numel() for p in model.parameters())
+    print(f"  trainable: {trainable:,} of {total:,} parameters "
+          f"({100 * trainable / total:.0f}%, freeze={args.freeze})")
+
     by_fire = load_corpus(args.tiles)
     fires = sorted(by_fire)
     rng.shuffle(fires)
@@ -164,7 +189,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         print("  not enough consecutive days to supervise a rollout", file=sys.stderr)
         return 1
 
-    opt = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=5e-4)
+    opt = torch.optim.AdamW([p for p in model.parameters() if p.requires_grad],
+                            lr=args.lr, weight_decay=5e-4)
 
     def run_group(group: Sequence[Path], train: bool) -> torch.Tensor:
         xn, stat, _, wind = prepare(group[0], dyn_order, cd, stat_order)
@@ -230,6 +256,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         "fires_train": len(train_fires),
         "fires_val": len(val_fires),
         "device": str(device),
+        "freeze": args.freeze,
+        "trainable_params": trainable,
     }
     out["split_stats"] = {"split": "group_aware", "grouped_on": "fire_id",
                           "val_fraction": VAL_FRACTION, "seed": args.seed}
