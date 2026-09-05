@@ -1041,22 +1041,19 @@ def _apply_crop_window(prob: np.ndarray, crop_window: Dict[str, Any]) -> Tuple[n
     return prob[y0:y1, x0:x1], crop_window["bounds"], crop_window["anchor_px"]
 
 
-def _radial_alpha_mask(shape: Tuple[int, int], anchor_px: Tuple[int, int]) -> np.ndarray:
+def _display_alpha_mask(shape: Tuple[int, int], anchor_px: Tuple[int, int]) -> np.ndarray:
+    """
+    Display alpha for a probability raster.
+
+    This used to multiply in a radial fade centred on the ignition, which gave
+    every forecast the same glowing-blob silhouette no matter what the model
+    predicted, and dimmed the leading edge — the part worth looking at — hardest
+    of all. Only the edge vignette survives, because that one is honest: it hides
+    the hard rectangular tile boundary when the overlay is viewed zoomed out.
+    """
     H, W = shape
     cx, cy = anchor_px
     yy, xx = np.indices((H, W), dtype=np.float32)
-
-    # Radial fade from the anchor (fire source) outward
-    dist = np.sqrt((xx - float(cx)) ** 2 + (yy - float(cy)) ** 2)
-    corner_dists = [
-        math.hypot(float(cx), float(cy)),
-        math.hypot(float(W - 1 - cx), float(cy)),
-        math.hypot(float(cx), float(H - 1 - cy)),
-        math.hypot(float(W - 1 - cx), float(H - 1 - cy)),
-    ]
-    max_dist = max(max(corner_dists), 1.0)
-    norm = np.clip(dist / max_dist, 0.0, 1.0)
-    radial_fade = np.clip(1.0 - np.power(norm, 1.7), 0.0, 1.0)
 
     # Edge vignette: fade toward all 4 borders to remove the hard rectangular
     # frame that becomes visible when the overlay is viewed zoomed out.
@@ -1086,13 +1083,13 @@ def _radial_alpha_mask(shape: Tuple[int, int], anchor_px: Tuple[int, int]) -> np
         np.clip(d_bottom + (1.0 - a_bottom), 0.0, 1.0)
     )
 
-    return (radial_fade * vignette).astype(np.float32)
+    return vignette.astype(np.float32)
 
 
 def _prob_to_display_png(prob: np.ndarray, threshold: float, anchor_px: Tuple[int, int]) -> bytes:
     gray = _prob_to_grayscale(prob, threshold=threshold)
     active = (gray > 0).astype(np.float32)
-    fade = _radial_alpha_mask(gray.shape, anchor_px)
+    fade = _display_alpha_mask(gray.shape, anchor_px)
     alpha = np.round(active * fade * 255.0).astype(np.uint8)
     return _encode_png_from_channels(gray, alpha=alpha)
 

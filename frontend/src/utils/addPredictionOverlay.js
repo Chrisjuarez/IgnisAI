@@ -32,7 +32,22 @@ const IDS = {
   contourLine: 'ignis-pred-contour-line',
   contour50Source: 'ignis-pred-contour50-src',
   contour50Line: 'ignis-pred-contour50-line',
+
+  scarSource: 'ignis-scene-scar-src',
+  scarFill: 'ignis-scene-scar-fill',
+  scarLine: 'ignis-scene-scar-line',
+  bandSource: 'ignis-scene-band-src',
+  bandFill: 'ignis-scene-band-fill',
+  bandLine: 'ignis-scene-band-line',
+  ignitionSource: 'ignis-scene-ignition-src',
+  ignitionPoint: 'ignis-scene-ignition-point',
 };
+
+// Arrival bands are drawn from one source, so paint order has to come from a
+// sort key rather than layer order: the earliest band sits on top.
+const BAND_LEAD_HOURS = ['coalesce', ['get', 'lead_hours'], ['*', ['coalesce', ['get', 'day'], 0], 24]];
+const BAND_SORT_KEY = ['-', 0, BAND_LEAD_HOURS];
+const BAND_COLOR = ['coalesce', ['get', 'color'], '#f97316'];
 
 const MAP_STYLE_READY_TIMEOUT_MS = 8000;
 
@@ -238,8 +253,10 @@ async function colorizeGrayscalePngToHeatmapDataUrl(base64Png, opts = {}) {
     let v = raw / 255;
     v = Math.pow(v, gamma);
 
-    // Alpha ramps up with intensity
-    const a = clamp01(0.3 + v * 0.7) * opacity;
+    // Alpha tracks intensity from the display floor up. A hard alpha floor
+    // here made a 10%-probability cell read almost as strongly as a 50% one,
+    // which is what turned multi-day forecasts into one flat orange wash.
+    const a = clamp01(0.06 + v * 0.94) * opacity;
 
     // Inferno-inspired color ramp (matches notebook's matplotlib look)
     let r, g, b;
@@ -475,6 +492,7 @@ export async function prepareMultistepRasterFrames(payload, opts = {}) {
 
   return {
     bounds,
+    scene: payload?.scene || null,
     threshold: payload?.threshold,
     displayFloor: payload?.display_floor,
     stepHours: payload?.step_hours,
@@ -706,8 +724,167 @@ export async function addPredictionOverlay(map, apiBaseOrParams, latMaybe, lonMa
   return addRasterOverlay(map, apiBase, lat, lon, opts);
 }
 
+// ---------------------------------------------------------------------------
+// Arrival-band ("isochrone") scene
+//
+// The multistep payload already carries a `scene` object: the burn scar the
+// model was seeded with, one polygon band per forecast day, and the ignition
+// point. Bands are cumulative — a feature tagged `day: 3` is everything the
+// model expects to have burned by hour 72 — so scrubbing the timeline grows
+// a crisp footprint outward instead of cross-fading six probability clouds.
+// ---------------------------------------------------------------------------
+
+const EMPTY_COLLECTION = { type: 'FeatureCollection', features: [] };
+
+function asFeatureCollection(value) {
+  if (isFeatureCollection(value)) return value;
+  if (value?.type === 'Feature') return { type: 'FeatureCollection', features: [value] };
+  return EMPTY_COLLECTION;
+}
+
+function upsertGeoJSONSource(map, sourceId, geojson) {
+  const existing = map.getSource(sourceId);
+  if (existing) {
+    existing.setData(geojson);
+    return false;
+  }
+  map.addSource(sourceId, { type: 'geojson', data: geojson });
+  return true;
+}
+
+// Keep place names and roads legible by slotting fills under the basemap's
+// first symbol layer rather than on top of everything.
+function firstSymbolLayerId(map) {
+  try {
+    const layers = map.getStyle()?.layers || [];
+    return layers.find(layer => layer.type === 'symbol')?.id;
+  } catch (_) {
+    return undefined;
+  }
+}
+
+function addLayerBelowLabels(map, layer) {
+  if (map.getLayer(layer.id)) return;
+  map.addLayer(layer, firstSymbolLayerId(map));
+}
+
+function bandPaint(activeLeadHours) {
+  const reached = Number.isFinite(activeLeadHours)
+    ? ['<=', BAND_LEAD_HOURS, activeLeadHours]
+    : true;
+  const isFront = Number.isFinite(activeLeadHours)
+    ? ['==', BAND_LEAD_HOURS, activeLeadHours]
+    : false;
+  return {
+    fill: {
+      'fill-color': BAND_COLOR,
+      'fill-opacity': ['case', reached, 0.32, 0.0],
+    },
+    line: {
+      'line-color': BAND_COLOR,
+      'line-width': ['case', isFront, 2.8, ['case', reached, 1.2, 1.0]],
+      'line-opacity': ['case', isFront, 1.0, ['case', reached, 0.7, 0.22]],
+    },
+  };
+}
+
+/**
+ * Draw the arrival-band scene. Safe to call on every timeline tick: sources are
+ * updated in place and only the two day-dependent paint properties are reset.
+ */
+export async function renderPredictionScene(map, scene, opts = {}) {
+  await waitForMapLoad(map);
+
+  const bands = asFeatureCollection(scene?.forecast);
+  if (!bands.features.length) {
+    removePredictionScene(map);
+    return { kind: 'scene', bands: 0 };
+  }
+
+  const activeLeadHours = Number.isFinite(opts.activeLeadHours) ? Number(opts.activeLeadHours) : null;
+  const paint = bandPaint(activeLeadHours);
+
+  const scar = asFeatureCollection(scene?.observed);
+  if (scar.features.length) {
+    upsertGeoJSONSource(map, IDS.scarSource, scar);
+    addLayerBelowLabels(map, {
+      id: IDS.scarFill,
+      type: 'fill',
+      source: IDS.scarSource,
+      paint: { 'fill-color': '#1c1917', 'fill-opacity': 0.55 },
+    });
+    addLayerBelowLabels(map, {
+      id: IDS.scarLine,
+      type: 'line',
+      source: IDS.scarSource,
+      paint: { 'line-color': '#a8a29e', 'line-width': 1.1, 'line-opacity': 0.8 },
+    });
+  } else {
+    removeIfExists(map, IDS.scarLine, null);
+    removeIfExists(map, IDS.scarFill, IDS.scarSource);
+  }
+
+  upsertGeoJSONSource(map, IDS.bandSource, bands);
+  addLayerBelowLabels(map, {
+    id: IDS.bandFill,
+    type: 'fill',
+    source: IDS.bandSource,
+    layout: { 'fill-sort-key': BAND_SORT_KEY },
+    paint: paint.fill,
+  });
+  addLayerBelowLabels(map, {
+    id: IDS.bandLine,
+    type: 'line',
+    source: IDS.bandSource,
+    layout: { 'line-sort-key': BAND_SORT_KEY, 'line-join': 'round' },
+    paint: paint.line,
+  });
+
+  // Re-applied every tick so scrubbing does not tear down and rebuild layers.
+  map.setPaintProperty(IDS.bandFill, 'fill-opacity', paint.fill['fill-opacity']);
+  map.setPaintProperty(IDS.bandLine, 'line-width', paint.line['line-width']);
+  map.setPaintProperty(IDS.bandLine, 'line-opacity', paint.line['line-opacity']);
+
+  const ignition = asFeatureCollection(scene?.ignition);
+  if (ignition.features.length) {
+    upsertGeoJSONSource(map, IDS.ignitionSource, ignition);
+    addLayerBelowLabels(map, {
+      id: IDS.ignitionPoint,
+      type: 'circle',
+      source: IDS.ignitionSource,
+      paint: {
+        'circle-radius': 5,
+        'circle-color': '#fef3c7',
+        'circle-stroke-color': '#7f1d1d',
+        'circle-stroke-width': 2,
+      },
+    });
+  } else {
+    removeIfExists(map, IDS.ignitionPoint, IDS.ignitionSource);
+  }
+
+  return { kind: 'scene', bands: bands.features.length, activeLeadHours };
+}
+
+export function removePredictionRaster(map) {
+  if (!map) return;
+  removeIfExists(map, IDS.contourLine, IDS.contourSource);
+  removeIfExists(map, IDS.contour50Line, IDS.contour50Source);
+  removeIfExists(map, IDS.rasterLayer, IDS.rasterSource);
+}
+
+export function removePredictionScene(map) {
+  if (!map) return;
+  removeIfExists(map, IDS.ignitionPoint, IDS.ignitionSource);
+  removeIfExists(map, IDS.bandLine, null);
+  removeIfExists(map, IDS.bandFill, IDS.bandSource);
+  removeIfExists(map, IDS.scarLine, null);
+  removeIfExists(map, IDS.scarFill, IDS.scarSource);
+}
+
 export function removePredictionOverlays(map) {
   if (!map) return;
+  removePredictionScene(map);
   removeIfExists(map, IDS.contourLine, IDS.contourSource);
   removeIfExists(map, IDS.contour50Line, IDS.contour50Source);
   removeIfExists(map, IDS.rasterLayer, IDS.rasterSource);

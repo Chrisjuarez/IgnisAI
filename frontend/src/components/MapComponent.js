@@ -20,7 +20,10 @@ import {
   addPredictionOverlay,
   prepareMultistepRasterFrames,
   removePredictionOverlays,
-  renderPredictionRasterFrame
+  removePredictionRaster,
+  removePredictionScene,
+  renderPredictionRasterFrame,
+  renderPredictionScene
 } from '../utils/addPredictionOverlay';
 
 // ---- Tokens / Base URLs -----------------------------------------------------
@@ -515,6 +518,10 @@ const MapComponent = forwardRef(({
   const [forecastError, setForecastError] = useState(null);
   const [observedLayersVisible, setObservedLayersVisibleState] = useState(true);
   const [forecastLayerMode, setForecastLayerMode] = useState('new_burn');
+  // 'bands' draws cumulative day-by-day arrival polygons; 'heat' keeps the
+  // per-cell probability raster for reading confidence inside a single day.
+  const [spreadView, setSpreadView] = useState('bands');
+  const [forecastScene, setForecastScene] = useState(null);
 
   // Historical fire testing state
   const [showHistPanel, setShowHistPanel] = useState(false);
@@ -826,6 +833,7 @@ const MapComponent = forwardRef(({
     setIsForecastPlaying(false);
     setForecastVisible(false);
     setForecastFrames([]);
+    setForecastScene(null);
     setActiveForecastIndex(0);
     setForecastLayerMode('new_burn');
     removePredictionOverlays(mapRef.current);
@@ -909,6 +917,7 @@ const MapComponent = forwardRef(({
       }
 
       setForecastTitle(title);
+      setForecastScene(prepared.scene || null);
       setForecastFrames(prepared.frames);
       setActiveForecastIndex(0);
       setIsForecastPlaying(false);
@@ -1740,9 +1749,7 @@ const MapComponent = forwardRef(({
       setObservedLayersVisible(observedLayersVisible);
       applyLayerVisibility();
       if (forecastVisible && forecastFrames[activeForecastIndex]) {
-        renderPredictionRasterFrame(map, forecastFrames[activeForecastIndex], { layerMode: forecastLayerMode }).catch(err => {
-          console.error('Forecast frame render error:', err);
-        });
+        renderActiveSpread(map, forecastFrames[activeForecastIndex]);
       }
     });
   }, [mapStyle]);
@@ -1771,14 +1778,25 @@ const MapComponent = forwardRef(({
     applyLayerVisibility(layerVisibility);
   }, [layerVisibility, ndviOn, forecastVisible, forecastFrames.length]);
 
-  useEffect(() => {
-    if (!forecastVisible || !forecastFrames.length) return;
-    const frame = forecastFrames[activeForecastIndex];
-    if (!frame) return;
-    renderPredictionRasterFrame(mapRef.current, frame, { layerMode: forecastLayerMode }).catch(err => {
+  const renderActiveSpread = useCallback((map, frame) => {
+    if (!map || !frame) return;
+    if (spreadView === 'bands' && forecastScene?.forecast?.features?.length) {
+      removePredictionRaster(map);
+      renderPredictionScene(map, forecastScene, { activeLeadHours: frame.lead_hours }).catch(err => {
+        console.error('Forecast scene render error:', err);
+      });
+      return;
+    }
+    removePredictionScene(map);
+    renderPredictionRasterFrame(map, frame, { layerMode: forecastLayerMode }).catch(err => {
       console.error('Forecast frame render error:', err);
     });
-  }, [forecastVisible, forecastFrames, activeForecastIndex, forecastLayerMode]);
+  }, [spreadView, forecastScene, forecastLayerMode]);
+
+  useEffect(() => {
+    if (!forecastVisible || !forecastFrames.length) return;
+    renderActiveSpread(mapRef.current, forecastFrames[activeForecastIndex]);
+  }, [forecastVisible, forecastFrames, activeForecastIndex, renderActiveSpread]);
 
   useEffect(() => {
     if (!forecastVisible || !isForecastPlaying || forecastFrames.length < 2) return undefined;
@@ -1977,6 +1995,30 @@ const MapComponent = forwardRef(({
         font-size: 11px; font-weight: 700; cursor: pointer;
       }
       .forecast-layer-btn.active { background: #ff7b2f; color: #111; border-color: #ff7b2f; }
+      .forecast-layer-btn:disabled { opacity: 0.35; cursor: not-allowed; }
+      .forecast-view-controls {
+        display: flex; gap: 6px; margin: 0 0 8px;
+      }
+      .forecast-band-key {
+        list-style: none; display: flex; flex-wrap: wrap; gap: 4px 10px;
+        margin: 0 0 10px; padding: 0;
+      }
+      .forecast-band-key li {
+        display: flex; align-items: center; gap: 5px;
+        font-size: 11px; font-weight: 600; color: rgba(247,243,234,0.6);
+      }
+      .forecast-band-key li.current { color: #f7f3ea; }
+      .forecast-band-key .swatch {
+        width: 13px; height: 13px; border-radius: 3px;
+        border: 1px solid rgba(0,0,0,0.35);
+      }
+      .forecast-band-key li.current .swatch {
+        box-shadow: 0 0 0 2px rgba(247,243,234,0.85);
+      }
+      .forecast-metric em {
+        display: block; font-style: normal; font-size: 10px;
+        color: rgba(247,243,234,0.45); margin-top: 2px;
+      }
       .forecast-slider {
         width: 100%;
         accent-color: #ff7b2f;
@@ -2046,6 +2088,14 @@ const MapComponent = forwardRef(({
   const activeQualityReasons = Array.isArray(activeQuality.reasons) ? activeQuality.reasons : [];
   const activeTargetMode = activeForecastMeta.model_meta?.target_mode || 'unknown';
   const activeNewBurn = activeForecastMeta.p_new_burn || {};
+  const activeDisplayScore = activeForecastMeta.display_score || {};
+  // The rendered field is the calibrated display score, not the raw sigmoid.
+  // Reporting prob_max next to calibrated pixels overstated confidence by ~2x.
+  const activeCalibratedPeak = activeDisplayScore.max ?? null;
+  const activeRawPeak = activeNewBurn?.prob_max ?? activeForecastFrame?.prob_max ?? null;
+  const sceneBandCount = forecastScene?.forecast?.features?.length ?? 0;
+  const bandsAvailable = sceneBandCount > 0;
+  const showingBands = spreadView === 'bands' && bandsAvailable;
   const activeNextFire = activeForecastMeta.p_next_fire || {};
   const activeObservedFire = activeForecastMeta.observed_fire || {};
   const activeDisplayMask = activeForecastMeta.display_mask || {};
@@ -2151,7 +2201,9 @@ const MapComponent = forwardRef(({
             </button>
           </div>
           <div className="forecast-advisory">
-            This heatmap shows modeled relative risk of new fire spread. It is not an observed or predicted official perimeter.
+            {showingBands
+              ? 'Each band is where the model expects fire to have reached by that lead time. It is not an observed or predicted official perimeter.'
+              : 'This heatmap shows modeled relative risk of new fire spread. It is not an observed or predicted official perimeter.'}
           </div>
           <div className="forecast-badges">
             <span className={`forecast-badge ${qualityBadgeClass}`}>
@@ -2165,6 +2217,40 @@ const MapComponent = forwardRef(({
               <span key={reason} className="forecast-badge warn">{reason.replace(/_/g, ' ')}</span>
             ))}
           </div>
+          <div className="forecast-view-controls" role="group" aria-label="Spread view">
+            <button
+              className={`forecast-layer-btn ${showingBands ? 'active' : ''}`}
+              onClick={() => setSpreadView('bands')}
+              disabled={!bandsAvailable}
+              title={bandsAvailable ? 'Cumulative arrival bands' : 'No arrival bands in this forecast'}
+            >
+              Arrival bands
+            </button>
+            <button
+              className={`forecast-layer-btn ${showingBands ? '' : 'active'}`}
+              onClick={() => setSpreadView('heat')}
+              title="Per-cell probability heatmap"
+            >
+              Probability heat
+            </button>
+          </div>
+          {showingBands && (
+            <ol className="forecast-band-key" aria-label="Arrival band key">
+              {[...forecastScene.forecast.features]
+                .map(feature => feature.properties || {})
+                .filter((props, idx, all) => all.findIndex(o => o.day === props.day) === idx)
+                .sort((a, b) => (a.day ?? 0) - (b.day ?? 0))
+                .map(props => (
+                  <li
+                    key={props.day}
+                    className={props.lead_hours === activeForecastFrame?.lead_hours ? 'current' : ''}
+                  >
+                    <span className="swatch" style={{ background: props.color }} />
+                    {props.label}
+                  </li>
+                ))}
+            </ol>
+          )}
           <div className="forecast-layer-controls" aria-label="Forecast layer controls">
             <button
               className={`forecast-layer-btn ${observedLayersVisible ? 'active' : ''}`}
@@ -2187,7 +2273,9 @@ const MapComponent = forwardRef(({
           </div>
           <div className="forecast-meta">
             Frame {activeForecastIndex + 1} of {forecastFrames.length}
-            {activeNewBurn?.prob_max != null ? ` · Peak advisory probability ${(activeNewBurn.prob_max * 100).toFixed(1)}%` : activeForecastFrame?.prob_max != null ? ` · Peak advisory probability ${(activeForecastFrame.prob_max * 100).toFixed(1)}%` : ''}
+            {activeCalibratedPeak != null
+              ? ` · Peak calibrated confidence ${(activeCalibratedPeak * 100).toFixed(1)}%`
+              : activeRawPeak != null ? ` · Peak raw score ${(activeRawPeak * 100).toFixed(1)}%` : ''}
             {activeAboveThreshold != null ? ` · Above threshold ${(activeAboveThreshold * 100).toFixed(1)}%` : ''}
             {activeStepHours ? ` · ${activeStepHours}h cadence` : ''}
           </div>
@@ -2198,8 +2286,11 @@ const MapComponent = forwardRef(({
               Decision threshold
             </div>
             <div className="forecast-metric">
-              <strong>{activeNewBurn?.prob_max != null ? `${(activeNewBurn.prob_max * 100).toFixed(1)}%` : activeForecastFrame?.prob_max != null ? `${(activeForecastFrame.prob_max * 100).toFixed(1)}%` : '--'}</strong>
-              Peak advisory probability
+              <strong>{activeCalibratedPeak != null ? `${(activeCalibratedPeak * 100).toFixed(1)}%` : '--'}</strong>
+              Peak calibrated confidence
+              {activeRawPeak != null && (
+                <em>raw {(activeRawPeak * 100).toFixed(0)}%</em>
+              )}
             </div>
             <div className="forecast-metric">
               <strong>{activeAboveThreshold != null ? `${(activeAboveThreshold * 100).toFixed(1)}%` : '--'}</strong>
@@ -2216,6 +2307,8 @@ const MapComponent = forwardRef(({
             {activeDisplayArea != null ? ` Visible cells ${(activeDisplayArea * 100).toFixed(1)}%.` : ''}
             {activeObservedFire?.area_fraction != null ? ` Observed ${(activeObservedFire.area_fraction * 100).toFixed(1)}%.` : ''}
             {activeDisplayMask?.masked_fraction != null ? ` Masked nonburnable ${(activeDisplayMask.masked_fraction * 100).toFixed(1)}%.` : ''}
+            {' '}
+            View: {showingBands ? `arrival bands (${sceneBandCount} polygons)` : 'probability heat'}.
             {' '}
             Layer: {forecastLayerMode === 'next_fire' ? 'reconstructed next-fire context' : 'new-burn risk'}.
             {' '}
