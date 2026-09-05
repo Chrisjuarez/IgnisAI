@@ -63,9 +63,44 @@ def use_profile(profile: str) -> bool:
     return True
 
 
+def available_days(profile: str) -> int:
+    """Days of paired FIRMS and NOAA coverage this fire actually has."""
+    base = CACHE_ROOT_FN() / profile
+    firms = len([p for p in (base / "firms_snapshots").glob("*.csv")
+                 if not p.name.startswith("._")]) if (base / "firms_snapshots").is_dir() else 0
+    noaa = len([p for p in (base / "noaa_grid_cache").glob("*.npz")
+                if not p.name.startswith("._")]) if (base / "noaa_grid_cache").is_dir() else 0
+    return min(firms, noaa)
+
+
+def latest_cached_day(profile: str) -> Optional[str]:
+    """Newest FIRMS snapshot date for this fire, as an ISO timestamp."""
+    firms = CACHE_ROOT_FN() / profile / "firms_snapshots"
+    if not firms.is_dir():
+        return None
+    days = sorted(p.stem for p in firms.glob("*.csv") if not p.name.startswith("._"))
+    return f"{days[-1]}T18:00:00Z" if days else None
+
+
 def build_event_samples(profile: str, lat: float, lon: float, ref_iso: str,
                         window: int, out_dir: Path) -> List[Dict[str, Any]]:
-    """One builder call per fire, sliced into consecutive chained samples."""
+    """One builder call per fire, sliced into consecutive chained samples.
+
+    The window is capped per fire rather than fixed across the corpus. A single
+    window is limited by the weakest fire: asking for 19 days dropped every
+    fire with only 14 days of coverage and produced 204 samples from 37 fires,
+    where a 9-day window over the same caches gave 533 from 133. Sizing per
+    fire takes the long windows where they exist without discarding the rest.
+    """
+    window = max(SEQ_LEN + 1, min(window, available_days(profile) - 1))
+
+    # Take the reference time from the cache, not the caller. A fixed offset
+    # asks every fire for the same date, and fires whose caches were built at
+    # different times do not have it - 226 of 322 failed with InputUnavailable
+    # for exactly that reason. The cache knows which days it holds.
+    latest = latest_cached_day(profile)
+    if latest is not None:
+        ref_iso = latest
     from services.tilesvc.dynamic_builder import build_dynamic_for_tile
     from services.tilesvc.grid import lonlat_to_tile
     from services.tilesvc.static_catalog import load_static_tensor_for_model
