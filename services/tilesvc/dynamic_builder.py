@@ -13,6 +13,7 @@ from shapely.geometry import Point
 from rasterio.features import rasterize
 
 from .grid import SIZE, lonlat_to_tile, tile_affine, tile_bounds_lonlat, lonlat_to_xy_m
+from .hrrr_grids import fetch_hrrr_tile_grids, hrrr_enabled
 from .static_catalog import InputUnavailable
 from ignis_ml.src.data.transforms import wind_to_uv, rh_to_q, fire_boost
 
@@ -26,6 +27,7 @@ OPEN_METEO = "https://api.open-meteo.com/v1/forecast"
 # HTTP round trips (which were a root cause of tilesvc OOMs under bursty load).
 _FIRMS_TTL_SEC    = int(os.getenv("FIRMS_CACHE_TTL",   "300"))  # 5 min
 _WEATHER_TTL_SEC  = int(os.getenv("WEATHER_CACHE_TTL", "600"))  # 10 min
+_HRRR_TIMEOUT_SEC = float(os.getenv("HRRR_TIMEOUT_SEC", "20"))
 _CACHE_MAX_ENTRIES = 256
 
 _firms_cache: dict = {}
@@ -41,8 +43,12 @@ def _set_weather_source(source: str, reason: str = ""):
     _LAST_WEATHER_REASON = reason
 
 
+# Sources that give the model a real spatial wind field rather than a constant.
+GRIDDED_WEATHER_SOURCES = ("noaa_gridded", "hrrr_on_demand")
+
+
 def weather_quality_status():
-    ok = _LAST_WEATHER_SOURCE == "noaa_gridded"
+    ok = _LAST_WEATHER_SOURCE in GRIDDED_WEATHER_SOURCES
     return {
         "status": "ok" if ok else "degraded",
         "source": _LAST_WEATHER_SOURCE,
@@ -125,6 +131,66 @@ def _fetch_noaa_cached_weather_grids(lat: float, lon: float, ref_time: dt.dateti
         _set_weather_source("open_meteo_fallback", f"noaa_cache_invalid:{exc}")
         print(f"⚠️  NOAA weather cache failed ({path}): {exc}")
         return None
+
+def _fetch_hrrr_weather_grids(lat: float, lon: float, ref_time: dt.datetime | None):
+    """
+    Fetch HRRR grids for this tile-hour when the prebuilt npz cache misses.
+
+    The npz cache only covers profiles someone backfilled, so every other tile
+    dropped to the Open-Meteo point fallback: one scalar wind broadcast across
+    32 km. HRRR is 3 km, which is the difference between a wind field the model
+    can follow and a constant it cannot.
+
+    Results are written back into the npz cache, so the second prediction for a
+    tile-hour costs nothing. Any failure returns None and the caller falls
+    through to the existing fallback — this is an upgrade, never a new way to
+    fail a prediction.
+    """
+    if not hrrr_enabled() or ref_time is None:
+        return None
+
+    # The npz cache is only read back when NOAA_GRIB_ENABLED is set, so keep an
+    # in-process cache too: a multistep request asks for six distinct hours, and
+    # users re-click the same tile.
+    hour = ref_time.replace(minute=0, second=0, microsecond=0)
+    cache_key = ("hrrr", round(float(lat), 2), round(float(lon), 2), hour.isoformat())
+    cached = _cache_get(_weather_cache, cache_key, _WEATHER_TTL_SEC)
+    if cached is not None:
+        _set_weather_source("hrrr_on_demand", "memory_cache")
+        return {k: v.copy() for k, v in cached.items()}
+
+    cache_path = _noaa_cache_path(lat, lon, ref_time)
+    try:
+        grids = fetch_hrrr_tile_grids(lat, lon, ref_time, timeout=_HRRR_TIMEOUT_SEC)
+    except Exception as exc:
+        _set_weather_source("open_meteo_fallback", f"hrrr_fetch_failed:{exc}")
+        print(f"⚠️  HRRR on-demand fetch failed ({lat},{lon} @ {ref_time}): {exc}")
+        return None
+
+    if grids is None:
+        _set_weather_source("open_meteo_fallback", "hrrr_unavailable_for_hour")
+        return None
+
+    _write_noaa_cache(cache_path, grids)
+    _cache_set(_weather_cache, cache_key, {k: v.copy() for k, v in grids.items()})
+    _set_weather_source("hrrr_on_demand", f"{lat:.2f},{lon:.2f}@{ref_time:%Y%m%dT%H}")
+    return grids
+
+
+def _write_noaa_cache(path: Path | None, grids: dict) -> None:
+    """Persist a fetched hour so repeat predictions read it back for free."""
+    if path is None:
+        return
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        np.savez_compressed(
+            path,
+            **{name: grids[name] for name in ("u", "v", "gust", "tempC", "q", "precip")},
+        )
+    except Exception as exc:
+        # A cache that cannot be written is a slow prediction, not a failed one.
+        print(f"⚠️  Could not cache HRRR grids at {path}: {exc}")
+
 
 # Products to merge for better coverage (NRT = near‑real‑time)
 FIRMS_PRODUCTS = [
@@ -380,6 +446,10 @@ def fetch_weather_grids(lat: float, lon: float, ref_time: dt.datetime = None):
     noaa_grids = _fetch_noaa_cached_weather_grids(lat, lon, ref_time)
     if noaa_grids is not None:
         return {k: v.copy() for k, v in noaa_grids.items()}
+
+    hrrr_grids = _fetch_hrrr_weather_grids(lat, lon, ref_time)
+    if hrrr_grids is not None:
+        return {k: v.copy() for k, v in hrrr_grids.items()}
 
     now = dt.datetime.now(dt.timezone.utc)
     use_archive = (ref_time is not None and (now - ref_time).total_seconds() > 86400)
