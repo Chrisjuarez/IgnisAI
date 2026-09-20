@@ -22,6 +22,14 @@ from services.tilesvc.grid import CRS_ALBERS, SIZE, lonlat_to_tile, tile_affine,
 
 
 DEFAULT_RUNTIME_BUCKET = "s3://ignisai-static-chrisjuarez-2026/runtime"
+
+#: The FBFM40 source raster the physics engines read. It is a sibling of the
+#: runtime prefix, not under it: one static raster for all events, not per
+#: profile.
+DEFAULT_FUEL_RASTER_URI = (
+    "s3://ignisai-static-chrisjuarez-2026/source-data/landfire/"
+    "fbfm40_western_conus_2024_500m.tif"
+)
 DEFAULT_PROFILE = "palisades"
 PALISADES_LAT = 34.05
 PALISADES_LON = -118.55
@@ -1093,6 +1101,32 @@ def summarize_result(result: RuntimeBuildResult | Mapping[str, Any]) -> str:
     else:
         payload = result
     return json.dumps(payload, indent=2, sort_keys=True)
+
+
+def fetch_fuel_raster(
+    *,
+    uri: str = DEFAULT_FUEL_RASTER_URI,
+    target: Optional[Path] = None,
+    overwrite: bool = False,
+) -> Dict[str, Any]:
+    """
+    Download the FBFM40 raster to where services.tilesvc.fuel_raster looks.
+
+    Without it the physics engines have no fuel model to read, and the raster
+    is ~8 MB against caches measured in gigabytes, so there is no reason for it
+    not to be present.
+    """
+    from services.runtime_cache.paths import cache_root
+
+    parsed = parse_s3_uri(uri)
+    target = target or (cache_root() / "source-rasters" / Path(parsed.key).name)
+
+    if target.is_file() and not overwrite:
+        return {"path": str(target), "downloaded": False, "bytes": target.stat().st_size}
+
+    target.parent.mkdir(parents=True, exist_ok=True)
+    _download_s3_file(bucket=parsed.bucket, key=parsed.key, target=target)
+    return {"path": str(target), "downloaded": True, "bytes": target.stat().st_size}
 
 
 def validate_runtime_dirs(*, firms_dir: Path, noaa_dir: Path) -> Dict[str, Any]:
