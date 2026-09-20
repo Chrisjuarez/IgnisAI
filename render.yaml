@@ -101,6 +101,14 @@ services:
         value: https://github.com/Chrisjuarez/IgnisAI/releases/download/v1.0.0/convlstm_unet_ft_rollout_Cd13_Cs15_H64_T3.pt
       - key: MODEL_SHA256
         value: 793d9fe3ff6d1e55fc22bdccd3f2eb6febd8522753ac91db5e81a5222b3fc354
+      # Hybrid spread layer: rank-mean of the learned model, rothermel and
+      # pyretechnics. Off by default - it adds ~600 ms per request and needs the
+      # fuel raster, which the entrypoint pulls from the same private bucket the
+      # static COGs come from. The layer is additive; p_new_burn is unchanged.
+      - key: HYBRID_SPREAD_ENABLED
+        value: "0"
+      - key: FBFM40_PATH
+        value: /data/source-rasters/fbfm40_western_conus_2024_500m.tif
       - key: STATIC_CATALOG_PATH
         value: /app/config/static_catalog.production.json
       - key: STATIC_CATALOG_REQUIRED

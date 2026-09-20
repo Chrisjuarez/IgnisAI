@@ -107,3 +107,74 @@ def hybrid_rollout(
         fields = [np.asarray(rollouts[name][index]["prob"], dtype=np.float32) for name in rollouts]
         combined.append({"prob": combine_fields(fields, mask=mask), "engines": list(rollouts)})
     return combined
+
+
+def wind_series_from_dyn(dyn: np.ndarray, channel_order: Sequence[str], frames: int = 3) -> List[tuple]:
+    """Per-frame mean (u, v) over the last `frames` input frames."""
+    order = list(channel_order)
+    u_idx, v_idx = order.index("u"), order.index("v")
+    count = min(frames, dyn.shape[0])
+    return [
+        (float(dyn[i, u_idx].mean()), float(dyn[i, v_idx].mean()))
+        for i in range(-count, 0)
+    ]
+
+
+def build_hybrid_rollout(
+    learned: Sequence[Mapping[str, Any]],
+    *,
+    tile: Any,
+    observed_fire: np.ndarray,
+    wind_series: Sequence[tuple],
+    steps: int,
+    step_hours: int,
+) -> tuple:
+    """
+    Run the physics engines beside a learned rollout and combine the three.
+
+    Returns (rollout, status). The rollout is None whenever the hybrid cannot
+    be produced, and status always says why - a prediction must not fail
+    because an optional extra layer could not be built, and it must never be
+    ambiguous whether the layer is absent or merely empty.
+
+    Ranks are taken over cells that are not already alight, matching the
+    population the combiner was validated against.
+    """
+    from .fuel_raster import fuel_codes_for_tile
+    from .grid import SIZE
+    from .physics_spread import physics_rollout
+    from .pyretechnics_spread import pyretechnics_rollout
+    from .static_catalog import InputUnavailable
+
+    try:
+        codes = fuel_codes_for_tile(tile)
+    except InputUnavailable as exc:
+        return None, {"available": False, "reason": exc.reason, "detail": str(exc)}
+
+    prior = np.asarray(observed_fire, dtype=np.float32)
+    u_ms, v_ms = wind_series[-1] if wind_series else (0.0, 0.0)
+    ignition_rc = (int(SIZE // 2), int(SIZE // 2))
+
+    try:
+        members = {
+            "learned": list(learned),
+            "rothermel": physics_rollout(
+                prior, fuel_codes=codes, u_ms=u_ms, v_ms=v_ms,
+                steps=steps, step_hours=step_hours, ignition_rc=ignition_rc,
+            ),
+            "pyretechnics": pyretechnics_rollout(
+                prior, fuel_codes=codes, wind_series=list(wind_series),
+                steps=steps, step_hours=step_hours,
+            ),
+        }
+        rollout = hybrid_rollout(members, mask=prior < 0.5)
+    except Exception as exc:  # noqa: BLE001 - an optional layer never fails a request
+        return None, {"available": False, "reason": "hybrid_engine_error", "detail": repr(exc)}
+
+    return rollout, {
+        "available": True,
+        "engines": list(members),
+        "threshold": HYBRID_THRESHOLD,
+        "units": "percentile_rank",
+        "calibrated": False,
+    }
