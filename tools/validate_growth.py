@@ -82,6 +82,7 @@ def evaluate(profile: str, checkpoint: Optional[Path],
     from services.tilesvc.fuel_raster import fuel_codes_for_tile
     from services.tilesvc.static_catalog import InputUnavailable
     from services.tilesvc.grid import PIX, SIZE, lonlat_to_tile
+    from services.tilesvc.hybrid_spread import HYBRID_THRESHOLD, hybrid_rollout
     from services.tilesvc.physics_spread import physics_rollout
     from services.tilesvc.pyretechnics_spread import pyretechnics_rollout
     from tools.validate_perimeters import learned_rollout
@@ -139,6 +140,13 @@ def evaluate(profile: str, checkpoint: Optional[Path],
         learned = learned_rollout(checkpoint, x, tile, horizon)
         if learned is not None:
             engines["ignis (learned)"] = (learned, 0.5)
+
+    # Ranks are taken over the cells that could still newly burn, which is the
+    # same population the scores are computed over.
+    members = {name: engines[name][0] for name in ("ignis (learned)", "rothermel", "pyretechnics")
+               if name in engines}
+    if len(members) > 1:
+        engines["ignis (hybrid)"] = (hybrid_rollout(members, mask=~prior), HYBRID_THRESHOLD)
 
     scores = {}
     for name, (rollout, threshold) in engines.items():
