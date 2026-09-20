@@ -184,6 +184,7 @@ def evaluate(name: str, steps: int = 3, checkpoint: Optional[Path] = None) -> Op
     from services.tilesvc.baseline_spread import baseline_rollout
     from services.tilesvc.dynamic_builder import build_dynamic_for_tile
     from services.tilesvc.fuel_raster import fuel_codes_for_tile
+    from services.tilesvc.static_catalog import InputUnavailable
     from services.tilesvc.grid import PIX, SIZE, lonlat_to_tile
     from services.tilesvc.physics_spread import physics_rollout
     from services.tilesvc.pyretechnics_spread import pyretechnics_rollout
@@ -219,18 +220,29 @@ def evaluate(name: str, steps: int = 3, checkpoint: Optional[Path] = None) -> Op
 
     series = [(float(x[i, 1].mean()), float(x[i, 2].mean())) for i in (-3, -2, -1)]
     u, v = series[-1]
-    codes = fuel_codes_for_tile(tile)
+    # Engines that read fuel are skipped, not scored zero, when the raster is
+    # absent — a zero here is indistinguishable from a forecast of no growth.
+    try:
+        codes = fuel_codes_for_tile(tile)
+    except InputUnavailable as exc:
+        codes = None
+        fuel_error = str(exc)
+    else:
+        fuel_error = None
     cell_km2 = (PIX / 1000.0) ** 2
 
     engines = {
         "downwind": (baseline_rollout(observed.astype(np.float32), u_ms=u, v_ms=v, steps=steps,
                                       step_hours=24, ignition_rc=(SIZE // 2, SIZE // 2)), 0.1),
-        "rothermel": (physics_rollout(observed.astype(np.float32), fuel_codes=codes, u_ms=u, v_ms=v,
-                                      steps=steps, step_hours=24,
-                                      ignition_rc=(SIZE // 2, SIZE // 2)), 0.1),
-        "pyretechnics": (pyretechnics_rollout(observed.astype(np.float32), fuel_codes=codes,
-                                              wind_series=series, steps=steps, step_hours=24), 0.5),
     }
+    if codes is not None:
+        engines["rothermel"] = (
+            physics_rollout(observed.astype(np.float32), fuel_codes=codes, u_ms=u, v_ms=v,
+                            steps=steps, step_hours=24,
+                            ignition_rc=(SIZE // 2, SIZE // 2)), 0.1)
+        engines["pyretechnics"] = (
+            pyretechnics_rollout(observed.astype(np.float32), fuel_codes=codes,
+                                 wind_series=series, steps=steps, step_hours=24), 0.5)
     if checkpoint is not None:
         learned = learned_rollout(checkpoint, x, tile, steps)
         if learned is not None:
@@ -247,6 +259,7 @@ def evaluate(name: str, steps: int = 3, checkpoint: Optional[Path] = None) -> Op
     return {
         "name": name,
         "status": "ok",
+        "fuel_error": fuel_error,
         "burned_in_tile_km2": float(burned.sum()) * cell_km2,
         "observed_km2": float(observed.sum()) * cell_km2,
         "engines": results,

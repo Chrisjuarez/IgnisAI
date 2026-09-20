@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 
 from .pipeline import (
+    DEFAULT_FUEL_RASTER_URI,
     DEFAULT_PROFILE,
     DEFAULT_RUNTIME_BUCKET,
     DEFAULT_STEP_HOURS,
@@ -19,6 +20,7 @@ from .pipeline import (
     build_palisades_runtime_cache,
     default_runtime_bucket_uri,
     ensure_runtime_dirs,
+    fetch_fuel_raster,
     summarize_result,
     sync_runtime_cache,
     validate_runtime_dirs,
@@ -105,6 +107,19 @@ def _build_parser() -> argparse.ArgumentParser:
     dirs.add_argument("--firms-dir", type=Path, default=_path_env("FIRMS_SNAPSHOT_DIR", "/data/firms_snapshots"))
     dirs.add_argument("--noaa-dir", type=Path, default=_path_env("NOAA_GRID_CACHE_DIR", "/data/noaa_grid_cache"))
 
+    fuel = sub.add_parser(
+        "fetch-fuel",
+        help="Download the FBFM40 fuel raster the physics engines read.",
+    )
+    fuel.add_argument("--uri", default=DEFAULT_FUEL_RASTER_URI)
+    fuel.add_argument(
+        "--target",
+        type=Path,
+        default=None,
+        help="Defaults to $IGNIS_CACHE_ROOT/source-rasters/, where fuel_raster looks first.",
+    )
+    fuel.add_argument("--overwrite", action="store_true")
+
     validate = sub.add_parser("validate", help="Validate local runtime cache directories.")
     validate.add_argument("--firms-dir", type=Path, default=_path_env("FIRMS_SNAPSHOT_DIR", "data/firms_snapshots"))
     validate.add_argument("--noaa-dir", type=Path, default=_path_env("NOAA_GRID_CACHE_DIR", "data/noaa_grid_cache"))
@@ -131,6 +146,11 @@ def main() -> None:
             source_priority=args.source_priority,
         )
         print(summarize_result(result))
+        return
+    if args.command == "fetch-fuel":
+        result = fetch_fuel_raster(uri=args.uri, target=args.target, overwrite=args.overwrite)
+        verb = "downloaded" if result["downloaded"] else "already present"
+        print(f"FBFM40 raster {verb}: {result['path']} ({result['bytes'] / 1e6:.1f} MB)")
         return
     if args.command == "build-event":
         # Resolve the default here rather than leaving it None. The callee

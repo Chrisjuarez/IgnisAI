@@ -80,6 +80,7 @@ def evaluate(profile: str, checkpoint: Optional[Path],
     from services.tilesvc.baseline_spread import baseline_rollout
     from services.tilesvc.dynamic_builder import build_dynamic_for_tile
     from services.tilesvc.fuel_raster import fuel_codes_for_tile
+    from services.tilesvc.static_catalog import InputUnavailable
     from services.tilesvc.grid import PIX, SIZE, lonlat_to_tile
     from services.tilesvc.physics_spread import physics_rollout
     from services.tilesvc.pyretechnics_spread import pyretechnics_rollout
@@ -109,20 +110,31 @@ def evaluate(profile: str, checkpoint: Optional[Path],
 
     series = [(float(x[i, 1].mean()), float(x[i, 2].mean())) for i in (-3, -2, -1)]
     u, v = series[-1]
-    codes = fuel_codes_for_tile(tile)
+    # Engines that read fuel are skipped, not scored zero, when the raster is
+    # absent — a zero here is indistinguishable from a forecast of no growth.
+    try:
+        codes = fuel_codes_for_tile(tile)
+    except InputUnavailable as exc:
+        codes = None
+        fuel_error = str(exc)
+    else:
+        fuel_error = None
     cell = (PIX / 1000.0) ** 2
 
     engines = {
         "downwind": (baseline_rollout(prior.astype(np.float32), u_ms=u, v_ms=v,
                                       steps=horizon, step_hours=24,
                                       ignition_rc=(SIZE // 2, SIZE // 2)), 0.1),
-        "rothermel": (physics_rollout(prior.astype(np.float32), fuel_codes=codes, u_ms=u, v_ms=v,
-                                      steps=horizon, step_hours=24,
-                                      ignition_rc=(SIZE // 2, SIZE // 2)), 0.1),
-        "pyretechnics": (pyretechnics_rollout(prior.astype(np.float32), fuel_codes=codes,
-                                              wind_series=series, steps=horizon,
-                                              step_hours=24), 0.5),
     }
+    if codes is not None:
+        engines["rothermel"] = (
+            physics_rollout(prior.astype(np.float32), fuel_codes=codes, u_ms=u, v_ms=v,
+                            steps=horizon, step_hours=24,
+                            ignition_rc=(SIZE // 2, SIZE // 2)), 0.1)
+        engines["pyretechnics"] = (
+            pyretechnics_rollout(prior.astype(np.float32), fuel_codes=codes,
+                                 wind_series=series, steps=horizon,
+                                 step_hours=24), 0.5)
     if checkpoint is not None:
         learned = learned_rollout(checkpoint, x, tile, horizon)
         if learned is not None:
@@ -138,6 +150,7 @@ def evaluate(profile: str, checkpoint: Optional[Path],
     return {
         "profile": profile,
         "status": "ok",
+        "fuel_error": fuel_error,
         "forecast_at": forecast_at.strftime("%Y-%m-%d"),
         "verify_at": verify_at.strftime("%Y-%m-%d"),
         "already_alight_km2": float(prior.sum()) * cell,
@@ -189,6 +202,8 @@ def main(argv: Optional[List[str]] = None) -> int:
             continue
         head = "%s -> %s" % (result["forecast_at"], result["verify_at"])
         print("  %-15s %s   already alight %6.1f km2" % (profile, head, result["already_alight_km2"]))
+        if result.get("fuel_error"):
+            print("      rothermel/pyretechnics SKIPPED - %s" % result["fuel_error"])
         for name, s in result["engines"].items():
             totals.setdefault(name, []).append(s)
             if s["precision"] is None or s["recall"] is None:

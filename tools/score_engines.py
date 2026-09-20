@@ -14,6 +14,7 @@ os.environ.setdefault("NOAA_GRIB_ENABLED", "1")
 from services.tilesvc.grid import lonlat_to_tile, SIZE, PIX
 from services.tilesvc.dynamic_builder import build_dynamic_for_tile
 from services.tilesvc.fuel_raster import fuel_codes_for_tile
+from services.tilesvc.static_catalog import InputUnavailable
 from services.tilesvc.wui_fuels import apply_wui_fuels, wui_summary
 from services.tilesvc.baseline_spread import baseline_rollout
 from services.tilesvc.physics_spread import physics_rollout
@@ -42,17 +43,29 @@ def score(name, lat, lon, ref_time=None):
     series = [(float(x[i, 1].mean()), float(x[i, 2].mean())) for i in (-3, -2, -1)]
     u, v = series[-1]
     wind = (math.degrees(math.atan2(u, v)) + 360) % 360
-    codes = fuel_codes_for_tile(tile)
-    burn = np.array([[lookup(int(q)) is not None for q in row] for row in codes])
+    # Engines that read fuel are skipped, not scored zero, when the raster is
+    # absent — a zero here is indistinguishable from a forecast of no growth.
+    try:
+        codes = fuel_codes_for_tile(tile)
+    except InputUnavailable as exc:
+        codes = None
+        fuel_error = str(exc)
+    else:
+        fuel_error = None
+    if fuel_error:
+        print("  %-22s SKIPPED fuel engines - %s" % (name[:22], fuel_error))
+    burn = (np.zeros((SIZE, SIZE), bool) if codes is None
+            else np.array([[lookup(int(q)) is not None for q in row] for row in codes]))
 
     runs = {
         "downwind":    baseline_rollout(obs, u_ms=u, v_ms=v, steps=3, step_hours=24,
                                         ignition_rc=(SIZE//2, SIZE//2)),
-        "rothermel":   physics_rollout(obs, fuel_codes=codes, u_ms=u, v_ms=v, steps=3,
-                                       step_hours=24, ignition_rc=(SIZE//2, SIZE//2)),
-        "pyretechnics": pyretechnics_rollout(obs, fuel_codes=codes, wind_series=series,
-                                             steps=3, step_hours=24),
     }
+    if codes is not None:
+        runs["rothermel"] = physics_rollout(obs, fuel_codes=codes, u_ms=u, v_ms=v, steps=3,
+                                            step_hours=24, ignition_rc=(SIZE//2, SIZE//2))
+        runs["pyretechnics"] = pyretechnics_rollout(obs, fuel_codes=codes, wind_series=series,
+                                                    steps=3, step_hours=24)
     print("  %-22s wind->%3.0f  %4.1f m/s  burnable %4.1f%%  obs %d cells" % (
         name[:22], wind, math.hypot(u,v), 100*burn.mean(), int(obs.sum())))
     for eng, roll in runs.items():
