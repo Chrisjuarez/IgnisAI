@@ -2,3 +2,8 @@
 # does not ship a test framework.
 -r requirements.txt
 pytest
+
+# Third hybrid engine, and the level-set reference the validation tools score
+# against. Kept out of requirements.txt so the production image does not build
+# a Cython package from source for an optional layer - see the note there.
+pyretechnics==2026.8.10

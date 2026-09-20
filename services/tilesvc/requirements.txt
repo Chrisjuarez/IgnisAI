@@ -16,3 +16,10 @@ shapely
 pyproj
 boto3
 scipy
+# pyretechnics is deliberately absent. It is the third hybrid engine, but it
+# publishes no wheel - only an sdist needing Cython and a compiler - and it
+# pins scipy~=1.12.0, which would constrain this image for an optional layer
+# that ships off by default. Serving runs the hybrid on learned + rothermel,
+# which scored 0.218 held-out IoU against 0.235 for all three: inside the
+# noise on five fires. It lives in requirements-dev.txt for the validation
+# tools, and build_hybrid_rollout reports which engines actually ran.

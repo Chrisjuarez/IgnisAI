@@ -10,6 +10,7 @@ import pytest
 
 from services.tilesvc.hybrid_spread import (
     HYBRID_THRESHOLD,
+    MIN_ENGINES,
     combine_fields,
     hybrid_rollout,
     percentile_ranks,
@@ -132,32 +133,74 @@ class TestServingIntegration:
         assert status["reason"] == "fuel_raster_missing"
         assert "fetch-fuel" in status["detail"]
 
-    def test_an_engine_that_raises_is_contained(self, monkeypatch):
-        """A physics engine blowing up must cost the hybrid layer, not the
-        forecast the user asked for."""
+    def _build(self, monkeypatch, steps=3, size=64):
         from services.tilesvc import hybrid_spread
         from services.tilesvc.grid import lonlat_to_tile
 
         monkeypatch.setattr(
             "services.tilesvc.fuel_raster.fuel_codes_for_tile",
-            lambda tile: np.full((64, 64), 142, np.int16),
+            lambda tile: np.full((size, size), 142, np.int16),
         )
-        monkeypatch.setattr(
-            "services.tilesvc.physics_spread.physics_rollout",
-            lambda *a, **k: (_ for _ in ()).throw(RuntimeError("engine exploded")),
-        )
-        rollout, status = hybrid_spread.build_hybrid_rollout(
-            self._learned(),
+        return hybrid_spread.build_hybrid_rollout(
+            self._learned(steps=steps, size=size),
             tile=lonlat_to_tile(-118.555, 34.078),
-            observed_fire=np.zeros((64, 64), np.float32),
+            observed_fire=np.zeros((size, size), np.float32),
             wind_series=[(3.0, -2.0)] * 3,
-            steps=3,
+            steps=steps,
             step_hours=24,
         )
+
+    def test_one_engine_down_degrades_instead_of_disappearing(self, monkeypatch):
+        """Every pair of these engines scores within 0.02 IoU of the full trio
+        at the same threshold, so losing one is worth serving, not discarding.
+
+        Drops pyretechnics rather than rothermel, so this holds both in CI
+        (where pyretechnics is installed) and in the production image (where it
+        is not, and dropping it is already the steady state).
+        """
+        monkeypatch.setattr(
+            "services.tilesvc.pyretechnics_spread.pyretechnics_rollout",
+            lambda *a, **k: (_ for _ in ()).throw(RuntimeError("engine exploded")),
+        )
+        rollout, status = self._build(monkeypatch)
+
+        assert rollout is not None, "two surviving engines are still an ensemble"
+        assert status["available"] is True
+        assert status["degraded"] is True
+        assert status["engines"] == ["learned", "rothermel"]
+        assert "pyretechnics" in status["failed"]
+
+    def test_a_physics_engine_missing_from_the_image_is_named(self, monkeypatch):
+        """This is what CI caught: pyretechnics was never declared as a
+        dependency, so it was absent from the image while present locally. A
+        generic error would have read as a crash rather than a missing package."""
+        import builtins
+
+        real_import = builtins.__import__
+
+        def without_pyretechnics(name, *args, **kwargs):
+            if name.startswith("pyretechnics"):
+                raise ModuleNotFoundError(f"No module named '{name}'")
+            return real_import(name, *args, **kwargs)
+
+        monkeypatch.setattr(builtins, "__import__", without_pyretechnics)
+        rollout, status = self._build(monkeypatch)
+
+        assert rollout is not None
+        assert status["degraded"] is True
+        assert "ModuleNotFoundError" in status["failed"]["pyretechnics"]
+
+    def test_only_the_learned_engine_left_is_not_an_ensemble(self, monkeypatch):
+        """One engine ranked against itself is just that engine, dressed up."""
+        for target in ("services.tilesvc.physics_spread.physics_rollout",
+                       "services.tilesvc.pyretechnics_spread.pyretechnics_rollout"):
+            monkeypatch.setattr(target, lambda *a, **k: (_ for _ in ()).throw(RuntimeError("down")))
+        rollout, status = self._build(monkeypatch)
+
         assert rollout is None
         assert status["available"] is False
-        assert status["reason"] == "hybrid_engine_error"
-        assert "engine exploded" in status["detail"]
+        assert status["reason"] == "insufficient_engines"
+        assert set(status["failed"]) == {"rothermel", "pyretechnics"}
 
     def test_the_status_declares_the_field_is_an_uncalibrated_rank(self, monkeypatch):
         """Downstream must never feed this through the isotonic calibration,
@@ -169,15 +212,15 @@ class TestServingIntegration:
             "services.tilesvc.fuel_raster.fuel_codes_for_tile",
             lambda tile: np.full((64, 64), 142, np.int16),
         )
-        rollout, status = hybrid_spread.build_hybrid_rollout(
-            self._learned(steps=2, size=64),
-            tile=lonlat_to_tile(-118.555, 34.078),
-            observed_fire=np.zeros((64, 64), np.float32),
-            wind_series=[(3.0, -2.0)] * 3,
-            steps=2,
-            step_hours=24,
-        )
+        rollout, status = self._build(monkeypatch, steps=2)
         assert status["available"] is True
+        # Not an exact engine list on purpose. CI installs requirements-dev and
+        # gets pyretechnics; the production image does not, and asserting three
+        # here would encode an assumption that is false in production - the
+        # exact divergence that let a missing engine go unnoticed.
+        assert len(status["engines"]) >= MIN_ENGINES
+        assert "learned" in status["engines"]
+        assert status["degraded"] is (len(status["engines"]) < 3)
         assert status["units"] == "percentile_rank"
         assert status["calibrated"] is False
         assert status["threshold"] == HYBRID_THRESHOLD

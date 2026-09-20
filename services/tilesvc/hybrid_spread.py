@@ -120,6 +120,13 @@ def wind_series_from_dyn(dyn: np.ndarray, channel_order: Sequence[str], frames: 
     ]
 
 
+#: Fewer engines than this and the combination is not an ensemble. Measured on
+#: the five fires, every pair scores 0.218-0.233 at HYBRID_THRESHOLD against the
+#: full trio's 0.235, and every leave-one-out band brackets that threshold, so
+#: losing one engine costs little and needs no different operating point.
+MIN_ENGINES = 2
+
+
 def build_hybrid_rollout(
     learned: Sequence[Mapping[str, Any]],
     *,
@@ -130,20 +137,20 @@ def build_hybrid_rollout(
     step_hours: int,
 ) -> tuple:
     """
-    Run the physics engines beside a learned rollout and combine the three.
+    Run the physics engines beside a learned rollout and combine what succeeds.
 
     Returns (rollout, status). The rollout is None whenever the hybrid cannot
-    be produced, and status always says why - a prediction must not fail
-    because an optional extra layer could not be built, and it must never be
-    ambiguous whether the layer is absent or merely empty.
+    be produced, and status always names the engines used and any that failed -
+    a prediction must not fail because an optional extra layer could not be
+    built, and it must never be ambiguous whether the layer is absent, degraded
+    or merely empty. An engine missing from the image looks exactly like an
+    engine that crashed unless the status distinguishes them.
 
     Ranks are taken over cells that are not already alight, matching the
     population the combiner was validated against.
     """
     from .fuel_raster import fuel_codes_for_tile
     from .grid import SIZE
-    from .physics_spread import physics_rollout
-    from .pyretechnics_spread import pyretechnics_rollout
     from .static_catalog import InputUnavailable
 
     try:
@@ -155,25 +162,46 @@ def build_hybrid_rollout(
     u_ms, v_ms = wind_series[-1] if wind_series else (0.0, 0.0)
     ignition_rc = (int(SIZE // 2), int(SIZE // 2))
 
-    try:
-        members = {
-            "learned": list(learned),
-            "rothermel": physics_rollout(
-                prior, fuel_codes=codes, u_ms=u_ms, v_ms=v_ms,
-                steps=steps, step_hours=step_hours, ignition_rc=ignition_rc,
-            ),
-            "pyretechnics": pyretechnics_rollout(
-                prior, fuel_codes=codes, wind_series=list(wind_series),
-                steps=steps, step_hours=step_hours,
-            ),
+    def run_rothermel():
+        from .physics_spread import physics_rollout
+        return physics_rollout(
+            prior, fuel_codes=codes, u_ms=u_ms, v_ms=v_ms,
+            steps=steps, step_hours=step_hours, ignition_rc=ignition_rc,
+        )
+
+    def run_pyretechnics():
+        from .pyretechnics_spread import pyretechnics_rollout
+        return pyretechnics_rollout(
+            prior, fuel_codes=codes, wind_series=list(wind_series),
+            steps=steps, step_hours=step_hours,
+        )
+
+    members: Dict[str, Any] = {"learned": list(learned)}
+    failed: Dict[str, str] = {}
+    for name, run in (("rothermel", run_rothermel), ("pyretechnics", run_pyretechnics)):
+        try:
+            members[name] = run()
+        except Exception as exc:  # noqa: BLE001 - one engine down is not an outage
+            failed[name] = f"{type(exc).__name__}: {exc}"
+
+    if len(members) < MIN_ENGINES:
+        return None, {
+            "available": False,
+            "reason": "insufficient_engines",
+            "engines": list(members),
+            "failed": failed,
         }
+
+    try:
         rollout = hybrid_rollout(members, mask=prior < 0.5)
-    except Exception as exc:  # noqa: BLE001 - an optional layer never fails a request
-        return None, {"available": False, "reason": "hybrid_engine_error", "detail": repr(exc)}
+    except Exception as exc:  # noqa: BLE001
+        return None, {"available": False, "reason": "hybrid_combine_error", "detail": repr(exc)}
 
     return rollout, {
         "available": True,
         "engines": list(members),
+        "failed": failed,
+        "degraded": bool(failed),
         "threshold": HYBRID_THRESHOLD,
         "units": "percentile_rank",
         "calibrated": False,
