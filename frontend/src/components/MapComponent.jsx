@@ -25,7 +25,7 @@ import {
   removePredictionScene,
   renderPredictionRasterFrame
 } from '../utils/addPredictionOverlay';
-import { isBasemapFocused, setBasemapFocus } from '../utils/basemapFocus';
+import { forgetBasemapFocus, setBasemapFocus } from '../utils/basemapFocus';
 
 // ---- Tokens / Base URLs -----------------------------------------------------
 const MAPBOX_TOKEN =
@@ -1973,6 +1973,11 @@ const MapComponent = forwardRef(({
       setObservedLayerMode(forecastVisible ? 'forecast' : 'normal');
       setObservedLayersVisible(observedLayersVisible);
       applyLayerVisibility();
+      // The new style brought its own basemap paint, so the values captured
+      // from the previous one describe layers that no longer exist. Drop them
+      // before re-rendering, or clearing the forecast later restores one
+      // style's raster settings onto another's.
+      forgetBasemapFocus(map);
       if (forecastVisible && forecastFrames[activeForecastIndex]) {
         renderActiveSpread(map, forecastFrames[activeForecastIndex]);
       }

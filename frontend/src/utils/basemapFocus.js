@@ -95,9 +95,14 @@ export function setBasemapFocus(map, focused) {
 }
 
 /**
- * Whether the basemap is currently muted. Lets a style reload re-apply the
- * effect without the caller tracking it separately.
+ * Discard the saved originals without writing anything back.
+ *
+ * For a style reload. The new style arrives with its own paint already
+ * applied, so there is nothing to restore - but the capture taken from the
+ * previous style is still attached to the map, and restoring it later would
+ * write one style's raster values onto another's layers. Callers drop it here
+ * and let the next focus re-capture from whatever is now loaded.
  */
-export function isBasemapFocused(map) {
-  return Boolean(map && map[SAVED]);
+export function forgetBasemapFocus(map) {
+  if (map) delete map[SAVED];
 }
