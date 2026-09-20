@@ -35,6 +35,7 @@ jest.mock('../../utils/addPredictionOverlay', () => ({
   addPredictionOverlay: jest.fn(() => Promise.resolve({ bounds: [-118.6, 34.0, -118.1, 34.4] })),
   prepareMultistepRasterFrames: jest.fn(async payload => ({
     bounds: payload.bounds,
+    scene: payload.scene || null,
     threshold: payload.threshold,
     stepHours: payload.step_hours,
     frames: payload.steps.map(step => ({
@@ -51,7 +52,10 @@ jest.mock('../../utils/addPredictionOverlay', () => ({
     }))
   })),
   renderPredictionRasterFrame: jest.fn(() => Promise.resolve({ kind: 'raster' })),
+  renderPredictionScene: jest.fn(() => Promise.resolve({ kind: 'scene', bands: 0 })),
   removePredictionOverlays: jest.fn(),
+  removePredictionRaster: jest.fn(),
+  removePredictionScene: jest.fn(),
 }));
 
 describe('Dashboard controls', () => {
