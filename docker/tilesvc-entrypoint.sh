@@ -28,6 +28,21 @@ if [ -n "$MODEL_URL" ] && [ ! -f "$MODEL_FILE" ]; then
   echo "Model downloaded successfully ($(du -h "$MODEL_FILE" | cut -f1))."
 fi
 
+# The FBFM40 fuel raster the physics engines read (~8 MB). Pulled from the same
+# private bucket the static COGs already come from, with the credentials this
+# service already holds, so it needs no public copy of its own. A failure here
+# is logged and ignored: the hybrid layer is optional and tilesvc must still
+# serve the learned forecast without it.
+if [ "$HYBRID_SPREAD_ENABLED" = "1" ] && [ -n "$FBFM40_PATH" ] && [ ! -f "$FBFM40_PATH" ]; then
+  echo "Fetching FBFM40 fuel raster to $FBFM40_PATH ..."
+  if python -m services.runtime_cache fetch-fuel --target "$FBFM40_PATH"; then
+    echo "Fuel raster ready ($(du -h "$FBFM40_PATH" | cut -f1))."
+  else
+    echo "WARNING: fuel raster fetch failed; the hybrid spread layer will be unavailable." >&2
+    rm -f "$FBFM40_PATH"
+  fi
+fi
+
 if [ -n "$MODEL_SHA256" ]; then
   if [ ! -f "$MODEL_FILE" ]; then
     echo "MODEL_SHA256 is set but model file is missing: $MODEL_FILE" >&2

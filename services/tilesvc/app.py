@@ -35,6 +35,7 @@ from .validation_reports import list_reports, report_dir
 from .baseline_spread import baseline_rollout
 from .spread_bands import DEFAULT_BAND_THRESHOLD, spread_scene
 from .calibration import calibrate_probability, calibration_status
+from .hybrid_spread import HYBRID_THRESHOLD, build_hybrid_rollout, wind_series_from_dyn
 from .ml_runtime import file_sha256, runtime_imports, source_version_info
 from .prediction_contract import next_fire_from_delta, risk_class_summary
 from .site_exposure import DEFAULT_ARRIVAL_THRESHOLD, sample_exposure
@@ -1354,6 +1355,10 @@ def _dump_multistep_artifacts(
             pass
 
 
+def _hybrid_enabled() -> bool:
+    return os.getenv("HYBRID_SPREAD_ENABLED", "0").strip().lower() in {"1", "true", "yes", "on"}
+
+
 def _rollout_multistep_predictions(
     lat: float,
     lon: float,
@@ -2005,6 +2010,26 @@ def predict_multistep(
     cropped_bounds = crop_window["bounds"]
     observed_fire_full = _observed_fire_from_dyn(debug_sink["dyn"]) if debug_sink.get("dyn") is not None else None
 
+    # The hybrid is an additional layer, never a replacement for p_new_burn.
+    # Its field is a percentile rank across engines, so it must not be fed
+    # through the isotonic calibration, which was fitted on this model's
+    # probabilities and would read ranks as something they are not.
+    hybrid_rollout_steps = None
+    hybrid_status = {"available": False, "reason": "disabled"}
+    if _hybrid_enabled() and not debug_solid and debug_sink.get("dyn") is not None:
+        hybrid_start = time.perf_counter()
+        hybrid_rollout_steps, hybrid_status = build_hybrid_rollout(
+            rollout,
+            tile=lonlat_to_tile(lon, lat),
+            observed_fire=observed_fire_full,
+            wind_series=wind_series_from_dyn(debug_sink["dyn"], MODEL_DYNAMIC_ORDER),
+            steps=normalized_steps,
+            step_hours=step_hours,
+        )
+        _metric_observe("ignis_hybrid_build_ms", (time.perf_counter() - hybrid_start) * 1000.0)
+        if not hybrid_status.get("available"):
+            print(f"⚠️  Hybrid layer unavailable: {hybrid_status.get('reason')}")
+
     display_mask_full, display_mask_summary = display_mask_from_static(
         debug_sink.get("stat"),
         list(MODEL_STATIC_ORDER),
@@ -2053,6 +2078,15 @@ def predict_multistep(
             "p_next_fire": _layer_image_base64(p_next_fire_display, threshold=0.5, anchor_px=anchor_px),
             "observed_fire": _layer_image_base64(observed_crop, threshold=0.5, anchor_px=anchor_px),
         }
+        if hybrid_rollout_steps is not None:
+            hybrid_crop, _, _ = _apply_crop_window(
+                np.asarray(hybrid_rollout_steps[step["index"]]["prob"], dtype=np.float32),
+                crop_window,
+            )
+            hybrid_crop = hybrid_crop * display_mask_crop
+            layer_images["hybrid"] = _layer_image_base64(
+                hybrid_crop, threshold=HYBRID_THRESHOLD, anchor_px=anchor_px,
+            )
         contract = _probability_contract(
             prob_new_burn=cropped,
             observed_fire=observed_crop,
@@ -2146,6 +2180,7 @@ def predict_multistep(
         "step_hours": int(step_hours),
         "steps": payload_steps,
         "display_mask": display_mask_summary,
+        "hybrid": hybrid_status,
         "threshold_override": thr is not None,
         "probability_scale": {"mode": "absolute", "min": 0.0, "max": 1.0, "display_floor": resolved_display_floor},
         "model_meta": _model_metadata(),

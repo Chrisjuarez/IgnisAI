@@ -526,6 +526,7 @@ const MapComponent = forwardRef(({
   // per-cell probability raster for reading confidence inside a single day.
   const [spreadView, setSpreadView] = useState('bands');
   const [forecastScene, setForecastScene] = useState(null);
+  const [forecastHybrid, setForecastHybrid] = useState(null);
 
   // Historical fire testing state
   const [showHistPanel, setShowHistPanel] = useState(false);
@@ -841,6 +842,7 @@ const MapComponent = forwardRef(({
     setForecastVisible(false);
     setForecastFrames([]);
     setForecastScene(null);
+    setForecastHybrid(null);
     setActiveForecastIndex(0);
     setForecastLayerMode('new_burn');
     removePredictionOverlays(mapRef.current);
@@ -972,6 +974,7 @@ const MapComponent = forwardRef(({
 
       setForecastTitle(title);
       setForecastScene(prepared.scene || null);
+      setForecastHybrid(prepared.hybrid || null);
       setForecastFrames(prepared.frames);
       setActiveForecastIndex(0);
       setIsForecastPlaying(false);
@@ -2422,6 +2425,15 @@ const MapComponent = forwardRef(({
             >
               Next Fire
             </button>
+            {forecastHybrid?.available && (
+              <button
+                className={`forecast-layer-btn ${forecastLayerMode === 'hybrid' ? 'active' : ''}`}
+                onClick={() => setForecastLayerMode('hybrid')}
+                title={`Rank-mean of ${(forecastHybrid.engines || []).join(', ')} - a relative ranking, not a calibrated probability`}
+              >
+                Hybrid
+              </button>
+            )}
           </div>
           <div className="forecast-meta">
             Frame {activeForecastIndex + 1} of {forecastFrames.length}
@@ -2462,7 +2474,9 @@ const MapComponent = forwardRef(({
             {' '}
             View: {showingBands ? `arrival bands (${sceneBandCount} polygons)` : 'probability heat'}.
             {' '}
-            Layer: {forecastLayerMode === 'next_fire' ? 'reconstructed next-fire context' : 'new-burn risk'}.
+            Layer: {forecastLayerMode === 'hybrid'
+              ? `hybrid rank of ${(forecastHybrid?.engines || []).length} engines - relative ranking, not calibrated`
+              : forecastLayerMode === 'next_fire' ? 'reconstructed next-fire context' : 'new-burn risk'}.
             {' '}
             {missingStaticChannels.length
               ? `Static placeholders: ${missingStaticChannels.slice(0, 5).join(', ')}${missingStaticChannels.length > 5 ? '...' : ''}`
