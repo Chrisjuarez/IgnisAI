@@ -1,0 +1,110 @@
+# CONTROL for Phase A — OLD protocol, everything else identical.
+#
+# Purpose: make the Phase A result attributable. The completed Phase A run
+# (val_ap=0.2668, val_csi=0.2114 @ 0.52 after re-sweep) cannot currently be
+# credited to the WSTS+ protocol fixes, because the only thing it was compared
+# against was a v3 number measured on DIFFERENT data. This config is that
+# comparison, on the same corpus, same split, same seed.
+#
+# EXACTLY TWO THINGS differ from config.phase_a.yaml:
+#   1. training.metrics.select_on : ap    -> csi
+#   2. training.loss              : focal -> dice + BCE + Tversky (the v3 recipe)
+#
+# Everything else — data, seq_len, split seed, architecture, augmentation,
+# wind_align, and critically the SAMPLER — is pinned identical. Do not "improve"
+# anything here; a control that drifts is not a control.
+#
+# Note on the threshold sweep: this arm selects on CSI, so the sweep bounds
+# affect which checkpoint is kept. The sweep is widened to [0.05, 0.95] because
+# the phase_a run proved the old [0.05, 0.50] ceiling clips the optimum
+# (true optimum was 0.520). Giving the control a clipped sweep would handicap
+# it and manufacture a Phase A "win".
+#
+# Run:
+#   export IGNIS_DATA_ROOT=/Volumes/T9/ignis-data
+#   cd ignis_ml && python train_v4.py --config config.control.yaml
+
+data_root: data
+
+datasets:
+  mndws:
+    raw_dir: data/mNDWS_raw/ndws_western_dataset
+    tiles_dir: data/mNDWS_500m_T3
+
+checkpoints:
+  model: checkpoints/convlstm_unet_control.pt
+
+grid:
+  crs: "EPSG:5070"
+  tile_km: 32
+  res_m: 500
+
+channels:
+  dynamic_order: [fire_t, u, v, gust, tempC, q, precip]
+  static_order:  [elev, slope, aspect_cos, aspect_sin, ndvi, bi, erc, pdsi, chili, impervious, water, population, fuel1, fuel2, fuel3]
+
+training:
+  seq_len: 3
+  batch_size: 8
+  hidden_channels: 64
+  num_workers: 2
+  cache_items: 0
+  persistent_workers: false
+  epochs: 30
+  lr: 0.0008
+  weight_decay: 0.0005
+  optimizer: adamw
+  scheduler: cosine
+  warmup_epochs: 5
+  grad_clip: 1.0
+  early_stop: 6
+  mixed_precision: true
+  seed: 42                 # PINNED — same split as phase_a
+
+  drop_encoder: 0.10
+  drop_decoder: 0.15
+
+  target_mode: delta
+
+  loss:
+    # ---- FACTOR UNDER TEST (2/2): the v3 loss recipe ----
+    focal: { enable: false, gamma: 2.0, alpha: 0.75 }
+    dice_weight: 0.6
+    dice_dilate_px: 2
+    tversky: { enable: true, alpha: 0.3, beta: 0.7, weight: 0.6 }
+    # Held constant vs phase_a — this is NOT the variable being tested.
+    wind_align: { enable: true, weight: 0.1 }
+
+  metrics:
+    # ---- FACTOR UNDER TEST (1/2): selection metric ----
+    select_on: csi
+    threshold: 0.5
+    tta: false
+    threshold_sweep:
+      lo: 0.05
+      hi: 0.95           # widened: [0.05,0.50] demonstrably clips the optimum
+      n: 91              # 0.01 steps
+
+  sampling:
+    santa_ana_boost: 5.0
+    santa_ana_u_threshold: -5.0
+    # PINNED to match the completed phase_a run (which had no weight_mode key
+    # and therefore used the "inverse" default). Prior shift ~5.26x is present
+    # in BOTH arms, so it cancels out of this comparison.
+    weight_mode: inverse
+
+features:
+  derived:
+    enable: true
+    include: null
+  days_since_fire_cap: 7
+
+augmentation:
+  hflip_p: 0.5
+  vflip_p: 0.5
+  rot90_p: 1.0
+  translate_px: 0
+  channel_dropout_p: 0.05
+  channel_dropout_exclude: [fire_t, u, v]
+  gaussian_noise_std: 0.01
+  temporal_dropout_p: 0.10

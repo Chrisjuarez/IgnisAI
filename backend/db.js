@@ -1,6 +1,10 @@
 // backend/db.js
-require('dotenv').config();
+const dotenv = require('dotenv');
 const mongoose = require('mongoose');
+
+if (process.env.NODE_ENV !== 'test') {
+  dotenv.config({ quiet: true });
+}
 
 let listenersAttached = false;
 

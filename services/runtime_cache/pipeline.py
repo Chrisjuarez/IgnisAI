@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import sys
 import datetime as dt
 import io
 import json
@@ -30,8 +31,23 @@ DEFAULT_STEPS = 6
 DEFAULT_STEP_HOURS = 24
 REQUIRED_NOAA_CHANNELS = ("u", "v", "gust", "tempC", "q", "precip")
 FIRMS_COLUMNS = ("latitude", "longitude", "acq_date", "acq_time", "frp")
+#: Standard Processing first - quality controlled, and what the archive holds
+#: for anything more than a couple of months old.
 DEFAULT_FIRMS_PRODUCTS = ("VIIRS_SNPP_SP", "VIIRS_NOAA20_SP", "MODIS_SP")
+
+#: Near Real Time, tried when SP returns nothing. SP lags real time by weeks to
+#: months, so a fire from six weeks ago sits in a gap: too old for the live NRT
+#: window the app uses, too new for the archive. Measured on the 2026-07-25
+#: Big Grass bbox, SP returned 0 rows where NRT returned 321, 190 and 54.
+#: Without this the builder writes empty snapshots and reports success.
+FALLBACK_FIRMS_PRODUCTS = ("VIIRS_SNPP_NRT", "VIIRS_NOAA20_NRT", "MODIS_NRT")
 GFS_AWS_BASE = "https://noaa-gfs-bdp-pds.s3.amazonaws.com"
+HRRR_AWS_BASE = "https://noaa-hrrr-bdp-pds.s3.amazonaws.com"
+# Source labels stamped into the npz so tilesvc's weather_quality_status
+# can report which gridded product actually powered each prediction.
+SOURCE_TAG_HRRR = "noaa_hrrr"
+SOURCE_TAG_GFS = "noaa_gfs"
+DEFAULT_WEATHER_SOURCE_PRIORITY: Tuple[str, ...] = ("hrrr", "gfs")
 
 
 @dataclass(frozen=True)
@@ -168,17 +184,27 @@ def fetch_firms_rows_for_day(
         raise RuntimeError("NASA_API_KEY/FIRMS_API_KEY is required to build FIRMS runtime snapshots")
     session = session or requests.Session()
     area = ",".join(f"{float(v):.5f}" for v in bbox)
-    rows: List[Dict[str, str]] = []
-    for product in products:
-        url = (
-            f"https://firms.modaps.eosdis.nasa.gov/api/area/csv/{key}/"
-            f"{product}/{area}/1/{day.isoformat()}"
-        )
-        response = session.get(url, headers={"User-Agent": "ignis-ai-runtime-cache"}, timeout=45)
-        if response.status_code == 404:
-            continue
-        response.raise_for_status()
-        rows.extend(_parse_firms_csv(response.text))
+
+    def query(product_list: Sequence[str]) -> List[Dict[str, str]]:
+        found: List[Dict[str, str]] = []
+        for product in product_list:
+            url = (
+                f"https://firms.modaps.eosdis.nasa.gov/api/area/csv/{key}/"
+                f"{product}/{area}/1/{day.isoformat()}"
+            )
+            response = session.get(url, headers={"User-Agent": "ignis-ai-runtime-cache"}, timeout=45)
+            if response.status_code == 404:
+                continue
+            response.raise_for_status()
+            found.extend(_parse_firms_csv(response.text))
+        return found
+
+    rows = query(products)
+    if not rows:
+        # An empty SP result is ambiguous: either nothing burned, or the date
+        # falls in the gap where SP has not published yet. NRT distinguishes
+        # the two, and an empty answer from both is a real answer.
+        rows = query([p for p in FALLBACK_FIRMS_PRODUCTS if p not in set(products)])
 
     # Deduplicate overlapping products.
     deduped: Dict[Tuple[str, str, str, str], Dict[str, str]] = {}
@@ -213,6 +239,7 @@ def build_firms_snapshots(
     bbox = _tile_bbox(lat, lon)
     session = requests.Session()
     written: List[Path] = []
+    total_rows = 0
     for day in firms_snapshot_dates(ref, t_seq=t_seq, step_hours=step_hours):
         path = out_dir / f"{day.isoformat()}.csv"
         if path.exists() and not overwrite:
@@ -220,7 +247,21 @@ def build_firms_snapshots(
             continue
         rows = fetch_firms_rows_for_day(day=day, bbox=bbox, map_key=map_key, products=products, session=session)
         write_firms_snapshot(path, rows)
+        total_rows += len(rows)
         written.append(path)
+
+    # A cache with no detections anywhere is not a fire, and building a forecast
+    # on it produces confident nonsense. This built eighteen empty caches and
+    # reported success on every one, because the dates fell in the gap between
+    # what SP has published and what NRT still serves.
+    if written and total_rows == 0:
+        print(
+            f"WARNING: no FIRMS detections in any of {len(written)} days for "
+            f"{bbox} ending {ref:%Y-%m-%d}. Either nothing burned in this tile, "
+            f"or the window falls outside both the SP archive and the NRT feed. "
+            f"Forecasts built on this cache will have no fire to spread.",
+            file=sys.stderr,
+        )
     return written
 
 
@@ -297,6 +338,16 @@ def _select_gfs_records(records: Sequence[GfsRecord]) -> Dict[str, GfsRecord]:
     return selected
 
 
+def _discard_intermediate(path: Path) -> None:
+    """Remove a downloaded grib once its arrays have been extracted."""
+    if os.getenv("KEEP_GRIB_INTERMEDIATES", "").strip().lower() in {"1", "true", "yes"}:
+        return
+    try:
+        Path(path).unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
 def _download_gfs_subset(hour: dt.datetime, work_dir: Path, *, session: Optional[requests.Session] = None) -> Path:
     session = session or requests.Session()
     base_url = gfs_pgrb2_url(hour)
@@ -324,14 +375,35 @@ def _band_tags(src: rasterio.io.DatasetReader, band: int) -> str:
 
 
 def _find_band(src: rasterio.io.DatasetReader, *, variable: str, level: str) -> Optional[int]:
+    """
+    Locate a grib band by (variable, level).
+
+    `level` is matched as a regex against the band tag text after upper-
+    casing. This is important because grib readers normalize the level
+    string differently per product:
+
+      * GFS exposes the level verbatim in the .idx (e.g. ``10 m above ground``)
+      * HRRR via rasterio exposes ``GRIB_SHORT_NAME=10-HTGL`` plus a
+        ``GRIB_COMMENT`` with the long form
+
+    Callers therefore pass a regex like ``r"10[- ]?M(?: ABOVE GROUND)?"``
+    that survives both. A bare substring still works because plain text
+    is also a valid regex. The fallback (variable-only) is intentionally
+    LAST — picking the first UGRD band when 10m isn't found would land
+    on 80m/max-wind diagnostics and silently produce wrong values.
+    """
+    import re
+
     var = variable.upper()
-    lvl = level.upper()
+    # IMPORTANT: do NOT upper-case the regex itself — that would flip
+    # lowercase escapes (e.g. \b word boundary) into their uppercase
+    # complements (\B = NOT a word boundary), silently inverting the
+    # match. Compile case-insensitive instead so callers can write
+    # patterns in either case.
+    pattern = re.compile(level, re.IGNORECASE)
     for band in range(1, src.count + 1):
         text = _band_tags(src, band)
-        if var in text and lvl in text:
-            return band
-    for band in range(1, src.count + 1):
-        if var in _band_tags(src, band):
+        if var in text and pattern.search(text):
             return band
     return None
 
@@ -354,13 +426,18 @@ def _reproject_band(src: rasterio.io.DatasetReader, band: int, *, lat: float, lo
 
 
 def _read_gfs_subset_to_arrays(grib_path: Path, *, lat: float, lon: float) -> Dict[str, np.ndarray]:
+    # GFS bands carry the same GRIB_SHORT_NAME identifiers as HRRR even
+    # though the .idx file shows the long form ("10 m above ground").
+    # Match against the unambiguous short name so this path stops
+    # depending on band ordering — see the HRRR comment block for the
+    # symptom this prevents.
     specs = {
-        "u": ("UGRD", "10 m"),
-        "v": ("VGRD", "10 m"),
-        "gust": ("GUST", "surface"),
-        "tempC": ("TMP", "2 m"),
-        "q": ("SPFH", "2 m"),
-        "precip": ("APCP", "surface"),
+        "u":     ("UGRD", r"\b10-HTGL\b"),
+        "v":     ("VGRD", r"\b10-HTGL\b"),
+        "gust":  ("GUST", r"\b(?:0-)?SFC\b"),
+        "tempC": ("TMP",  r"\b2-HTGL\b"),
+        "q":     ("SPFH", r"\b2-HTGL\b"),
+        "precip": ("APCP", r"\b(?:0-)?SFC\b"),
     }
     arrays: Dict[str, np.ndarray] = {}
     with rasterio.open(grib_path) as src:
@@ -401,9 +478,27 @@ def validate_noaa_npz(path: Path) -> Dict[str, Any]:
     return stats
 
 
-def write_noaa_npz(path: Path, arrays: Mapping[str, np.ndarray]) -> None:
+def write_noaa_npz(
+    path: Path,
+    arrays: Mapping[str, np.ndarray],
+    *,
+    source: Optional[str] = None,
+) -> None:
+    """
+    Write the canonical NOAA cache npz.
+
+    Always writes the six REQUIRED_NOAA_CHANNELS as float32 (SIZE,SIZE).
+    Optionally stamps a `source` zero-d unicode array so downstream
+    consumers (tilesvc weather_quality_status) can report whether the
+    grid came from HRRR or GFS — without that tag they fall back to the
+    generic "noaa_gridded" label.
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
-    payload = {name: np.asarray(arrays[name], dtype=np.float32) for name in REQUIRED_NOAA_CHANNELS}
+    payload: Dict[str, np.ndarray] = {
+        name: np.asarray(arrays[name], dtype=np.float32) for name in REQUIRED_NOAA_CHANNELS
+    }
+    if source:
+        payload["source"] = np.array(str(source))
     np.savez_compressed(path, **payload)
     validate_noaa_npz(path)
 
@@ -424,9 +519,288 @@ def build_gfs_npz_for_hour(
         validate_noaa_npz(out)
         return out
     grib = _download_gfs_subset(hour, work_dir, session=session)
-    arrays = _read_gfs_subset_to_arrays(grib, lat=lat, lon=lon)
-    write_noaa_npz(out, arrays)
+    try:
+        arrays = _read_gfs_subset_to_arrays(grib, lat=lat, lon=lon)
+        write_noaa_npz(out, arrays, source=SOURCE_TAG_GFS)
+    finally:
+        _discard_intermediate(grib)
     return out
+
+
+# --------------------------- HRRR (3 km CONUS) ---------------------------
+#
+# HRRR sits at native 3 km on a Lambert Conformal grid, hourly cycles, with
+# an analysis (f00) and a short-range forecast (up to f18 / f48 depending on
+# cycle). For wildfire weather it is dramatically better than GFS 0.25° —
+# Santa Ana flow that channels through canyons in a couple km is invisible
+# at 25 km but resolved (or at least hinted at) at 3 km. AWS Open Data
+# hosts the full archive at noaa-hrrr-bdp-pds with no auth required.
+#
+# HRRR DOES publish .idx byte-range indices on AWS - the earlier note here
+# said otherwise and that was wrong, at a cost of roughly 13x the bandwidth.
+# The surface file is ~110 MB and carries ~170 bands; the six this pipeline
+# reads total ~8.6 MB. A 151-fire backfill downloading whole files is ~232 GB
+# to keep ~142 MB of npz.
+#
+# _hrrr_index fetches the .idx, and _download_hrrr_grib issues one ranged GET
+# per needed band. If the index is unavailable it falls back to the whole
+# file, because a slow correct answer beats a fast missing one.
+
+
+def hrrr_pgrb2_url(hour: dt.datetime, *, forecast_hour: int = 0) -> str:
+    """
+    Return the AWS Open Data URL for the HRRR surface (wrfsfcf) grib at the
+    given cycle hour and forecast lead. We always pick the analysis (f00)
+    when callers don't specify a lead because that's the closest-to-truth
+    state for backfilling historical fires.
+    """
+    hour = parse_ref_time(hour)
+    date = hour.strftime("%Y%m%d")
+    cycle = f"{hour.hour:02d}"
+    return (
+        f"{HRRR_AWS_BASE}/hrrr.{date}/conus/"
+        f"hrrr.t{cycle}z.wrfsfcf{int(forecast_hour):02d}.grib2"
+    )
+
+
+#: GRIB variable and level, as they appear in the .idx, for the bands read by
+#: _read_hrrr_grib_to_arrays. Level strings must match the index exactly:
+#: UGRD appears at several altitudes and picking the wrong one yields
+#: jet-stream winds over a surface fire.
+HRRR_IDX_BANDS = (
+    ("UGRD", "10 m above ground"),
+    ("VGRD", "10 m above ground"),
+    ("GUST", "surface"),
+    ("TMP", "2 m above ground"),
+    ("SPFH", "2 m above ground"),
+    ("APCP", "surface"),
+)
+
+
+def _hrrr_index(url: str, session: requests.Session) -> Optional[List[Tuple[int, Optional[int]]]]:
+    """Byte ranges for the bands we need, or None if the index is unavailable.
+
+    Each .idx line is `record:offset:date:VAR:LEVEL:...`; a record's length is
+    the next record's offset, and the last runs to end of file.
+    """
+    try:
+        response = session.get(url + ".idx", timeout=60)
+        response.raise_for_status()
+    except Exception:
+        return None
+
+    records = []
+    for line in response.text.splitlines():
+        parts = line.split(":")
+        if len(parts) < 5:
+            continue
+        try:
+            records.append((int(parts[1]), parts[3], parts[4]))
+        except ValueError:
+            continue
+    if not records:
+        return None
+
+    wanted = set(HRRR_IDX_BANDS)
+    ranges: List[Tuple[int, Optional[int]]] = []
+    for i, (offset, variable, level) in enumerate(records):
+        if (variable, level) in wanted:
+            end = records[i + 1][0] - 1 if i + 1 < len(records) else None
+            ranges.append((offset, end))
+    return ranges or None
+
+
+def _download_hrrr_grib(hour: dt.datetime, work_dir: Path, *, session: Optional[requests.Session] = None) -> Path:
+    """Download the HRRR analysis surface grib for this hour into work_dir.
+
+    Only the bands this pipeline reads, when the .idx allows it - about 8.6 MB
+    of a 110 MB file. Concatenated GRIB messages are themselves a valid GRIB,
+    so the reader needs no change.
+    """
+    session = session or requests.Session()
+    work_dir.mkdir(parents=True, exist_ok=True)
+    out = work_dir / f"{parse_ref_time(hour).strftime('%Y%m%dT%H')}_hrrr_sfc.grib2"
+    if out.exists():
+        return out
+    url = hrrr_pgrb2_url(hour, forecast_hour=0)
+    headers = {"User-Agent": "ignis-ai-runtime-cache"}
+    tmp = out.with_suffix(out.suffix + ".part")
+
+    ranges = None if os.getenv("HRRR_FULL_DOWNLOAD") else _hrrr_index(url, session)
+    if ranges:
+        # One ranged GET per band, concatenated. GRIB messages are
+        # self-delimiting, so a concatenation of messages is a valid GRIB and
+        # rasterio reads it exactly as it reads the whole file.
+        with tmp.open("wb") as f:
+            for start, end in ranges:
+                span = f"bytes={start}-{end}" if end is not None else f"bytes={start}-"
+                part = session.get(url, headers={**headers, "Range": span},
+                                   timeout=300, stream=True)
+                part.raise_for_status()
+                for chunk in part.iter_content(chunk_size=1024 * 1024):
+                    if chunk:
+                        f.write(chunk)
+    else:
+        response = session.get(url, headers=headers, timeout=300, stream=True)
+        response.raise_for_status()
+        with tmp.open("wb") as f:
+            for chunk in response.iter_content(chunk_size=4 * 1024 * 1024):
+                if chunk:
+                    f.write(chunk)
+    tmp.replace(out)
+    return out
+
+
+def _read_hrrr_grib_to_arrays(grib_path: Path, *, lat: float, lon: float) -> Dict[str, np.ndarray]:
+    """
+    Reproject HRRR surface fields onto the canonical IgnisAI tile grid.
+
+    HRRR's wrfsfcf product packs ~170 bands, and crucially it carries
+    UGRD/VGRD at MULTIPLE altitudes (10 m, 80 m, and sometimes diagnostic
+    max-wind fields) — substring-matching "UGRD" alone lands on the wrong
+    altitude and produces 30-60 m/s wind values that look like jet-stream
+    flow over LA. Each spec below pins the level via the grib short-name
+    pattern that rasterio surfaces in band tags:
+
+      * 10 m wind        → GRIB_SHORT_NAME "10-HTGL"
+      * 2 m temp/spfh    → GRIB_SHORT_NAME "2-HTGL"
+      * surface gust/pcp → GRIB_SHORT_NAME "SFC" (or "0-SFC")
+
+    \\b on both sides of "10-HTGL" prevents accidental matches against
+    "80-HTGL" or "110-HTGL". Same for "2-HTGL" vs "12-HTGL".
+
+    Note: HRRR APCP is hour-of-cycle precip (analysis = 0); for backfill
+    that's fine, the model doesn't see it as a key driver inside a 24-h
+    aggregation. If we wire forecast leads f01..f18 we'll need bucket
+    accumulation logic.
+    """
+    specs = {
+        # (GRIB_ELEMENT, level regex matched against UPPERCASE band tag text)
+        "u":     ("UGRD", r"\b10-HTGL\b"),
+        "v":     ("VGRD", r"\b10-HTGL\b"),
+        "gust":  ("GUST", r"\b(?:0-)?SFC\b"),
+        "tempC": ("TMP",  r"\b2-HTGL\b"),
+        "q":     ("SPFH", r"\b2-HTGL\b"),
+        "precip": ("APCP", r"\b(?:0-)?SFC\b"),
+    }
+    arrays: Dict[str, np.ndarray] = {}
+    with rasterio.open(grib_path) as src:
+        for name, (variable, level) in specs.items():
+            band = _find_band(src, variable=variable, level=level)
+            if band is None:
+                if name == "precip":
+                    arrays[name] = np.zeros((SIZE, SIZE), dtype=np.float32)
+                    continue
+                raise RuntimeError(
+                    f"HRRR grib {grib_path.name} did not expose {variable} at level matching {level!r}"
+                )
+            arrays[name] = _reproject_band(src, band, lat=lat, lon=lon)
+    # HRRR temperature is in Kelvin; convert to °C if it looks Kelvin-ish.
+    if np.nanmean(arrays["tempC"]) > 150.0:
+        arrays["tempC"] = arrays["tempC"] - 273.15
+    # Specific humidity is dimensionless [kg/kg]; HRRR ships it in that unit
+    # already so no conversion is needed.
+    # Sanity bound: 10 m winds rarely exceed 50 m/s even in extreme Santa
+    # Ana events. If the mean of |wind| over a 32 km tile exceeds that,
+    # we almost certainly picked up an upper-level or max-wind diagnostic.
+    # Refuse to write a bogus cache rather than silently corrupt training.
+    speed_mean = float(np.nanmean(np.sqrt(arrays["u"] ** 2 + arrays["v"] ** 2)))
+    if speed_mean > 50.0:
+        raise RuntimeError(
+            f"HRRR wind from {grib_path.name} has tile-mean speed {speed_mean:.1f} m/s — "
+            "likely reading the wrong altitude band. Aborting cache write."
+        )
+    for name in REQUIRED_NOAA_CHANNELS:
+        finite_mean = float(np.nanmean(arrays[name])) if np.isfinite(arrays[name]).any() else 0.0
+        arrays[name] = np.nan_to_num(arrays[name], nan=finite_mean).astype(np.float32)
+    return arrays
+
+
+def build_hrrr_npz_for_hour(
+    *,
+    hour: dt.datetime,
+    lat: float = PALISADES_LAT,
+    lon: float = PALISADES_LON,
+    out_dir: Path,
+    work_dir: Path,
+    overwrite: bool = False,
+    session: Optional[requests.Session] = None,
+) -> Path:
+    filename = noaa_cache_filename(hour, lat, lon)
+    out = out_dir / filename
+    if out.exists() and not overwrite:
+        validate_noaa_npz(out)
+        return out
+    grib = _download_hrrr_grib(hour, work_dir, session=session)
+    try:
+        arrays = _read_hrrr_grib_to_arrays(grib, lat=lat, lon=lon)
+        write_noaa_npz(out, arrays, source=SOURCE_TAG_HRRR)
+    finally:
+        # The grib is a pure intermediate - the npz is the product, and it is
+        # four orders of magnitude smaller. Left behind these accumulate at
+        # roughly 130 MB per hour per fire, which filled a 460 GB disk during a
+        # 197-fire backfill. Re-downloading on retry is far cheaper than that.
+        _discard_intermediate(grib)
+    return out
+
+
+def _normalize_source_priority(value: str | Sequence[str] | None) -> Tuple[str, ...]:
+    """Coerce a CSV string or sequence into a tuple of lower-case source ids."""
+    if value is None:
+        return DEFAULT_WEATHER_SOURCE_PRIORITY
+    if isinstance(value, str):
+        items = [v.strip().lower() for v in value.split(",") if v.strip()]
+    else:
+        items = [str(v).strip().lower() for v in value if str(v).strip()]
+    cleaned: List[str] = []
+    for item in items:
+        if item in {"hrrr", "gfs"} and item not in cleaned:
+            cleaned.append(item)
+    return tuple(cleaned) if cleaned else DEFAULT_WEATHER_SOURCE_PRIORITY
+
+
+def build_noaa_npz_for_hour(
+    *,
+    hour: dt.datetime,
+    lat: float = PALISADES_LAT,
+    lon: float = PALISADES_LON,
+    out_dir: Path,
+    work_dir: Path,
+    overwrite: bool = False,
+    session: Optional[requests.Session] = None,
+    source_priority: str | Sequence[str] | None = None,
+) -> Path:
+    """
+    Build a single NOAA cache npz for one hour, trying each source in
+    priority order. The first source that succeeds wins. Returns the
+    path to the written npz.
+
+    Errors from earlier sources are swallowed (logged) rather than raised
+    so a transient HRRR archive gap (e.g. AWS missing a single cycle)
+    does not break a multi-hour backfill — we just degrade to the next
+    source for that one hour.
+    """
+    sources = _normalize_source_priority(source_priority)
+    last_error: Optional[Exception] = None
+    for src in sources:
+        try:
+            if src == "hrrr":
+                return build_hrrr_npz_for_hour(
+                    hour=hour, lat=lat, lon=lon, out_dir=out_dir,
+                    work_dir=work_dir, overwrite=overwrite, session=session,
+                )
+            if src == "gfs":
+                return build_gfs_npz_for_hour(
+                    hour=hour, lat=lat, lon=lon, out_dir=out_dir,
+                    work_dir=work_dir, overwrite=overwrite, session=session,
+                )
+        except Exception as exc:
+            last_error = exc
+            print(f"⚠️  {src.upper()} fetch failed for {hour.isoformat()}: {exc}; trying next source")
+            continue
+    raise RuntimeError(
+        f"All weather sources failed for {hour.isoformat()} (priority={sources}): {last_error}"
+    )
 
 
 def build_noaa_cache(
@@ -440,12 +814,24 @@ def build_noaa_cache(
     steps: int = DEFAULT_STEPS,
     step_hours: int = DEFAULT_STEP_HOURS,
     overwrite: bool = False,
+    source_priority: str | Sequence[str] | None = None,
 ) -> List[Path]:
+    """
+    Build the full NOAA grid cache for an event window.
+
+    Iterates over the canonical ``cache_hours_for_multistep`` list — that
+    same helper is what tilesvc uses to compute its read keys, so the
+    written set is exactly what the live service will look for.
+
+    `source_priority` defaults to the ``DEFAULT_WEATHER_SOURCE_PRIORITY``
+    (HRRR then GFS). Set to ("gfs",) to force GFS-only when HRRR archive
+    is unreachable, or override per-call from the CLI.
+    """
     session = requests.Session()
     written: List[Path] = []
     for hour in cache_hours_for_multistep(parse_ref_time(ref_time), t_seq=t_seq, steps=steps, step_hours=step_hours):
         written.append(
-            build_gfs_npz_for_hour(
+            build_noaa_npz_for_hour(
                 hour=hour,
                 lat=lat,
                 lon=lon,
@@ -453,6 +839,7 @@ def build_noaa_cache(
                 work_dir=work_dir,
                 overwrite=overwrite,
                 session=session,
+                source_priority=source_priority,
             )
         )
     return written
@@ -512,6 +899,65 @@ def upload_files(files: Iterable[Path], *, bucket_uri: str, kind: str, profile: 
     return uris
 
 
+def build_event_runtime_cache(
+    *,
+    profile: str,
+    lat: float,
+    lon: float,
+    ref_time: str | dt.datetime,
+    bucket_uri: str = DEFAULT_RUNTIME_BUCKET,
+    out_dir: Optional[Path] = None,
+    work_dir: Path = Path(".cache/runtime_cache/work"),
+    upload: bool = True,
+    build_firms: bool = True,
+    build_noaa: bool = True,
+    overwrite: bool = False,
+    map_key: Optional[str] = None,
+    t_seq: int = DEFAULT_TSEQ,
+    steps: int = DEFAULT_STEPS,
+    step_hours: int = DEFAULT_STEP_HOURS,
+    source_priority: str | Sequence[str] | None = None,
+) -> RuntimeBuildResult:
+    """
+    Generic per-event runtime cache builder. Use this for any historical
+    fire (Eaton, Camp/Paradise, Dixie, Caldor, ...) or any future ad-hoc
+    event. Mirrors `build_palisades_runtime_cache` but takes profile/lat/
+    lon/ref_time as required positional arguments.
+
+    `out_dir` defaults to ``.cache/runtime_cache/{profile}/`` so each event
+    lives in its own directory and you can rsync them into the production
+    `/data/firms_snapshots` and `/data/noaa_grid_cache` selectively.
+    """
+    if out_dir is None:
+        out_dir = Path(".cache/runtime_cache") / profile
+    firms_dir = out_dir / "firms_snapshots"
+    noaa_dir = out_dir / "noaa_grid_cache"
+    firms_files: List[Path] = []
+    noaa_files: List[Path] = []
+    if build_firms:
+        firms_files = build_firms_snapshots(
+            lat=lat, lon=lon, ref_time=ref_time, out_dir=firms_dir,
+            t_seq=t_seq, step_hours=step_hours, map_key=map_key, overwrite=overwrite,
+        )
+    if build_noaa:
+        noaa_files = build_noaa_cache(
+            lat=lat, lon=lon, ref_time=ref_time, out_dir=noaa_dir,
+            work_dir=work_dir, t_seq=t_seq, steps=steps, step_hours=step_hours,
+            overwrite=overwrite, source_priority=source_priority,
+        )
+    if upload:
+        if firms_files:
+            upload_files(firms_files, bucket_uri=bucket_uri, kind="firms_snapshots", profile=profile)
+        if noaa_files:
+            upload_files(noaa_files, bucket_uri=bucket_uri, kind="noaa_grid_cache", profile=profile)
+    return RuntimeBuildResult(
+        profile=profile,
+        firms_files=[str(p) for p in firms_files],
+        noaa_files=[str(p) for p in noaa_files],
+        uploaded=upload,
+    )
+
+
 def build_palisades_runtime_cache(
     *,
     bucket_uri: str = DEFAULT_RUNTIME_BUCKET,
@@ -526,25 +972,27 @@ def build_palisades_runtime_cache(
     build_noaa: bool = True,
     overwrite: bool = False,
     map_key: Optional[str] = None,
+    source_priority: str | Sequence[str] | None = None,
 ) -> RuntimeBuildResult:
-    firms_dir = out_dir / "firms_snapshots"
-    noaa_dir = out_dir / "noaa_grid_cache"
-    firms_files: List[Path] = []
-    noaa_files: List[Path] = []
-    if build_firms:
-        firms_files = build_firms_snapshots(lat=lat, lon=lon, ref_time=ref_time, out_dir=firms_dir, map_key=map_key, overwrite=overwrite)
-    if build_noaa:
-        noaa_files = build_noaa_cache(lat=lat, lon=lon, ref_time=ref_time, out_dir=noaa_dir, work_dir=work_dir, overwrite=overwrite)
-    if upload:
-        if firms_files:
-            upload_files(firms_files, bucket_uri=bucket_uri, kind="firms_snapshots", profile=profile)
-        if noaa_files:
-            upload_files(noaa_files, bucket_uri=bucket_uri, kind="noaa_grid_cache", profile=profile)
-    return RuntimeBuildResult(
+    """
+    Backward-compatible Palisades-specific entrypoint. Implemented as a
+    thin wrapper over `build_event_runtime_cache` so the source-priority
+    plumbing only needs to live in one place.
+    """
+    return build_event_runtime_cache(
         profile=profile,
-        firms_files=[str(p) for p in firms_files],
-        noaa_files=[str(p) for p in noaa_files],
-        uploaded=upload,
+        lat=lat,
+        lon=lon,
+        ref_time=ref_time,
+        bucket_uri=bucket_uri,
+        out_dir=out_dir,
+        work_dir=work_dir,
+        upload=upload,
+        build_firms=build_firms,
+        build_noaa=build_noaa,
+        overwrite=overwrite,
+        map_key=map_key,
+        source_priority=source_priority,
     )
 
 
@@ -562,6 +1010,24 @@ def _list_s3_keys(client: Any, *, bucket: str, prefix: str) -> List[str]:
         token = response.get("NextContinuationToken")
 
 
+class ProfileCollision(RuntimeError):
+    """A cache directory already holds a different event's snapshots."""
+
+
+def _guard_profile_marker(directory: Path, profile: str) -> None:
+    marker = directory / ".runtime_cache_profile"
+    if marker.is_file():
+        existing = marker.read_text(encoding="utf-8").strip()
+        if existing and existing != profile:
+            raise ProfileCollision(
+                f"{directory} already holds profile {existing!r}; refusing to sync "
+                f"{profile!r} over it. Snapshot filenames collide across events, so "
+                f"the two cannot share a directory - point FIRMS_SNAPSHOT_DIR / "
+                f"NOAA_GRID_CACHE_DIR at a per-profile path, or clear this one first."
+            )
+    marker.write_text(profile, encoding="utf-8")
+
+
 def sync_runtime_cache(
     *,
     bucket_uri: str = DEFAULT_RUNTIME_BUCKET,
@@ -573,6 +1039,16 @@ def sync_runtime_cache(
     parsed = parse_s3_uri(bucket_uri)
     firms_dir.mkdir(parents=True, exist_ok=True)
     noaa_dir.mkdir(parents=True, exist_ok=True)
+
+    # Snapshot filenames are dates and nothing else, but their contents are
+    # scoped to the event's bounding box: palisades_mid and eaton_mid both hold
+    # a 2025-01-08.csv, with 1255 and 699 rows over different longitudes.
+    # Syncing a second profile into a directory that already holds a first
+    # would silently overwrite it, and that fire's forecast would then be built
+    # from another fire's detections. Refuse instead.
+    _guard_profile_marker(firms_dir, profile)
+    _guard_profile_marker(noaa_dir, profile)
+
     result = {
         "bucket": parsed.bucket,
         "profile": profile,

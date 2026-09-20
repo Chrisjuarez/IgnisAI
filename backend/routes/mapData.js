@@ -8,7 +8,13 @@ const router = express.Router();
 const WESTERN_CONUS_BBOX = '-125.1,31.0,-101.8,49.5';
 const WESTERN_STATES = ['CA', 'OR', 'WA', 'NV', 'AZ', 'UT', 'ID', 'MT', 'WY', 'CO', 'NM'];
 const CACHE_TTL_MS = Number(process.env.MAP_BOOTSTRAP_CACHE_MS || 180000);
-const CACHE_MAX_ENTRIES = Number(process.env.MAP_BOOTSTRAP_CACHE_MAX || 200);
+// Entry count is a weak bound here: one bootstrap ranges from ~0.4 MB for a
+// city bbox to tens of MB for western CONUS, and the key is the bbox, so
+// panning the map mints a new entry each time. 200 of the large ones is
+// gigabytes on a 512 MB instance, which is what took the backend down.
+// The byte budget is the real bound; the count is a backstop.
+const CACHE_MAX_ENTRIES = Number(process.env.MAP_BOOTSTRAP_CACHE_MAX || 12);
+const CACHE_MAX_BYTES = Number(process.env.MAP_BOOTSTRAP_CACHE_BYTES || 64 * 1024 * 1024);
 const USER_AGENT = process.env.IGNIS_USER_AGENT || 'IgnisAI wildfire map';
 
 const WFIGS_INCIDENTS_URL =
@@ -25,7 +31,7 @@ const FIRIS_PUBLIC_URL =
 
 // In-memory cache. Bounded LRU + TTL to prevent unbounded growth on
 // long-running instances; older entries are evicted lazily.
-const cache = new LruTtlCache({ max: CACHE_MAX_ENTRIES, ttl: CACHE_TTL_MS });
+const cache = new LruTtlCache({ max: CACHE_MAX_ENTRIES, ttl: CACHE_TTL_MS, maxBytes: CACHE_MAX_BYTES });
 
 function nowIso() {
   return new Date().toISOString();
@@ -273,9 +279,11 @@ async function fetchHotspots(bbox) {
     excludeFlares: true,
   });
   const fires = Array.isArray(result.fires) ? result.fires : [];
+  // Footprint polygons are deliberately not built here. They are one polygon
+  // per detection - thousands at full extent - and /wildfires/footprints
+  // builds its own copy for the client that actually renders them.
   return {
     fires,
-    footprints: fireDataHelpers.firesToFootprintGeoJSON(fires),
     stale: result.stale === true,
     message: result.message,
   };
@@ -419,8 +427,11 @@ async function buildBootstrap(query = {}) {
     bbox: bbox.raw,
     incidents,
     perimeters: perimeters.geojson,
+    // Detections stay on the shared payload because /incidents/:id reads them
+    // to find hotspots near one fire. They are withheld from the bootstrap
+    // RESPONSE instead - see bootstrapResponse below. `hotspotFootprints` is
+    // gone entirely: nothing ever read it.
     hotspots: hotspots.fires,
-    hotspotFootprints: hotspots.footprints,
     alerts: normalizedAlerts,
     alertsGeojson: alerts.geojson,
     evacuations: [],
@@ -465,18 +476,41 @@ function filterIncidents(incidents, query = {}) {
   });
 }
 
+/**
+ * What the map actually needs from a bootstrap.
+ *
+ * The full payload carries every FIRMS detection and every official perimeter
+ * in the bbox, because /incidents/:id and the incident annotation step both
+ * read them. The map does not: it fetches /wildfires and /fire-perimeters
+ * directly, and the only references to these fields in the frontend are a
+ * layer toggle and an empty placeholder in an error branch.
+ *
+ * Shipping them anyway is what exhausted a 512 MB instance. Measured against
+ * production after the detections were withheld, perimeter geometry alone
+ * still ran ~36 KB per feature: 381 features came to 13.8 MB, and the ~524 at
+ * western-CONUS extent did not complete at all. Both now stay server-side and
+ * are reported as counts.
+ */
+function bootstrapResponse(payload) {
+  const { hotspots, perimeters, ...response } = payload;
+  return {
+    ...response,
+    hotspotCount: Array.isArray(hotspots) ? hotspots.length : 0,
+    perimeterCount: (perimeters && Array.isArray(perimeters.features)) ? perimeters.features.length : 0,
+  };
+}
+
 router.get('/map/bootstrap', async (req, res) => {
   try {
     const payload = await buildBootstrap(req.query);
-    res.json(payload);
+    res.json(bootstrapResponse(payload));
   } catch (err) {
     console.error('map bootstrap error:', err.message);
     res.status(200).json({
       updatedAt: nowIso(),
       incidents: [],
-      perimeters: { type: 'FeatureCollection', features: [] },
-      hotspots: [],
-      hotspotFootprints: { type: 'FeatureCollection', features: [] },
+      hotspotCount: 0,
+      perimeterCount: 0,
       alerts: [],
       alertsGeojson: { type: 'FeatureCollection', features: [] },
       evacuations: [],
@@ -563,4 +597,5 @@ module.exports._private = {
   normalizeAlert,
   buildUpdates,
   eventMatchesFireWeather,
+  bootstrapResponse,
 };

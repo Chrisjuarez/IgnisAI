@@ -1,5 +1,7 @@
+import gc
 import os
 import io
+import pickle
 import re
 import json
 import math
@@ -23,12 +25,19 @@ from .grid import (
     tile_bounds_albers,
     lonlat_to_xy_m,
     PIX,
+    SIZE,
 )
 from .dynamic_builder import DEFAULT_DYNAMIC_ORDER, build_dynamic_for_tile, fetch_weather_grids, weather_quality_status
 from .static_builder import CHANNEL_ORDER
+from .cache_health import firms_snapshot_status, noaa_cycle_status
+from .wind_summary import wind_from_sequence, wind_vector_from_sequence
+from .validation_reports import list_reports, report_dir
+from .baseline_spread import baseline_rollout
+from .spread_bands import DEFAULT_BAND_THRESHOLD, spread_scene
 from .calibration import calibrate_probability, calibration_status
 from .ml_runtime import file_sha256, runtime_imports, source_version_info
 from .prediction_contract import next_fire_from_delta, risk_class_summary
+from .site_exposure import DEFAULT_ARRIVAL_THRESHOLD, sample_exposure
 from .static_catalog import InputUnavailable, load_static_tensor_for_model
 from .display_quality import display_mask_from_static, is_static_placeholder_or_missing
 
@@ -67,28 +76,6 @@ def _metrics_text() -> str:
         lines.append(f"{name}_sum {_METRIC_SUMS[name]:.6f}")
         lines.append(f"{name}_count {_METRIC_COUNTS.get(name, 0.0):.0f}")
     return "\n".join(lines) + "\n"
-
-
-def _latest_file_age(path: str | None, patterns: Tuple[str, ...] = ("*",)) -> Dict[str, Any]:
-    if not path:
-        return {"configured": False}
-    root = Path(path)
-    if not root.exists():
-        return {"configured": True, "ok": False, "path": str(root), "error": "missing"}
-    files = []
-    for pattern in patterns:
-        files.extend([p for p in root.glob(pattern) if p.is_file()])
-    if not files:
-        return {"configured": True, "ok": False, "path": str(root), "error": "empty"}
-    latest = max(files, key=lambda p: p.stat().st_mtime)
-    age_seconds = max(0.0, time.time() - latest.stat().st_mtime)
-    return {
-        "configured": True,
-        "ok": True,
-        "path": str(root),
-        "latest_file": latest.name,
-        "age_seconds": age_seconds,
-    }
 
 
 def _noaa_cache_health_dir() -> Optional[str]:
@@ -146,6 +133,13 @@ def _get_torch_device() -> torch.device:
 
 
 DEVICE = _get_torch_device()
+
+# Thread pools are sized from the host's core count, not the container's CPU
+# share, so an unconstrained default reserves an arena per host core to run one
+# 64x64 tile. The Dockerfile sets the matching OMP/MKL variables; this covers
+# torch's own pool and any deployment that does not go through that image.
+torch.set_num_threads(max(1, int(os.getenv("TORCH_NUM_THREADS", "1"))))
+
 DEFAULT_MODEL_PATH = "/app/models/convlstm_unet_v3_delta_Cd13_Cs15_H64_T6_nautilus.pt"
 MODEL_PATH = os.getenv("MODEL_PATH", DEFAULT_MODEL_PATH)
 MODEL_THRESHOLD = float(os.getenv("MODEL_THRESHOLD", "0.01"))
@@ -424,6 +418,61 @@ def _model_metadata(config_status: str = None) -> Dict[str, Any]:
     return meta
 
 
+def _torch_build_info() -> Dict[str, Any]:
+    """Which torch wheel is actually installed.
+
+    The CPU-only pin has been silently undone once already by a dependency bump
+    that reintroduced the CUDA wheel from PyPI, which costs image size and
+    resident memory on an instance that will never have a GPU. Reporting it
+    here makes the regression visible instead of invisible.
+    """
+    version = torch.__version__
+    return {
+        "version": version,
+        "build": "cpu" if version.endswith("+cpu") else "default",
+        "num_threads": torch.get_num_threads(),
+    }
+
+
+def _read_checkpoint(map_location, **kwargs):
+    """torch.load, memory-mapping the tensor storage where the format allows."""
+    try:
+        return torch.load(MODEL_PATH, map_location=map_location, mmap=True, **kwargs)
+    except (RuntimeError, ValueError):
+        # Checkpoints predating zipfile serialization cannot be mapped.
+        return torch.load(MODEL_PATH, map_location=map_location, **kwargs)
+
+
+def _load_checkpoint(map_location):
+    """Load the checkpoint, memory-mapping its tensor storage where possible.
+
+    mmap leaves the ~50 MB of weights file-backed and reclaimable instead of
+    copying them into anonymous memory. That matters on a 512 MB instance,
+    where the load peak lands while the previous container is still shutting
+    down. Legacy checkpoints predating zipfile serialization cannot be mapped,
+    so fall back to a plain read for those.
+
+    torch >= 2.6 unpickles with weights_only=True, which rejects the numpy
+    scalars train_v4.py stamps into checkpoint metadata (val_ap, val_csi, the
+    sampling statistics). Every checkpoint that trainer produces therefore
+    fails to load on the strict path, so fall back to a full unpickle. That is
+    safe here only because the entrypoint verifies MODEL_SHA256 against
+    MODEL_URL before this runs — provenance is established outside torch.
+
+    The real fix is upstream — the trainer should record metadata as plain
+    Python types, after which the strict path succeeds and this branch stops
+    being reached.
+    """
+    try:
+        return _read_checkpoint(map_location)
+    except pickle.UnpicklingError:
+        print(
+            "⚠️  Checkpoint carries non-plain metadata (numpy scalars); "
+            "loading with weights_only=False after SHA256 verification"
+        )
+        return _read_checkpoint(map_location, weights_only=False)
+
+
 def _ensure_model_metadata_loaded(load_checkpoint: bool = True) -> None:
     global _model_meta
     if _model_meta is not None:
@@ -436,8 +485,11 @@ def _ensure_model_metadata_loaded(load_checkpoint: bool = True) -> None:
     checkpoint_meta = {}
     if load_checkpoint and os.path.exists(MODEL_PATH):
         try:
-            ckpt = torch.load(MODEL_PATH, map_location="cpu")
+            # Only the non-tensor keys are wanted here, so map the file rather
+            # than reading 50 MB of weights into memory to look at its labels.
+            ckpt = _load_checkpoint(map_location="cpu")
             checkpoint_meta = _checkpoint_metadata_from_obj(ckpt)
+            del ckpt
             if checkpoint_meta:
                 _apply_model_metadata(checkpoint_meta, MODEL_PATH)
         except Exception as exc:
@@ -538,7 +590,7 @@ def _load_model_once():
         lstm_layers=MODEL_LSTM_LAYERS,
     )
 
-    ckpt = torch.load(MODEL_PATH, map_location=DEVICE)
+    ckpt = _load_checkpoint(map_location=DEVICE)
     checkpoint_meta = _checkpoint_metadata_from_obj(ckpt)
     if checkpoint_meta:
         _apply_model_metadata(checkpoint_meta, MODEL_PATH)
@@ -562,8 +614,14 @@ def _load_model_once():
                 f"unexpected={getattr(incompat, 'unexpected_keys', [])}"
             )
         model.to(DEVICE)
+        # load_state_dict has copied every tensor into the model, so the
+        # checkpoint and the cleaned view of it are now dead weight.
+        del cleaned, state
     else:
         raise RuntimeError(f"Unsupported checkpoint type: {type(ckpt)}")
+
+    del ckpt
+    gc.collect()
 
     model.eval()
     _model = model
@@ -696,6 +754,12 @@ def _tensor_input_summary(
         "model_dynamic_order": dynamic_preparation.get("model_dynamic_order") if dynamic_preparation else None,
         "static_order": list(MODEL_STATIC_ORDER),
         "dynamic_channels": dynamic_channels,
+        # The forecast is wind-dominated, so the first question asked of any
+        # output is whether it runs the way the wind blows. Taken from the most
+        # recent frame, not the channel means: the means average the whole
+        # history window, and for a sequence ending in a wind event that is
+        # mostly the calm days before it.
+        "wind": wind_from_sequence(dyn, MODEL_DYNAMIC_ORDER),
         "static_channels": static_channels,
         "static_catalog": static_summary.get("catalog") if static_summary else None,
         "missing_or_placeholder_static": [
@@ -1405,6 +1469,7 @@ def metrics():
 def healthz():
     _ensure_model_metadata_loaded(load_checkpoint=False)
     model_exists = os.path.exists(MODEL_PATH)
+    model_sha256 = file_sha256(MODEL_PATH)
     try:
         from .static_catalog import load_catalog
         static_catalog_ok = True
@@ -1419,8 +1484,9 @@ def healthz():
         "predictionsEnabled": PREDICTIONS_ENABLED,
         "modelPath": MODEL_PATH,
         "modelExists": model_exists,
-        "modelSha256": file_sha256(MODEL_PATH),
+        "modelSha256": model_sha256,
         "device": str(DEVICE),
+        "torch": _torch_build_info(),
         "Cd": MODEL_CD,
         "Cs": MODEL_CS,
         "hidden": MODEL_HIDDEN,
@@ -1446,11 +1512,173 @@ def healthz():
             "channels": sorted((static_catalog_meta.get("channels") or {}).keys()),
             "fuel_channels": static_catalog_meta.get("fuel_channels"),
         },
-        "calibration": calibration_status(model_sha256=file_sha256(MODEL_PATH)),
-        "firmsSnapshot": _latest_file_age(os.getenv("FIRMS_SNAPSHOT_DIR"), ("*.csv", "*.CSV")),
-        "noaaCycle": _latest_file_age(_noaa_cache_health_dir(), ("*.npz", "*.grib2", "*.grb2")),
+        "calibration": calibration_status(model_sha256=model_sha256),
+        "firmsSnapshot": firms_snapshot_status(os.getenv("FIRMS_SNAPSHOT_DIR")),
+        "noaaCycle": noaa_cycle_status(_noaa_cache_health_dir()),
         "weatherQuality": weather_quality_status(),
         "mlSource": source_version_info(),
+    }
+
+
+@app.get("/site_exposure")
+def site_exposure_endpoint(
+    site_lat: float = Query(..., description="Latitude of the asset being assessed"),
+    site_lon: float = Query(..., description="Longitude of the asset being assessed"),
+    ignition_lat: float = Query(None, description="Ignition latitude; defaults to the site"),
+    ignition_lon: float = Query(None, description="Ignition longitude; defaults to the site"),
+    days: int = Query(3, ge=1, le=6, description="Forecast horizon in days"),
+    Tseq: int = Query(MODEL_TSEQ),
+    step_hours: int = Query(MODEL_STEP_HOURS),
+    thr: float = Query(None),
+    arrival_threshold: float = Query(DEFAULT_ARRIVAL_THRESHOLD, ge=0.0, le=1.0),
+    date: str = Query(None),
+):
+    """Spread forecast read at one asset rather than rendered as an image.
+
+    The rollout is centred on the ignition, so the site is sampled out of that
+    tile. Defaulting the ignition to the site answers "what if it starts here";
+    passing a separate ignition answers "what if it starts over there".
+    """
+    fire_lat = site_lat if ignition_lat is None else float(ignition_lat)
+    fire_lon = site_lon if ignition_lon is None else float(ignition_lon)
+
+    ref_time = _parse_date_param(date)
+    threshold = float(thr) if thr is not None else MODEL_THRESHOLD
+
+    bounds, _crop, rollout = _rollout_multistep_predictions(
+        fire_lat,
+        fire_lon,
+        Tseq=Tseq,
+        steps=int(days),
+        step_hours=step_hours,
+        crop_frac=1.0,
+        ignition=True,
+        ref_time=ref_time,
+        threshold=threshold,
+    )
+
+    exposure = sample_exposure(
+        rollout,
+        lonlat_to_tile(fire_lon, fire_lat),
+        site_lon=site_lon,
+        site_lat=site_lat,
+        ignition_lon=fire_lon,
+        ignition_lat=fire_lat,
+        arrival_threshold=float(arrival_threshold),
+        model_sha256=file_sha256(MODEL_PATH),
+    )
+
+    weather_quality = weather_quality_status()
+
+    return {
+        "site": {"lat": site_lat, "lon": site_lon},
+        "ignition": {"lat": fire_lat, "lon": fire_lon, "seeded": True},
+        "horizon_days": int(days),
+        "step_hours": int(step_hours),
+        "bounds": [float(v) for v in bounds],
+        **exposure,
+        "model_meta": _model_metadata(),
+        "quality": {
+            "status": weather_quality.get("status", "degraded"),
+            "degraded": weather_quality.get("status") != "ok",
+            "reasons": [] if weather_quality.get("status") == "ok"
+                       else [weather_quality.get("reason") or "open_meteo_weather_fallback"],
+        },
+        "data_sources": {
+            "fire": "NASA FIRMS live/archive window plus seeded ignition",
+            "weather": "NOAA gridded" if weather_quality.get("status") == "ok" else "Open-Meteo fallback",
+            "weather_source": weather_quality.get("source"),
+            "static": "STATIC_CATALOG_PATH COG/S3 manifest",
+        },
+    }
+
+
+@app.get("/validation_runs")
+def validation_runs(limit: int = Query(10, ge=1, le=50)):
+    """Checkpoint validation runs recorded on the mounted disk.
+
+    Validation runs as a one-off job in this service, because this is where the
+    credentials for the static rasters live. Render does not expose job stdout
+    through its API, so without this the answer - and any failure - is only
+    visible by opening the dashboard.
+    """
+    runs = list_reports(limit=limit)
+    return {
+        "directory": str(report_dir()),
+        "count": len(runs),
+        "runs": runs,
+    }
+
+
+@app.get("/spread_bands")
+def spread_bands_endpoint(
+    lat: float = Query(...),
+    lon: float = Query(...),
+    days: int = Query(3, ge=1, le=6),
+    Tseq: int = Query(MODEL_TSEQ),
+    step_hours: int = Query(MODEL_STEP_HOURS),
+    band_threshold: float = Query(DEFAULT_BAND_THRESHOLD, ge=0.0, le=1.0),
+    thr: float = Query(None),
+    ignition: bool = Query(True),
+    date: str = Query(None),
+):
+    """Spread as dated nested polygons instead of a heat raster.
+
+    Same rollout the raster endpoints run; the difference is the shape it comes
+    back as. Published progression maps draw dated bands, not a blur, because
+    the question is how far the fire gets and when.
+    """
+    ref_time = _parse_date_param(date)
+    threshold = float(thr) if thr is not None else MODEL_THRESHOLD
+
+    bounds, _crop, rollout = _rollout_multistep_predictions(
+        lat,
+        lon,
+        Tseq=Tseq,
+        steps=int(days),
+        step_hours=step_hours,
+        crop_frac=1.0,
+        ignition=ignition,
+        ref_time=ref_time,
+        threshold=threshold,
+    )
+
+    # What has already burned, from the fire channel the rollout started from.
+    # Observation and forecast are kept apart deliberately - see spread_scene.
+    dyn, _stat, _b, _bt, _ss = _prepare_prediction_inputs_with_summary(
+        lat, lon, Tseq, ignition=ignition, ref_time=ref_time, hours_step=step_hours,
+    )
+    observed_fire = _observed_fire_from_dyn(dyn)
+
+    # Bands are cut from the calibrated score, so a band edge means the same
+    # thing as the number the site exposure panel quotes for that spot.
+    calibrated = []
+    model_sha = file_sha256(MODEL_PATH)
+    for step in rollout:
+        score, _risk, _meta = calibrate_probability(step["prob"], model_sha256=model_sha)
+        calibrated.append({**step, "prob": score})
+
+    weather_quality = weather_quality_status()
+    return {
+        "bounds": [float(v) for v in bounds],
+        "horizon_days": int(days),
+        "step_hours": int(step_hours),
+        **spread_scene(
+            calibrated,
+            observed_fire,
+            lonlat_to_tile(lon, lat),
+            _TO_WGS84.transform,
+            ignition_lon=lon,
+            ignition_lat=lat,
+            threshold=float(band_threshold),
+        ),
+        "model_meta": _model_metadata(),
+        "quality": {
+            "status": weather_quality.get("status", "degraded"),
+            "degraded": weather_quality.get("status") != "ok",
+            "reasons": [] if weather_quality.get("status") == "ok"
+                       else [weather_quality.get("reason") or "open_meteo_weather_fallback"],
+        },
     }
 
 
@@ -1660,10 +1888,24 @@ def predict_raster_json_raw(lat: float = Query(...), lon: float = Query(...), Ts
     }
 
 
+# Naming these is what makes a wrong ?model= a 422 instead of a silent fall
+# through to the learned model - the failure that made the first baseline
+# comparison unfalsifiable.
+SUPPORTED_FORECAST_MODELS = frozenset({"ignis", "downwind"})
+
+
 @app.get("/predict_multistep")
 def predict_multistep(
     lat: float = Query(...),
     lon: float = Query(...),
+    model: str = Query(
+        "ignis",
+        description=(
+            "'ignis' runs the learned model. 'downwind' runs the deterministic "
+            "baseline instead - the bar the learned model has to clear. Both "
+            "return the same shape so they can be compared directly."
+        ),
+    ),
     Tseq: int = Query(MODEL_TSEQ),
     steps: int = Query(6),
     step_hours: int = Query(MODEL_STEP_HOURS),
@@ -1692,35 +1934,59 @@ def predict_multistep(
     debug_dump = "dump" in debug_modes
 
     normalized_steps = max(1, int(steps))
+    resolved_model = str(model).strip().lower() or "ignis"
+    if resolved_model not in SUPPORTED_FORECAST_MODELS:
+        raise HTTPException(
+            status_code=422,
+            detail=f"unknown model {resolved_model!r}; expected one of {sorted(SUPPORTED_FORECAST_MODELS)}",
+        )
+    baseline_only = resolved_model == "downwind"
     debug_sink: Dict[str, Any] = {}
 
-    if debug_solid:
-        # Step-1 plumbing sanity test: bypass the model entirely and produce a
-        # constant probability field on the same input shape / bounds the real
-        # pipeline would use. If the overlay renders as a fully-filled
-        # translucent rectangle aligned with the crop bounds, the bounds and
-        # coordinates pipeline is correct and the bug lives in the probability
-        # field (model / inputs / AR feedback). If the overlay is not a clean
-        # rectangle (e.g. a vertical strip), the bug lives in the
-        # bounds/coordinates math.
+    if debug_solid or baseline_only:
+        # Neither of these runs the network, but both need everything that
+        # feeds it - bounds, statics, the observed fire. Sharing the input
+        # preparation is what makes the baseline a like-for-like control rather
+        # than a second pipeline, and stops it paying for an inference it would
+        # only discard.
         dyn, stat, bounds, base_time, static_summary = _prepare_prediction_inputs_with_summary(
             lat, lon, Tseq, ignition=ignition, ref_time=ref_time, hours_step=step_hours,
         )
         prob_shape = tuple(int(v) for v in dyn.shape[-2:])
         crop_window = _build_crop_window(prob_shape, bounds, lat, lon, crop_frac)
-        rollout = [
-            {
-                "index": i,
-                "lead_hours": (i + 1) * int(step_hours),
-                "label": _step_label((i + 1) * int(step_hours)),
-                "prob": np.full(prob_shape, 0.5, dtype=np.float32),
-            }
-            for i in range(normalized_steps)
-        ]
         debug_sink["dyn"] = dyn
         debug_sink["stat"] = stat
         debug_sink["base_time"] = base_time
         debug_sink["static_summary"] = static_summary
+
+        if debug_solid:
+            # Step-1 plumbing sanity test: bypass the model entirely and produce
+            # a constant probability field on the same input shape / bounds the
+            # real pipeline would use. If the overlay renders as a fully-filled
+            # translucent rectangle aligned with the crop bounds, the bounds and
+            # coordinates pipeline is correct and the bug lives in the
+            # probability field (model / inputs / AR feedback). If the overlay is
+            # not a clean rectangle (e.g. a vertical strip), the bug lives in the
+            # bounds/coordinates math.
+            rollout = [
+                {
+                    "index": i,
+                    "lead_hours": (i + 1) * int(step_hours),
+                    "label": _step_label((i + 1) * int(step_hours)),
+                    "prob": np.full(prob_shape, 0.5, dtype=np.float32),
+                }
+                for i in range(normalized_steps)
+            ]
+        else:
+            u_ms, v_ms, _ = wind_vector_from_sequence(dyn, MODEL_DYNAMIC_ORDER) or (0.0, 0.0, None)
+            rollout = baseline_rollout(
+                _observed_fire_from_dyn(dyn),
+                u_ms=u_ms,
+                v_ms=v_ms,
+                steps=normalized_steps,
+                step_hours=step_hours,
+                ignition_rc=(int(SIZE // 2), int(SIZE // 2)),
+            )
     else:
         bounds, crop_window, rollout = _rollout_multistep_predictions(
             lat,
@@ -1738,6 +2004,7 @@ def predict_multistep(
     payload_steps = []
     cropped_bounds = crop_window["bounds"]
     observed_fire_full = _observed_fire_from_dyn(debug_sink["dyn"]) if debug_sink.get("dyn") is not None else None
+
     display_mask_full, display_mask_summary = display_mask_from_static(
         debug_sink.get("stat"),
         list(MODEL_STATIC_ORDER),
@@ -1840,7 +2107,38 @@ def predict_multistep(
         debug_payload["dump_dir"] = str(out_dir)
 
     dyn_model, dyn_prep = _prepare_dynamic_for_model(debug_sink["dyn"])
+
+    # The same rollout, also expressed as dated polygons. Carried on this
+    # response rather than behind its own endpoint so a client gets both
+    # representations from one prediction - asking separately would run the
+    # model twice for one answer.
+    calibrated_rollout = []
+    _sha = file_sha256(MODEL_PATH)
+    for step in rollout:
+        _score, _risk, _meta = calibrate_probability(step["prob"], model_sha256=_sha)
+        calibrated_rollout.append({**step, "prob": _score})
+
     response: Dict[str, Any] = {
+        "scene": spread_scene(
+            calibrated_rollout,
+            observed_fire_full,
+            lonlat_to_tile(lon, lat),
+            _TO_WGS84.transform,
+            ignition_lon=lon,
+            ignition_lat=lat,
+        ),
+        # Which forecaster produced these steps. An unrecognised ?model= value
+        # used to fall through to the learned model silently, so a baseline
+        # comparison could report two runs of the same thing and look like the
+        # baseline had simply matched it. Echoed here so that is visible.
+        "model": resolved_model,
+        # Whether these numbers are calibrated probabilities or raw model
+        # scores. With no calibration loaded the service maps scores through
+        # the identity curve, so a "0.7" is whatever the network's sigmoid
+        # emitted and not a claim that seven in ten such cells burn. /predict
+        # reported this already; the endpoint the app actually calls did not,
+        # which is the one place it matters.
+        "calibration": calibration_status(model_sha256=_sha),
         "bounds": list(map(float, cropped_bounds)),
         "coordinates": crop_window["coordinates"],
         "threshold": threshold,

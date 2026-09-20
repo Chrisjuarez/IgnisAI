@@ -134,6 +134,37 @@ def _placeholder_static_tensor(
     }
 
 
+#: Parsed catalog per resolved path, as (mtime_ns, size, catalog). Every
+#: /healthz and every prediction reads the catalog, but it only changes on
+#: deploy, so re-reading and re-parsing per call is pure overhead. Callers
+#: treat the result as read-only.
+_catalog_by_path: Dict[str, Tuple[int, int, Dict[str, Any]]] = {}
+
+
+def _read_catalog(p: Path) -> Dict[str, Any]:
+    with p.open("r", encoding="utf-8") as f:
+        data = json.load(f)
+
+    channels = data.get("channels")
+    if not isinstance(channels, Mapping):
+        raise InputUnavailable(
+            "Static catalog must contain a channels object",
+            reason="static_catalog_invalid",
+            details={"path": str(p)},
+        )
+
+    missing = [name for name in REQUIRED_BASE_STATIC if name not in channels]
+    if missing:
+        raise InputUnavailable(
+            f"Static catalog missing required channels: {missing}",
+            reason="static_catalog_missing_channels",
+            details={"missing": missing, "path": str(p)},
+        )
+
+    data["_path"] = str(p)
+    return data
+
+
 def load_catalog(path: str | Path | None = None) -> Dict[str, Any]:
     p = Path(path) if path else _resolve_catalog_path()
     if not p:
@@ -147,24 +178,16 @@ def load_catalog(path: str | Path | None = None) -> Dict[str, Any]:
             reason="static_catalog_missing",
             details={"path": str(p)},
         )
-    with p.open("r", encoding="utf-8") as f:
-        data = json.load(f)
-    channels = data.get("channels")
-    if not isinstance(channels, Mapping):
-        raise InputUnavailable(
-            "Static catalog must contain a channels object",
-            reason="static_catalog_invalid",
-            details={"path": str(p)},
-        )
-    missing = [name for name in REQUIRED_BASE_STATIC if name not in channels]
-    if missing:
-        raise InputUnavailable(
-            f"Static catalog missing required channels: {missing}",
-            reason="static_catalog_missing_channels",
-            details={"missing": missing, "path": str(p)},
-        )
-    data["_path"] = str(p)
-    return data
+
+    stat = p.stat()
+    key = str(p.resolve())
+    cached = _catalog_by_path.get(key)
+    if cached and cached[0] == stat.st_mtime_ns and cached[1] == stat.st_size:
+        return cached[2]
+
+    catalog = _read_catalog(p)
+    _catalog_by_path[key] = (stat.st_mtime_ns, stat.st_size, catalog)
+    return catalog
 
 
 def catalog_version(catalog: Mapping[str, Any]) -> Dict[str, Any]:
@@ -268,6 +291,22 @@ def _read_channel(channel: StaticChannel, tile) -> np.ndarray:
     return dst.astype(np.float32)
 
 
+#: Channels that are legitimately zero across an entire tile.
+#:
+#: The all-zero guard below exists to catch a static build that produced an
+#: empty raster. For most channels that is a sound signal - elevation, NDVI and
+#: the fire-weather indices are never uniformly zero over a real 32 km tile.
+#:
+#: But these three measure the PRESENCE of something, and its complete absence
+#: is the normal state of wildland: no impervious surface, nobody living there,
+#: no standing water. Treating that as a broken raster refused predictions on
+#: exactly the remote fires this service exists for - measured against
+#: production, four of eight active incidents, every one of them backcountry,
+#: while an urban-interface fire like Palisades passed because Los Angeles has
+#: roads. A broken build still trips the guard on the other nine channels.
+SPARSE_STATIC_CHANNELS = frozenset({"water", "impervious", "population"})
+
+
 def _validate_channel(name: str, arr: np.ndarray, channel: StaticChannel) -> Dict[str, Any]:
     finite = np.isfinite(arr)
     finite_ratio = float(finite.mean()) if arr.size else 0.0
@@ -285,7 +324,7 @@ def _validate_channel(name: str, arr: np.ndarray, channel: StaticChannel) -> Dic
             details={"channel": name},
         )
     pct_zero = float((vals == 0).mean())
-    if name != "water" and pct_zero > float(os.getenv("STATIC_MAX_ZERO_RATIO", "0.999")):
+    if name not in SPARSE_STATIC_CHANNELS and pct_zero > float(os.getenv("STATIC_MAX_ZERO_RATIO", "0.999")):
         raise InputUnavailable(
             f"Static channel {name!r} appears to be an all-zero placeholder",
             reason="static_channel_placeholder",

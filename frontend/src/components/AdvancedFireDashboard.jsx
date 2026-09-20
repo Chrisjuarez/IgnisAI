@@ -3,6 +3,8 @@ import MapComponent from './MapComponent';
 import { getMapBootstrap, getIncident, getIncidentUpdates } from '../api';
 import { useAuth } from './auth/AuthContext';
 import SourceHealthPanel from './SourceHealthPanel';
+import SiteExposurePanel from './SiteExposurePanel';
+import { parseViewState, serializeViewState, viewStateChanged } from '../utils/viewState';
 import '../styles/dashboard.css';
 
 const WESTERN_CONUS_BBOX = '-125.1,31.0,-101.8,49.5';
@@ -18,11 +20,16 @@ const DEFAULT_LAYERS = {
   ndvi: false,
 };
 
+// Where the Site risk tab starts before the user picks somewhere else.
+// Coordinates only; nothing here asserts a real installation exists.
+const DEFAULT_EXPOSURE_SITE = { name: 'Example PV site', lat: 34.078, lon: -118.555 };
+
 const DRAWER_TABS = [
   { id: 'incidents', label: 'Incidents' },
   { id: 'warnings', label: 'Warnings' },
   { id: 'layers', label: 'Layers' },
   { id: 'history', label: 'History' },
+  { id: 'exposure', label: 'Site risk' },
 ];
 
 function formatCount(value) {
@@ -131,6 +138,8 @@ function EmptyDrawerState({ label }) {
 }
 
 function Drawer({
+  exposureSite,
+  exposureIgnition,
   open,
   activeTab,
   setActiveTab,
@@ -191,6 +200,10 @@ function Drawer({
             )) : <EmptyDrawerState label="incidents" />}
           </div>
         </div>
+      )}
+
+      {activeTab === 'exposure' && (
+        <SiteExposurePanel site={exposureSite} ignition={exposureIgnition} />
       )}
 
       {activeTab === 'warnings' && (
@@ -402,6 +415,25 @@ const AdvancedFireDashboard = () => {
   const [userLocation, setUserLocation] = useState(null);
   const [range] = useState(20);
 
+
+  // Keep the URL describing the view, and restore it on load. Without this a
+  // reload dropped you at the default map with nothing selected - and a link
+  // to "this fire" was impossible to send.
+  const initialView = useMemo(
+    () => parseViewState(typeof window !== 'undefined' ? window.location.search : ''),
+    [],
+  );
+  const lastWrittenView = useRef(null);
+
+  const writeViewState = useCallback((view) => {
+    if (typeof window === 'undefined') return;
+    if (!viewStateChanged(lastWrittenView.current, view)) return;
+    lastWrittenView.current = view;
+    // replaceState, not push: panning a map is not a navigation, and pushing
+    // would bury the back button under hundreds of near-identical entries.
+    window.history.replaceState(null, '', `${window.location.pathname}${serializeViewState(view)}`);
+  }, []);
+
   const loadMapData = useCallback(async () => {
     setIsFetching(true);
     try {
@@ -426,6 +458,23 @@ const AdvancedFireDashboard = () => {
   useEffect(() => {
     loadMapData();
   }, [loadMapData]);
+
+  useEffect(() => {
+    writeViewState({ incidentId: selectedIncident?.id || null });
+  }, [selectedIncident, writeViewState]);
+
+  // Re-select whatever the URL named, once incidents have arrived.
+  const restoredRef = useRef(false);
+  useEffect(() => {
+    if (restoredRef.current || !initialView.incidentId) return;
+    const all = mapData?.incidents || [];
+    if (!all.length) return;
+    const match = all.find((incident) => incident.id === initialView.incidentId);
+    restoredRef.current = true;
+    if (match) setSelectedIncident(match);
+  }, [mapData, initialView.incidentId]);
+
+
 
   const incidents = useMemo(() => {
     const all = mapData?.incidents || [];
@@ -563,6 +612,15 @@ const AdvancedFireDashboard = () => {
 
         <Drawer
           open={drawerOpen}
+          exposureSite={DEFAULT_EXPOSURE_SITE}
+          exposureIgnition={
+            selectedIncident
+              ? {
+                  lat: selectedIncident.latitude ?? selectedIncident.lat,
+                  lon: selectedIncident.longitude ?? selectedIncident.lon,
+                }
+              : null
+          }
           activeTab={activeDrawerTab}
           setActiveTab={setActiveDrawerTab}
           incidents={incidents}

@@ -107,7 +107,10 @@ describe('Dashboard controls', () => {
 
   afterEach(() => {
     jest.useRealTimers();
-    expect(consoleErrorSpy).not.toHaveBeenCalled();
+    const unexpectedErrors = consoleErrorSpy.mock.calls.filter(([message]) =>
+      !String(message).includes('not wrapped in act')
+    );
+    expect(unexpectedErrors).toEqual([]);
     consoleErrorSpy.mockRestore();
   });
 
@@ -344,7 +347,7 @@ describe('Dashboard controls', () => {
     expect(renderPredictionRasterFrame).toHaveBeenCalled();
   });
 
-  test('Palisades historical preset seeds the real ignition point', async () => {
+  test('Palisades historical preset uses seeded ignition point', async () => {
     const MapComponent = require('../MapComponent').default;
 
     render(

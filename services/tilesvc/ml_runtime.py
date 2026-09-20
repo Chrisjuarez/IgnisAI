@@ -36,15 +36,35 @@ def import_feature_helpers():
         return DERIVED_FEATURE_NAMES, append_derived_features, expected_channel_count, "ignis_ml.src.data.features"
 
 
+_HASH_CHUNK_BYTES = 1024 * 1024
+
+#: Digest per resolved path, as (mtime_ns, size, hexdigest). The model file is
+#: ~50 MB and /healthz reports its digest on every call, so hashing per call
+#: cost tens of MB/s of disk reads on a service that is health-polled every few
+#: seconds. mtime+size is the same identity check rsync uses: cheap, and it
+#: changes whenever the file is replaced.
+_digest_by_path: Dict[str, Tuple[int, int, str]] = {}
+
+
 def file_sha256(path: str | Path) -> str | None:
     p = Path(path)
-    if not p.exists() or not p.is_file():
+    if not p.is_file():
         return None
-    h = hashlib.sha256()
+
+    stat = p.stat()
+    key = str(p.resolve())
+    cached = _digest_by_path.get(key)
+    if cached and cached[0] == stat.st_mtime_ns and cached[1] == stat.st_size:
+        return cached[2]
+
+    digest = hashlib.sha256()
     with p.open("rb") as f:
-        for chunk in iter(lambda: f.read(1024 * 1024), b""):
-            h.update(chunk)
-    return h.hexdigest()
+        for chunk in iter(lambda: f.read(_HASH_CHUNK_BYTES), b""):
+            digest.update(chunk)
+    hexdigest = digest.hexdigest()
+
+    _digest_by_path[key] = (stat.st_mtime_ns, stat.st_size, hexdigest)
+    return hexdigest
 
 
 def source_version_info() -> Dict[str, Any]:

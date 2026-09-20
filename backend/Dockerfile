@@ -4,7 +4,7 @@ WORKDIR /app
 
 # install prod deps first for better layer cache
 COPY package*.json ./
-RUN npm install --omit=dev --no-audit --no-fund
+RUN npm ci --omit=dev --no-audit --no-fund
 
 # copy source
 COPY . .

@@ -339,4 +339,92 @@ router.get("/input-audit", async (req, res) => {
   }
 });
 
+// GET /api/predict-fire-spread/site-exposure?site_lat=&site_lon=&ignition_lat=&ignition_lon=&days=
+//
+// The map answers "where will this fire go"; an asset owner asks "does it reach
+// my site, and when". Same forecast, read at one coordinate. Thin proxy: the
+// projection and sampling live in tilesvc, which owns the grid.
+router.get("/site-exposure", async (req, res) => {
+  try {
+    if (!predictionsEnabled()) return sendPredictionsDisabled(res);
+    const { site_lat, site_lon, ignition_lat, ignition_lon, days, Tseq, thr, arrival_threshold, date } = req.query;
+    if (site_lat == null || site_lon == null) {
+      return res.status(400).json({ error: "site_lat and site_lon are required" });
+    }
+
+    const params = {
+      site_lat,
+      site_lon,
+      ...(ignition_lat != null ? { ignition_lat } : {}),
+      ...(ignition_lon != null ? { ignition_lon } : {}),
+      ...(days != null ? { days } : {}),
+      ...(Tseq ? { Tseq } : {}),
+      ...(thr ? { thr } : {}),
+      ...(arrival_threshold != null ? { arrival_threshold } : {}),
+      ...(date ? { date } : {}),
+    };
+
+    // A rollout per request, so this carries the multistep timeout rather than
+    // the short-endpoint one, and does not retry: a retry restarts the whole
+    // rollout and re-spends the same minutes.
+    const payload = await getJSON(
+      `${TILE_SVC}/site_exposure`,
+      params,
+      { timeoutMs: MULTISTEP_TIMEOUT_MS, retries: 0 },
+    );
+
+    return res.json(payload);
+  } catch (err) {
+    const status = err?.response?.status;
+    const detail = err?.response?.data ?? err.message;
+    console.error("site-exposure failed:", status || err.code, detail);
+    return res.status(status === 422 ? 422 : 502).json({
+      error: "site_exposure_failed",
+      detail,
+    });
+  }
+});
+
+// GET /api/predict-fire-spread/bands?lat=&lon=&days=&band_threshold=
+//
+// Spread as dated polygons rather than a heat raster. Thin proxy: the
+// polygonisation and reprojection live in tilesvc, which owns the grid.
+router.get("/bands", async (req, res) => {
+  try {
+    if (!predictionsEnabled()) return sendPredictionsDisabled(res);
+    const { lat, lon, days, band_threshold, Tseq, thr, ignition, date } = req.query;
+    if (lat == null || lon == null) {
+      return res.status(400).json({ error: "lat and lon are required" });
+    }
+
+    const params = {
+      lat,
+      lon,
+      ...(days != null ? { days } : {}),
+      ...(band_threshold != null ? { band_threshold } : {}),
+      ...(Tseq ? { Tseq } : {}),
+      ...(thr ? { thr } : {}),
+      ...(date ? { date } : {}),
+      ignition: resolveIgnition(ignition),
+    };
+
+    // A rollout per request, so this carries the multistep budget and does not
+    // retry: a retry restarts the whole rollout and re-spends the same minutes.
+    const payload = await getJSON(
+      `${TILE_SVC}/spread_bands`,
+      params,
+      { timeoutMs: MULTISTEP_TIMEOUT_MS, retries: 0 },
+    );
+
+    return res.json(payload);
+  } catch (err) {
+    const status = err?.response?.status;
+    console.error("spread bands failed:", status || err.code, err?.response?.data ?? err.message);
+    return res.status(status === 422 ? 422 : 502).json({
+      error: "spread_bands_failed",
+      detail: err?.response?.data ?? err.message,
+    });
+  }
+});
+
 module.exports = router;

@@ -16,4 +16,15 @@ const WildfireSchema = new mongoose.Schema({
   brightTi5: { type: Number },
   timestamp: { type: Date, required: true, index: true }
 }, { timestamps: false });
+
+// FIRMS near-real-time products re-serve the same detections on every poll, so
+// a detection's identity — where and when it was observed, and by which sensor
+// — must be unique. Without this the archive grew by a full snapshot per
+// request. Run scripts/dedupe-wildfires.js before this index can build on a
+// collection that already contains duplicates.
+WildfireSchema.index(
+  { latitude: 1, longitude: 1, timestamp: 1, satellite: 1, instrument: 1 },
+  { unique: true, name: 'firms_detection_identity' }
+);
+
 module.exports = mongoose.model('Wildfire', WildfireSchema);

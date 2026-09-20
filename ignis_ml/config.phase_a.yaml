@@ -1,0 +1,96 @@
+# Phase A — protocol fixes on mNDWS only (research-informed-redesign §4 / §6).
+#
+# Goal: trustworthy v3.5 baseline BEFORE TS-SatFire / architecture changes.
+#   1. Val + checkpoint selection on Average Precision (AP)
+#   2. Focal loss primary (α=inv-freq, γ=2); wind-align kept; Dice/Tversky off
+#   3. Short lookback T=3, still +24 h next-day target
+#
+# Run:
+#   export IGNIS_DATA_ROOT=/Volumes/T9/ignis-data
+#   cd ignis_ml && python train_v4.py --config config.phase_a.yaml
+#
+# Channel schema matches the mNDWS_500m_T3 tiles (v3 ETL), not the full v4
+# TS-SatFire schema — so Phase A attributes gains to protocol, not channels.
+
+data_root: data
+
+datasets:
+  mndws:
+    raw_dir: data/mNDWS_raw/ndws_western_dataset
+    tiles_dir: data/mNDWS_500m_T3
+
+checkpoints:
+  model: checkpoints/convlstm_unet_phase_a.pt
+
+grid:
+  crs: "EPSG:5070"
+  tile_km: 32
+  res_m: 500
+
+channels:
+  dynamic_order: [fire_t, u, v, gust, tempC, q, precip]
+  static_order:  [elev, slope, aspect_cos, aspect_sin, ndvi, bi, erc, pdsi, chili, impervious, water, population, fuel1, fuel2, fuel3]
+
+training:
+  seq_len: 3
+  batch_size: 8
+  hidden_channels: 64
+  num_workers: 2
+  cache_items: 0
+  persistent_workers: false
+  epochs: 30
+  lr: 0.0008
+  weight_decay: 0.0005
+  optimizer: adamw
+  scheduler: cosine
+  warmup_epochs: 5
+  grad_clip: 1.0
+  early_stop: 6
+  mixed_precision: true
+  seed: 42
+
+  drop_encoder: 0.10
+  drop_decoder: 0.15
+
+  target_mode: delta
+
+  loss:
+    # Phase A: focal is the PRIMARY term (Lahrichi et al. WACV 2026: +24% AP).
+    # alpha: inv_freq => α_pos = 1 - prior at train time.
+    focal: { enable: true, gamma: 2.0, alpha: inv_freq }
+    # Dice / Tversky off for the first baseline — ablate them on later runs.
+    dice_weight: 0.0
+    dice_dilate_px: 2
+    tversky: { enable: false, alpha: 0.3, beta: 0.7, weight: 0.6 }
+    # Keep the novel wind-align regularizer (redesign §2.3).
+    wind_align: { enable: true, weight: 0.1 }
+
+  metrics:
+    # Primary selection metric = AP (threshold-free). CSI still logged.
+    select_on: ap
+    threshold: 0.5
+    tta: false
+    threshold_sweep:
+      lo: 0.05
+      hi: 0.50
+      n: 46
+
+  sampling:
+    santa_ana_boost: 5.0
+    santa_ana_u_threshold: -5.0
+
+features:
+  derived:
+    enable: true
+    include: null
+  days_since_fire_cap: 7
+
+augmentation:
+  hflip_p: 0.5
+  vflip_p: 0.5
+  rot90_p: 1.0
+  translate_px: 0
+  channel_dropout_p: 0.05
+  channel_dropout_exclude: [fire_t, u, v]
+  gaussian_noise_std: 0.01
+  temporal_dropout_p: 0.10

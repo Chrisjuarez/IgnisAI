@@ -14,6 +14,7 @@ import {
   getWildfireData,
   getWildfireFootprints,
   getFirePerimeters,
+  getSpreadBands,
   predictFireSpreadMultistep
 } from '../api';
 import {
@@ -64,6 +65,9 @@ const FOOTPRINT_FILL_COLOR = [
   'Moderate', '#ff9b45',
   '#ffd977'
 ];
+const SPREAD_BAND_FILL_OPACITY = 0.62;
+const SPREAD_OBSERVED_FILL_OPACITY = 0.55;
+const SPREAD_BAND_LINE_WIDTH = 1.4;
 const FOOTPRINT_FILL_OPACITY = [
   'interpolate', ['linear'], ['get', 'confidencePct'],
   0, 0.02,
@@ -570,8 +574,11 @@ const MapComponent = forwardRef(({
       // You can pass { predictableOnly:true } if you want to hide weak signals by default.
       const map = mapRef.current;
       const bbox = mapBoundsBbox(map);
+      // Scope the detection read to the viewport, as the footprint and
+      // perimeter reads already are. Unscoped, this returned the whole archive
+      // on every load however small the map window.
       const [firesResult, footprintsResult] = await Promise.allSettled([
-        getWildfireData(),
+        getWildfireData({ ...(bbox ? { bbox } : {}), days: 2 }),
         getWildfireFootprints({ ...(bbox ? { bbox } : {}), days: 2 }),
       ]);
 
@@ -837,7 +844,48 @@ const MapComponent = forwardRef(({
     setActiveForecastIndex(0);
     setForecastLayerMode('new_burn');
     removePredictionOverlays(mapRef.current);
+    // The scene layers are separate sources from the raster overlays, so
+    // clearing the timeline has to clear them too or a stale forecast keeps
+    // sitting on the map under a cleared one.
+    ['spread-observed-source', 'spread-bands-source', 'spread-ignition-source'].forEach((id) => {
+      const src = mapRef.current?.getSource?.(id);
+      if (src) src.setData({ type: 'FeatureCollection', features: [] });
+    });
     setObservedLayerMode('normal');
+  }, []);
+
+  // Paint the three scene layers. Kept separate from the fetch so the timeline
+  // (which already has the payload) does not have to run the model again.
+  const paintSpreadScene = useCallback((scene) => {
+    const map = mapRef.current;
+    const paint = (sourceId, data) => {
+      const src = map?.getSource?.(sourceId);
+      if (src) src.setData(data || emptyFeatureCollection());
+    };
+    paint('spread-observed-source', scene?.observed);
+    paint('spread-bands-source', scene?.forecast);
+    paint('spread-ignition-source', scene?.ignition
+      ? { type: 'FeatureCollection', features: [scene.ignition] }
+      : null);
+
+    // These layers are created when the map initialises, but the raster
+    // overlay is added later - when a prediction runs - and Mapbox appends a
+    // layer with no beforeId to the top of the stack. So the heatmap was
+    // painting straight over the bands at full opacity and they were never
+    // visible. Raise them explicitly rather than depending on creation order,
+    // which the overlay code is free to change.
+    //
+    // Order matters within the group too: burned area underneath, forecast
+    // over it, seed point on top.
+    ['spread-observed-fill', 'spread-observed-outline',
+     'spread-bands-fill', 'spread-bands-outline',
+     'spread-ignition-point'].forEach((layerId) => {
+      try {
+        if (map?.getLayer?.(layerId)) map.moveLayer(layerId);
+      } catch (_) {
+        // A style reload can race this; the next paint re-raises them.
+      }
+    });
   }, []);
 
   const loadForecastTimeline = useCallback(async ({
@@ -887,6 +935,12 @@ const MapComponent = forwardRef(({
         firstStepHasImage: !!payload?.steps?.[0]?.image_base64,
       });
 
+      // Paint the dated scene from the same response: where it started, what
+      // has already burned, and the forecast as day bands. This is the shape
+      // people read a fire map for; the raster frames stay for the timeline
+      // scrub underneath it.
+      paintSpreadScene(payload?.scene);
+
       const prepared = await prepareMultistepRasterFrames(payload, {
         opacity: 0.75,
         smooth: true,
@@ -932,7 +986,7 @@ const MapComponent = forwardRef(({
       if (timeoutHandle) clearTimeout(timeoutHandle);
       setIsForecastLoading(false);
     }
-  }, []);
+  }, [paintSpreadScene]);
 
   // ---------- Prediction ----------
   const handlePredictFireSpread = async (fireProps) => {
@@ -1271,8 +1325,26 @@ const MapComponent = forwardRef(({
   }, []);
 
   // ---------- Expose actions to parent ----------
+
+  // Fetch spread bands for a point and paint them. Returns the band collection
+  // so a caller can drive a legend from the same data the map drew.
+  const showSpreadBands = useCallback(async ({ lat, lon, days = 3, date } = {}) => {
+    const payload = await getSpreadBands({ lat, lon, days, date });
+    paintSpreadScene(payload);
+    return payload;
+  }, [paintSpreadScene]);
+
+  const clearSpreadBands = useCallback(() => {
+    ['spread-observed-source', 'spread-bands-source', 'spread-ignition-source'].forEach((id) => {
+      const src = mapRef.current?.getSource?.(id);
+      if (src) src.setData(emptyFeatureCollection());
+    });
+  }, []);
+
   useImperativeHandle(ref, () => ({
     refreshWildfires: fetchWildfires,
+    showSpreadBands,
+    clearSpreadBands,
     toggleNdvi,
     toggleHistoryPanel: () => setShowHistPanel(v => !v),
     runPredictionForIncident,
@@ -1310,6 +1382,9 @@ const MapComponent = forwardRef(({
       'observed-fire-cells-source',
       'wildfire-footprints-source',
       'fire-perimeters-source',
+      'spread-bands-source',
+      'spread-observed-source',
+      'spread-ignition-source',
     ].forEach(id => {
       if (map.getSource(id)) map.removeSource(id);
     });
@@ -1372,6 +1447,83 @@ const MapComponent = forwardRef(({
         ],
         'line-opacity': 0.78,
       }
+    });
+
+    // Spread day bands. One source, colour driven by the feature's own `color`
+    // property, so the palette lives with the data that defines it rather than
+    // being duplicated here and drifting.
+    // Already-burned footprint. Drawn beneath the forecast and in a neutral
+    // colour: it is observation, not model output, and a viewer deciding
+    // anything needs to know which part of the shape is which.
+    map.addSource('spread-observed-source', {
+      type: 'geojson',
+      data: emptyFeatureCollection(),
+    });
+    map.addLayer({
+      id: 'spread-observed-fill',
+      type: 'fill',
+      source: 'spread-observed-source',
+      paint: {
+        'fill-color': ['get', 'color'],
+        'fill-opacity': SPREAD_OBSERVED_FILL_OPACITY,
+      },
+    });
+    map.addLayer({
+      id: 'spread-observed-outline',
+      type: 'line',
+      source: 'spread-observed-source',
+      paint: { 'line-color': ['get', 'color'], 'line-width': 1.2, 'line-opacity': 0.85 },
+    });
+
+    map.addSource('spread-bands-source', {
+      type: 'geojson',
+      data: emptyFeatureCollection(),
+    });
+    map.addLayer({
+      id: 'spread-bands-fill',
+      type: 'fill',
+      source: 'spread-bands-source',
+      paint: {
+        'fill-color': ['get', 'color'],
+        'fill-opacity': SPREAD_BAND_FILL_OPACITY,
+      },
+      layout: {
+        // Bands are disjoint so they cannot stack, but draw order still
+        // matters where simplified edges abut. Day 1 highest, so nearest-term
+        // sits on top rather than depending on feature order in the payload.
+        'fill-sort-key': ['-', 0, ['get', 'day']],
+      },
+    });
+    map.addLayer({
+      id: 'spread-bands-outline',
+      type: 'line',
+      source: 'spread-bands-source',
+      paint: {
+        // The isochron: a dated contour keeps bands separable when the fills
+        // themselves stop being distinguishable. Recommended by Copernicus
+        // GC 8:167 (2025) for exactly this reason.
+        'line-color': ['get', 'color'],
+        'line-width': SPREAD_BAND_LINE_WIDTH,
+        'line-opacity': 0.9,
+      },
+    });
+
+    // The seed point. Drawn last so it stays visible over both the burned
+    // footprint and the forecast.
+    map.addSource('spread-ignition-source', {
+      type: 'geojson',
+      data: emptyFeatureCollection(),
+    });
+    map.addLayer({
+      id: 'spread-ignition-point',
+      type: 'circle',
+      source: 'spread-ignition-source',
+      paint: {
+        'circle-radius': 6,
+        'circle-color': ['get', 'color'],
+        'circle-stroke-width': 2.5,
+        'circle-stroke-color': '#ffffff',
+      },
     });
 
     map.addSource('wildfire-footprints-source', {

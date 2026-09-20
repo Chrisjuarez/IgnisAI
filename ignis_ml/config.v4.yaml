@@ -1,0 +1,109 @@
+# ignis_ml/config.v4.yaml — STAGE 5 / v4: Santa-Ana-aware retrain
+#
+# New file (does NOT overwrite config.yaml) so v3 stays reproducible.
+# Run training with:  python train_nautilus.py --config config.v4.yaml
+# (train_nautilus.main() must accept --config; see config.v4 wiring note in
+#  docs/v4-implementation-README.md).
+#
+# Implements docs/v4-retraining-gameplan.md §2–§3 plus two fixes the gameplan
+# did not call out (see docs/heatmap-diagnosis.md):
+#   * Tversky was configured but never applied in v3 — v4 wires it in via
+#     ignis_ml/src/training/v4_losses.py.
+#   * Wind channels were being zeroed by channel_dropout — v4 protects them.
+
+data_root: data
+
+datasets:
+  # v4 trains on mNDWS + TS-SatFire merged. The ingestion script writes
+  # TS-SatFire tiles into the same x_dyn/x_stat/y npz schema NpzTileDataset reads.
+  mndws:
+    raw_dir: data/mNDWS_raw/ndws_western_dataset
+    tiles_dir: data/mNDWS_500m_T6
+  tssatfire:
+    raw_dir: data/tssatfire_raw
+    tiles_dir: data/tssatfire_500m_T6
+    meta_dir: data/tssatfire_500m_T6/_meta   # per-fire JSON (is_santa_ana etc.)
+
+checkpoints:
+  model: checkpoints/convlstm_unet_v4_temporal.pt
+  onnx:  checkpoints/convlstm_unet_v4_temporal.onnx
+
+grid:
+  crs: "EPSG:5070"
+  tile_km: 32
+  res_m: 500
+
+# v4 channel schema (gameplan §3).
+#   dynamic: 12 raw + 6 derived = 18  -> Cd = 18
+#   static:  9                        -> Cs = 9
+channels:
+  dynamic_order: [fire_t, viirs_i4, viirs_i5, u, v, gust, tempC, q, precip, erc, bi, ndvi]
+  static_order:  [elev, slope, aspect_cos, aspect_sin, pdsi, chili, water, fuel1, fuel2]
+
+training:
+  seq_len: 6
+  batch_size: 8          # raise on a real CUDA GPU (A100 can do 24-32)
+  hidden_channels: 64
+  num_workers: 4         # CUDA box; bump from the laptop's 1
+  cache_items: 0
+  persistent_workers: false
+  epochs: 30
+  lr: 0.0008
+  weight_decay: 0.0005
+  optimizer: adamw
+  scheduler: cosine
+  warmup_epochs: 5
+  grad_clip: 1.0
+  early_stop: 6
+  mixed_precision: true
+  seed: 42
+
+  drop_encoder: 0.10
+  drop_decoder: 0.15
+
+  target_mode: delta
+
+  loss:
+    dice_weight: 0.6
+    dice_dilate_px: 2
+    focal: { enable: false, gamma: 2.0, alpha: 0.75 }
+    # v4: Tversky is now ACTUALLY APPLIED (see v4_losses.tversky_loss). In v3
+    # this block existed but the training loss ignored it.
+    tversky: { enable: true, alpha: 0.3, beta: 0.7, weight: 0.6 }
+    # v4: wind-alignment regularizer (gameplan Phase 3). Penalizes predicted
+    # delta-centroid that is not downwind of the fire centroid.
+    wind_align: { enable: true, weight: 0.1 }
+
+  metrics:
+    threshold: 0.5
+    tta: false
+    # Delta predictions operate at a much lower threshold than full masks.
+    threshold_sweep:
+      lo: 0.05
+      hi: 0.50
+      n: 46
+
+  # v4: up-weight Santa-Ana fires (mean u < -5 m/s) so they appear in ~10% of
+  # batches despite being <2% of data. Implemented in v4_sampler.build_santa_ana_sampler.
+  sampling:
+    santa_ana_boost: 5.0
+    santa_ana_u_threshold: -5.0
+
+# v4 derived features unchanged (the 6 are correct), but cap days_since_fire.
+features:
+  derived:
+    enable: true
+    include: null
+  days_since_fire_cap: 7
+
+augmentation:
+  hflip_p: 0.5
+  vflip_p: 0.5
+  rot90_p: 1.0
+  translate_px: 0
+  # v4: lower channel dropout AND never drop the physical drivers. The dataset's
+  # _augment must read `channel_dropout_exclude` and skip those names.
+  channel_dropout_p: 0.05
+  channel_dropout_exclude: [fire_t, u, v, viirs_i4]
+  gaussian_noise_std: 0.01
+  temporal_dropout_p: 0.10

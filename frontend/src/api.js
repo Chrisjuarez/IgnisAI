@@ -146,6 +146,75 @@ export const predictFireSpreadMultistep = async ({
   return data;
 };
 
+/**
+ * Fire exposure at a fixed asset.
+ * Backend expects: /predict-fire-spread/site-exposure?site_lat=&site_lon=&ignition_lat=&ignition_lon=&days=
+ *
+ * The ignition defaults to the site itself, which answers "what if it starts
+ * here"; passing an ignition answers "what if it starts over there".
+ */
+export const getSiteExposure = async ({
+  siteLat,
+  siteLon,
+  ignitionLat,
+  ignitionLon,
+  days,
+  arrivalThreshold,
+  date,
+} = {}) => {
+  const lat = siteLat != null ? Number(siteLat) : null;
+  const lon = siteLon != null ? Number(siteLon) : null;
+  if (lat == null || Number.isNaN(lat) || lon == null || Number.isNaN(lon)) {
+    throw new Error(`getSiteExposure missing site coordinates (lat=${siteLat}, lon=${siteLon})`);
+  }
+
+  const { data } = await api.get("/predict-fire-spread/site-exposure", {
+    // One rollout per request, same cost profile as multistep.
+    timeout: MULTISTEP_TIMEOUT_MS,
+    params: {
+      site_lat: lat,
+      site_lon: lon,
+      ...(ignitionLat != null && !Number.isNaN(Number(ignitionLat)) ? { ignition_lat: Number(ignitionLat) } : {}),
+      ...(ignitionLon != null && !Number.isNaN(Number(ignitionLon)) ? { ignition_lon: Number(ignitionLon) } : {}),
+      ...(days ? { days } : {}),
+      ...(arrivalThreshold != null ? { arrival_threshold: Number(arrivalThreshold) } : {}),
+      ...(date ? { date } : {}),
+    },
+  });
+
+  return data;
+};
+
+/**
+ * Fire spread as dated, non-overlapping day bands.
+ * Backend expects: /predict-fire-spread/bands?lat=&lon=&days=
+ *
+ * Each cell belongs to the day it first burned, so the bands can be drawn at
+ * full opacity without colours stacking.
+ */
+export const getSpreadBands = async ({ lat, lng, lon, days, bandThreshold, Tseq, date, ignition } = {}) => {
+  const latitude = lat != null ? Number(lat) : null;
+  const longitude = lon != null ? Number(lon) : (lng != null ? Number(lng) : null);
+  if (latitude == null || Number.isNaN(latitude) || longitude == null || Number.isNaN(longitude)) {
+    throw new Error(`getSpreadBands missing lat/lon (lat=${lat}, lng=${lng}, lon=${lon})`);
+  }
+
+  const { data } = await api.get("/predict-fire-spread/bands", {
+    timeout: MULTISTEP_TIMEOUT_MS,
+    params: {
+      lat: latitude,
+      lon: longitude,
+      ...(days ? { days } : {}),
+      ...(bandThreshold != null ? { band_threshold: Number(bandThreshold) } : {}),
+      ...(Tseq ? { Tseq } : {}),
+      ...(date ? { date } : {}),
+      ...(ignition != null ? { ignition } : {}),
+    },
+  });
+
+  return data;
+};
+
 // Keep your old name if the UI calls it:
 export const predictFireSpread = async ({ lat, lng, thr, date } = {}) =>
   predictFireSpreadVector({ lat, lng, thr, date });

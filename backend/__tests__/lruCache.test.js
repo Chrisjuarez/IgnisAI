@@ -90,6 +90,58 @@ describe('LruTtlCache', () => {
   test('stats reflect current state', () => {
     const c = new LruTtlCache({ max: 4, ttl: 500 });
     c.set('a', 1);
-    expect(c.stats()).toEqual({ size: 1, max: 4, ttl: 500 });
+    // bytes/maxBytes are 0 when no byte budget is configured.
+    expect(c.stats()).toEqual({ size: 1, max: 4, ttl: 500, bytes: 0, maxBytes: 0 });
+  });
+});
+
+describe('byte budget', () => {
+  const big = (kb) => ({ blob: 'x'.repeat(kb * 1024) });
+
+  it('evicts by total size, not just entry count', () => {
+    // Budget fits three ~100 KB entries with room to spare, but not four.
+    const budget = 350 * 1024;
+    const cache = new LruTtlCache({ max: 100, ttl: 0, maxBytes: budget });
+
+    cache.set('a', big(100));
+    cache.set('b', big(100));
+    cache.set('c', big(100));
+    expect(cache.size).toBe(3);
+
+    // Well under the 100-entry cap, but over the byte budget.
+    cache.set('d', big(100));
+
+    expect(cache.size).toBeLessThan(4);
+    expect(cache.bytes).toBeLessThanOrEqual(budget);
+    expect(cache.get('a')).toBeNull();
+    expect(cache.get('d')).not.toBeNull();
+  });
+
+  it('keeps a single oversized entry rather than emptying itself', () => {
+    const cache = new LruTtlCache({ max: 10, ttl: 0, maxBytes: 10 * 1024 });
+
+    cache.set('huge', big(500));
+
+    expect(cache.size).toBe(1);
+    expect(cache.get('huge')).not.toBeNull();
+  });
+
+  it('releases bytes when an entry is deleted or expires', () => {
+    const cache = new LruTtlCache({ max: 10, ttl: 0, maxBytes: 1024 * 1024 });
+
+    cache.set('a', big(50));
+    const withEntry = cache.bytes;
+    cache.delete('a');
+
+    expect(withEntry).toBeGreaterThan(0);
+    expect(cache.bytes).toBe(0);
+  });
+
+  it('reports byte usage in stats', () => {
+    const cache = new LruTtlCache({ max: 10, ttl: 0, maxBytes: 1024 * 1024 });
+    cache.set('a', big(10));
+
+    expect(cache.stats()).toMatchObject({ maxBytes: 1024 * 1024 });
+    expect(cache.stats().bytes).toBeGreaterThan(0);
   });
 });

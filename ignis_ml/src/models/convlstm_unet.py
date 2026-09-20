@@ -44,9 +44,9 @@ import torch.nn.functional as F
 USE_GROUPNORM = True     # GN is more stable than BN for small/variable batches.
 GN_GROUPS     = 8
 USE_ASPP      = True     # Keep the light context pyramid at the bottleneck.
-ARCH_VERSION  = "v3"     # Stage-4: input Cd changes when derived features are on
-                         # and target may be delta instead of full mask — bump so
-                         # checkpoint filenames don't collide with v2.
+ARCH_VERSION  = "v3"     # Production currently serves the v3 checkpoint.
+                         # Bump this only when the matching checkpoint and
+                         # serving configuration are promoted together.
 
 
 def Norm2d(num_channels: int):

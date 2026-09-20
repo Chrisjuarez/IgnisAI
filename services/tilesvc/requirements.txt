@@ -1,13 +1,18 @@
+# Runtime dependencies for tilesvc.
+#
+# torch is deliberately NOT listed here — it is pinned to the CPU-only build in
+# requirements-torch.txt, and naming it here would let a version bump pull the
+# CUDA wheel from PyPI and silently undo that.
+#
+# Test-only dependencies live in requirements-dev.txt.
 fastapi==0.115.5
 uvicorn[standard]==0.38.0
 requests
 numpy<2
-Pillow==10.2.0
+Pillow==12.2.0
 affine
 rasterio
 shapely
 pyproj
 boto3
-torch==2.1.1
 scipy
-pytest
