@@ -38,7 +38,9 @@ const IDS = {
   scarLine: 'ignis-scene-scar-line',
   bandSource: 'ignis-scene-band-src',
   bandFill: 'ignis-scene-band-fill',
+  bandLineCasing: 'ignis-scene-band-line-casing',
   bandLine: 'ignis-scene-band-line',
+  bandLabel: 'ignis-scene-band-label',
   ignitionSource: 'ignis-scene-ignition-src',
   ignitionPoint: 'ignis-scene-ignition-point',
 };
@@ -769,6 +771,12 @@ function addLayerBelowLabels(map, layer) {
   map.addLayer(layer, firstSymbolLayerId(map));
 }
 
+// Copernicus GC 8:167 (2025) recommends labelling the isochrones, because a
+// sequential ramp stops being separable once the steps get close - which six
+// days of YlOrRd certainly are. The label is what makes a band identifiable
+// rather than merely present.
+const BAND_LABEL = ['concat', 'D', ['to-string', ['coalesce', ['get', 'day'], '?']]];
+
 function bandPaint(activeLeadHours) {
   const reached = Number.isFinite(activeLeadHours)
     ? ['<=', BAND_LEAD_HOURS, activeLeadHours]
@@ -777,14 +785,30 @@ function bandPaint(activeLeadHours) {
     ? ['==', BAND_LEAD_HOURS, activeLeadHours]
     : false;
   return {
+    // Bands are disjoint by arrival day, so they never stack and can be drawn
+    // opaque enough to actually read. This was 0.32 to survive overlapping,
+    // which the geometry no longer does.
     fill: {
       'fill-color': BAND_COLOR,
-      'fill-opacity': ['case', reached, 0.32, 0.0],
+      'fill-opacity': ['case', reached, 0.62, 0.0],
+    },
+    // A dark casing under every edge, so a band boundary survives whatever it
+    // happens to be drawn over. Standard cartographic halo.
+    casing: {
+      'line-color': '#2b1600',
+      'line-width': ['case', isFront, 4.4, ['case', reached, 2.6, 2.0]],
+      'line-opacity': ['case', reached, 0.85, 0.18],
     },
     line: {
       'line-color': BAND_COLOR,
       'line-width': ['case', isFront, 2.8, ['case', reached, 1.2, 1.0]],
-      'line-opacity': ['case', isFront, 1.0, ['case', reached, 0.7, 0.22]],
+      'line-opacity': ['case', isFront, 1.0, ['case', reached, 0.9, 0.22]],
+    },
+    label: {
+      'text-color': '#1a1a1a',
+      'text-halo-color': '#ffffff',
+      'text-halo-width': 1.6,
+      'text-opacity': ['case', reached, 1.0, 0.0],
     },
   };
 }
@@ -834,17 +858,48 @@ export async function renderPredictionScene(map, scene, opts = {}) {
     paint: paint.fill,
   });
   addLayerBelowLabels(map, {
+    id: IDS.bandLineCasing,
+    type: 'line',
+    source: IDS.bandSource,
+    layout: { 'line-sort-key': BAND_SORT_KEY, 'line-join': 'round', 'line-cap': 'round' },
+    paint: paint.casing,
+  });
+  addLayerBelowLabels(map, {
     id: IDS.bandLine,
     type: 'line',
     source: IDS.bandSource,
-    layout: { 'line-sort-key': BAND_SORT_KEY, 'line-join': 'round' },
+    layout: { 'line-sort-key': BAND_SORT_KEY, 'line-join': 'round', 'line-cap': 'round' },
     paint: paint.line,
   });
+  // Labels go above the basemap's own symbols: a band edge the user cannot
+  // name is the problem this is here to solve, so it outranks a place name.
+  if (!map.getLayer(IDS.bandLabel)) {
+    map.addLayer({
+      id: IDS.bandLabel,
+      type: 'symbol',
+      source: IDS.bandSource,
+      layout: {
+        'symbol-placement': 'line',
+        'symbol-spacing': 260,
+        'text-field': BAND_LABEL,
+        'text-size': 12,
+        'text-font': ['DIN Offc Pro Medium', 'Arial Unicode MS Bold'],
+        'text-letter-spacing': 0.06,
+        'text-keep-upright': true,
+        'text-allow-overlap': false,
+        'text-padding': 6,
+      },
+      paint: paint.label,
+    });
+  }
 
   // Re-applied every tick so scrubbing does not tear down and rebuild layers.
   map.setPaintProperty(IDS.bandFill, 'fill-opacity', paint.fill['fill-opacity']);
+  map.setPaintProperty(IDS.bandLineCasing, 'line-width', paint.casing['line-width']);
+  map.setPaintProperty(IDS.bandLineCasing, 'line-opacity', paint.casing['line-opacity']);
   map.setPaintProperty(IDS.bandLine, 'line-width', paint.line['line-width']);
   map.setPaintProperty(IDS.bandLine, 'line-opacity', paint.line['line-opacity']);
+  map.setPaintProperty(IDS.bandLabel, 'text-opacity', paint.label['text-opacity']);
 
   const ignition = asFeatureCollection(scene?.ignition);
   if (ignition.features.length) {
@@ -877,7 +932,9 @@ export function removePredictionRaster(map) {
 export function removePredictionScene(map) {
   if (!map) return;
   removeIfExists(map, IDS.ignitionPoint, IDS.ignitionSource);
+  removeIfExists(map, IDS.bandLabel, null);
   removeIfExists(map, IDS.bandLine, null);
+  removeIfExists(map, IDS.bandLineCasing, null);
   removeIfExists(map, IDS.bandFill, IDS.bandSource);
   removeIfExists(map, IDS.scarLine, null);
   removeIfExists(map, IDS.scarFill, IDS.scarSource);
