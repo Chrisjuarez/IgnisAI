@@ -28,8 +28,8 @@ from typing import Any, Dict, List, Optional, Sequence
 
 import numpy as np
 from rasterio.features import shapes as raster_shapes
-from shapely.geometry import mapping, shape
-from shapely.ops import transform as shapely_transform
+from shapely.geometry import Polygon, mapping, shape
+from shapely.ops import transform as shapely_transform, unary_union
 
 from .grid import PIX, tile_affine
 
@@ -39,6 +39,10 @@ BAND_COLORS = ("#bd0026", "#f03b20", "#fd8d3c", "#feb24c", "#fed976", "#ffffb2")
 
 #: Below this calibrated probability a cell is not part of the burn shape.
 DEFAULT_BAND_THRESHOLD = 0.10
+
+#: Chaikin passes applied to each band outline. Two rounds the 500 m staircase
+#: into something that reads as a fire perimeter; a third only adds vertices.
+SMOOTHING_PASSES = 2
 
 #: Drop specks smaller than this. A lone pixel is model noise, not a fire front,
 #: and drawing it as a polygon gives it more authority than it has earned.
@@ -83,25 +87,135 @@ def arrival_bands(masks: Sequence[np.ndarray]) -> List[np.ndarray]:
     return bands
 
 
-def _polygonize(mask: np.ndarray, tile, to_wgs84) -> List[Dict[str, Any]]:
+def _chaikin(ring: Sequence[Sequence[float]], iterations: int) -> List[tuple]:
+    """Chaikin corner-cutting on a closed ring.
+
+    simplify() removes vertices but leaves every corner square, so a
+    rasterised edge stays a staircase with fewer steps. Chaikin replaces each
+    corner with two points a quarter in from either side, which converges on a
+    quadratic B-spline - the corners round off and the curve stays inside the
+    original hull. Two passes is the useful range at 500 m: one still reads as
+    angular, three costs vertices without a visible gain.
+    """
+    points = [tuple(p) for p in ring]
+    if len(points) < 4:
+        return points
+    if points[0] != points[-1]:
+        points.append(points[0])
+
+    for _ in range(iterations):
+        cut: List[tuple] = []
+        for (ax, ay), (bx, by) in zip(points, points[1:]):
+            cut.append((0.75 * ax + 0.25 * bx, 0.75 * ay + 0.25 * by))
+            cut.append((0.25 * ax + 0.75 * bx, 0.25 * ay + 0.75 * by))
+        cut.append(cut[0])
+        points = cut
+    return points
+
+
+def _smooth(polygon, iterations: int = SMOOTHING_PASSES):
+    """Round a polygon's staircase edges, holes included.
+
+    Returns the original if smoothing produced anything invalid - a rounded
+    perimeter is a presentation improvement, never worth emitting a broken
+    geometry for.
+    """
+    if polygon.is_empty or iterations < 1:
+        return polygon
+
+    smoothed = Polygon(
+        _chaikin(polygon.exterior.coords, iterations),
+        [_chaikin(hole.coords, iterations) for hole in polygon.interiors],
+    )
+    # Chaikin doubles the vertex count per pass and leaves near-collinear runs
+    # on the straights; an eighth of a pixel trims those without visibly
+    # re-cornering the curve.
+    smoothed = smoothed.simplify(PIX / 8, preserve_topology=True)
+    if not smoothed.is_valid:
+        smoothed = smoothed.buffer(0)
+    return smoothed if smoothed.is_valid and not smoothed.is_empty else polygon
+
+
+def _mask_to_polygon(mask: np.ndarray, tile):
+    """Polygonise one mask into a single smoothed geometry in tile CRS.
+
+    Smoothing happens here, on the CUMULATIVE mask, rather than on the bands
+    derived from it. Bands share boundaries; smoothing each one separately
+    moves the two sides of a shared edge independently and opens seams between
+    adjacent days. Smoothing first and differencing after means both sides of
+    every shared edge come from the same curve.
+    """
     if not mask.any():
-        return []
+        return None
 
     affine = tile_affine(tile)
-    geometries = []
+    parts = []
     for geom, value in raster_shapes(mask.astype(np.uint8), mask=mask, transform=affine):
         if not value:
             continue
         polygon = shape(geom)
         if polygon.area < MIN_BAND_AREA_M2:
             continue
-        # Half a pixel: enough to take the staircase off a rasterised edge
-        # without inventing detail the 500 m grid cannot support.
+        # Half a pixel first: takes the staircase down to its corners without
+        # inventing detail the 500 m grid cannot support. Rounding follows.
         polygon = polygon.simplify(PIX / 2, preserve_topology=True)
         if polygon.is_empty:
             continue
-        geometries.append(mapping(shapely_transform(to_wgs84, polygon)))
-    return geometries
+        smoothed = _repair(_smooth(polygon))
+        if smoothed is not None:
+            parts.append(smoothed)
+
+    if not parts:
+        return None
+    return _repair(unary_union(parts))
+
+
+def _repair(geometry):
+    """Return a valid equivalent of `geometry`, or None if it cannot be saved.
+
+    Chaikin crosses the ring wherever a band pinches to a single cell wide,
+    which real fronts do constantly along their ragged edges. buffer(0) is the
+    standard repair: it re-noses the ring and drops the zero-area lobe the
+    self-intersection created.
+    """
+    if geometry is None or geometry.is_empty:
+        return None
+    if geometry.is_valid:
+        return geometry
+    repaired = geometry.buffer(0)
+    return repaired if repaired.is_valid and not repaired.is_empty else None
+
+
+def _to_features(geometry, to_wgs84) -> List[Dict[str, Any]]:
+    """Split a band geometry into valid WGS84 GeoJSON polygons.
+
+    Nothing invalid leaves this function. A self-intersecting ring is not a
+    rendering curiosity - it makes fill and outline disagree about which side
+    is inside, which shows up as a stray wedge across the band.
+    """
+    geometry = _repair(geometry)
+    if geometry is None:
+        return []
+
+    parts = [geometry] if geometry.geom_type == "Polygon" else list(getattr(geometry, "geoms", []))
+    features = []
+    for part in parts:
+        if part.geom_type != "Polygon" or part.area < MIN_BAND_AREA_M2:
+            continue
+
+        # Repair AFTER reprojecting, not before. Smoothing leaves vertices a
+        # few tens of metres apart; projecting those into degrees can collapse
+        # a near-degenerate spike into a crossing that did not exist in the
+        # metric CRS. Validating the geometry we actually emit, in the CRS we
+        # emit it in, is the only check that means anything to the renderer.
+        projected = _repair(shapely_transform(to_wgs84, part))
+        if projected is None:
+            continue
+        for piece in ([projected] if projected.geom_type == "Polygon"
+                      else list(getattr(projected, "geoms", []))):
+            if piece.geom_type == "Polygon" and not piece.is_empty:
+                features.append(mapping(piece))
+    return features
 
 
 def spread_bands(
@@ -119,13 +233,37 @@ def spread_bands(
     renderer that ignores the sort key.
     """
     masks = cumulative_masks(rollout, threshold)
-    bands = arrival_bands(masks)
+
+    # Smooth the cumulative outlines, then difference them into bands. Doing it
+    # the other way round - band, then smooth - moves the two sides of a shared
+    # edge independently and leaves hairline seams between adjacent days.
+    #
+    # Each outline is unioned with the one before it so the sequence stays
+    # nested after smoothing: Chaikin perturbs each curve on its own, and
+    # without this a later day could fall a few metres inside an earlier one
+    # and punch a hole through it on difference.
+    cumulative = []
+    previous = None
+    for mask in masks:
+        outline = _mask_to_polygon(mask, tile)
+        if previous is not None:
+            outline = previous if outline is None else unary_union([outline, previous])
+        cumulative.append(outline)
+        previous = outline
+
+    bands = []
+    for index, outline in enumerate(cumulative):
+        if outline is None:
+            bands.append(None)
+            continue
+        inner = cumulative[index - 1] if index else None
+        bands.append(outline if inner is None else _repair(outline.difference(inner)))
 
     features: List[Dict[str, Any]] = []
     for index in range(len(bands) - 1, -1, -1):
         step = rollout[index]
         day = index + 1
-        for geometry in _polygonize(bands[index], tile, to_wgs84):
+        for geometry in _to_features(bands[index], to_wgs84):
             features.append({
                 "type": "Feature",
                 "geometry": geometry,
@@ -178,7 +316,10 @@ def observed_polygons(observed: np.ndarray, tile, to_wgs84, *, threshold: float 
                 "properties": {"kind": "observed", "color": OBSERVED_COLOR,
                                "label": "Already burned"},
             }
-            for geometry in _polygonize(mask, tile, to_wgs84)
+            # Smoothed on the same terms as the forecast bands: a scar drawn
+            # with square corners beside rounded bands reads as a different
+            # kind of object than it is.
+            for geometry in _to_features(_mask_to_polygon(mask, tile), to_wgs84)
         ],
     }
 

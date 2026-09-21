@@ -23,9 +23,9 @@ import {
   removePredictionOverlays,
   removePredictionRaster,
   removePredictionScene,
-  renderPredictionRasterFrame,
-  renderPredictionScene
+  renderPredictionRasterFrame
 } from '../utils/addPredictionOverlay';
+import { forgetBasemapFocus, setBasemapFocus } from '../utils/basemapFocus';
 
 // ---- Tokens / Base URLs -----------------------------------------------------
 const MAPBOX_TOKEN =
@@ -68,6 +68,7 @@ const FOOTPRINT_FILL_COLOR = [
 const SPREAD_BAND_FILL_OPACITY = 0.62;
 const SPREAD_OBSERVED_FILL_OPACITY = 0.55;
 const SPREAD_BAND_LINE_WIDTH = 1.4;
+const SPREAD_BAND_CASING_COLOR = '#2b1600';
 const FOOTPRINT_FILL_OPACITY = [
   'interpolate', ['linear'], ['get', 'confidencePct'],
   0, 0.02,
@@ -846,6 +847,7 @@ const MapComponent = forwardRef(({
     setActiveForecastIndex(0);
     setForecastLayerMode('new_burn');
     removePredictionOverlays(mapRef.current);
+    setBasemapFocus(mapRef.current, false);
     // The scene layers are separate sources from the raster overlays, so
     // clearing the timeline has to clear them too or a stale forecast keeps
     // sitting on the map under a cleared one.
@@ -854,6 +856,35 @@ const MapComponent = forwardRef(({
       if (src) src.setData({ type: 'FeatureCollection', features: [] });
     });
     setObservedLayerMode('normal');
+  }, []);
+
+  // Which day is "now" on the timeline. Bands up to it are solid, the band at
+  // it is the front and draws heaviest, later ones stay as faint outlines so
+  // the shape of the whole forecast is still legible without competing.
+  const emphasiseSpreadBands = useCallback((map, activeLeadHours) => {
+    if (!map) return;
+    const lead = ['coalesce', ['get', 'lead_hours'], ['*', ['coalesce', ['get', 'day'], 0], 24]];
+    const reached = Number.isFinite(activeLeadHours) ? ['<=', lead, activeLeadHours] : true;
+    const isFront = Number.isFinite(activeLeadHours) ? ['==', lead, activeLeadHours] : false;
+
+    const paints = {
+      'spread-bands-fill': { 'fill-opacity': ['case', reached, SPREAD_BAND_FILL_OPACITY, 0] },
+      'spread-bands-casing': {
+        'line-width': ['case', isFront, SPREAD_BAND_LINE_WIDTH + 3.4, SPREAD_BAND_LINE_WIDTH + 2.0],
+        'line-opacity': ['case', reached, 0.8, 0.2],
+      },
+      'spread-bands-outline': {
+        'line-width': ['case', isFront, SPREAD_BAND_LINE_WIDTH + 1.6, SPREAD_BAND_LINE_WIDTH],
+        'line-opacity': ['case', reached, 0.95, 0.35],
+      },
+      'spread-bands-label': { 'text-opacity': ['case', reached, 1, 0] },
+    };
+    Object.entries(paints).forEach(([layerId, properties]) => {
+      if (!map.getLayer?.(layerId)) return;
+      Object.entries(properties).forEach(([name, value]) => {
+        try { map.setPaintProperty(layerId, name, value); } catch (_) {}
+      });
+    });
   }, []);
 
   // Paint the three scene layers. Kept separate from the fetch so the timeline
@@ -880,8 +911,8 @@ const MapComponent = forwardRef(({
     // Order matters within the group too: burned area underneath, forecast
     // over it, seed point on top.
     ['spread-observed-fill', 'spread-observed-outline',
-     'spread-bands-fill', 'spread-bands-outline',
-     'spread-ignition-point'].forEach((layerId) => {
+     'spread-bands-fill', 'spread-bands-casing', 'spread-bands-outline',
+     'spread-bands-label', 'spread-ignition-point'].forEach((layerId) => {
       try {
         if (map?.getLayer?.(layerId)) map.moveLayer(layerId);
       } catch (_) {
@@ -1497,17 +1528,56 @@ const MapComponent = forwardRef(({
         'fill-sort-key': ['-', 0, ['get', 'day']],
       },
     });
+    // Dark casing beneath every band edge. Without it a pale outer band
+    // (#ffffb2) has almost no contrast against light terrain, and the edge -
+    // the thing the whole map is about - disappears exactly where the forecast
+    // is least certain.
+    map.addLayer({
+      id: 'spread-bands-casing',
+      type: 'line',
+      source: 'spread-bands-source',
+      layout: { 'line-join': 'round', 'line-cap': 'round', 'line-sort-key': ['-', 0, ['get', 'day']] },
+      paint: {
+        'line-color': SPREAD_BAND_CASING_COLOR,
+        'line-width': SPREAD_BAND_LINE_WIDTH + 2.0,
+        'line-opacity': 0.8,
+      },
+    });
     map.addLayer({
       id: 'spread-bands-outline',
       type: 'line',
       source: 'spread-bands-source',
+      layout: { 'line-join': 'round', 'line-cap': 'round', 'line-sort-key': ['-', 0, ['get', 'day']] },
       paint: {
         // The isochron: a dated contour keeps bands separable when the fills
         // themselves stop being distinguishable. Recommended by Copernicus
         // GC 8:167 (2025) for exactly this reason.
         'line-color': ['get', 'color'],
         'line-width': SPREAD_BAND_LINE_WIDTH,
-        'line-opacity': 0.9,
+        'line-opacity': 0.95,
+      },
+    });
+    // ...and the same paper's other recommendation: label the isochrones. Six
+    // steps of one sequential ramp stop being separable by colour alone, so
+    // the band that says which day it is, is the one you can actually use.
+    map.addLayer({
+      id: 'spread-bands-label',
+      type: 'symbol',
+      source: 'spread-bands-source',
+      layout: {
+        'symbol-placement': 'line',
+        'symbol-spacing': 250,
+        'text-field': ['concat', 'D', ['to-string', ['get', 'day']]],
+        'text-size': 12,
+        'text-font': ['DIN Offc Pro Medium', 'Arial Unicode MS Bold'],
+        'text-letter-spacing': 0.06,
+        'text-keep-upright': true,
+        'text-padding': 6,
+      },
+      paint: {
+        'text-color': '#1f1207',
+        'text-halo-color': '#ffffff',
+        'text-halo-width': 1.6,
       },
     });
 
@@ -1903,6 +1973,11 @@ const MapComponent = forwardRef(({
       setObservedLayerMode(forecastVisible ? 'forecast' : 'normal');
       setObservedLayersVisible(observedLayersVisible);
       applyLayerVisibility();
+      // The new style brought its own basemap paint, so the values captured
+      // from the previous one describe layers that no longer exist. Drop them
+      // before re-rendering, or clearing the forecast later restores one
+      // style's raster settings onto another's.
+      forgetBasemapFocus(map);
       if (forecastVisible && forecastFrames[activeForecastIndex]) {
         renderActiveSpread(map, forecastFrames[activeForecastIndex]);
       }
@@ -1935,18 +2010,28 @@ const MapComponent = forwardRef(({
 
   const renderActiveSpread = useCallback((map, frame) => {
     if (!map || !frame) return;
-    if (spreadView === 'bands' && forecastScene?.forecast?.features?.length) {
+    const bands = spreadView === 'bands' && Boolean(forecastScene?.forecast?.features?.length);
+
+    // Mute the satellite imagery only under the bands. The probability
+    // heatmap is a continuous field that reads fine over it, and dimming for
+    // that view would be a change nobody asked for.
+    setBasemapFocus(map, bands);
+
+    if (bands) {
+      // The scene layers created at map init are the single renderer for
+      // bands; paintSpreadScene already owns their data and their order
+      // relative to the raster overlay. All this view has to do is take the
+      // raster away and tell them which day is in front.
       removePredictionRaster(map);
-      renderPredictionScene(map, forecastScene, { activeLeadHours: frame.lead_hours }).catch(err => {
-        console.error('Forecast scene render error:', err);
-      });
+      removePredictionScene(map);
+      emphasiseSpreadBands(map, frame.lead_hours);
       return;
     }
     removePredictionScene(map);
     renderPredictionRasterFrame(map, frame, { layerMode: forecastLayerMode }).catch(err => {
       console.error('Forecast frame render error:', err);
     });
-  }, [spreadView, forecastScene, forecastLayerMode]);
+  }, [spreadView, forecastScene, forecastLayerMode, emphasiseSpreadBands]);
 
   useEffect(() => {
     if (!forecastVisible || !forecastFrames.length) return;
