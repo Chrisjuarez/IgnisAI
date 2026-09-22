@@ -24,6 +24,17 @@ jest.mock('../../api', () => ({
     threshold: 0.85,
     display_floor: 0.02,
     step_hours: 6,
+    scene: {
+      ignition: { type: 'Feature', geometry: { type: 'Point', coordinates: [-118.55, 34.07] }, properties: {} },
+      observed: { type: 'FeatureCollection', features: [] },
+      forecast: {
+        type: 'FeatureCollection',
+        features: [
+          { type: 'Feature', properties: { day: 1, lead_hours: 6, color: '#bd0026' },
+            geometry: { type: 'Polygon', coordinates: [[[-118.6, 34.0], [-118.5, 34.0], [-118.5, 34.1], [-118.6, 34.1], [-118.6, 34.0]]] } },
+        ],
+      },
+    },
     steps: [
       { index: 0, lead_hours: 6, label: '6 hours', image_base64: 'frame-1', prob_max: 0.11, prob_mean: 0.03, area_fraction: 0.00, display_area_fraction: 0.08, display_floor: 0.02 },
       { index: 1, lead_hours: 12, label: '12 hours', image_base64: 'frame-2', prob_max: 0.19, prob_mean: 0.05, area_fraction: 0.00, display_area_fraction: 0.11, display_floor: 0.02 },
@@ -60,11 +71,23 @@ jest.mock('../../utils/addPredictionOverlay', () => ({
 
 describe('Dashboard controls', () => {
   let consoleErrorSpy;
+  const scene = {
+    ignition: { type: 'Feature', geometry: { type: 'Point', coordinates: [-118.55, 34.07] }, properties: {} },
+    observed: { type: 'FeatureCollection', features: [] },
+    forecast: {
+      type: 'FeatureCollection',
+      features: [
+        { type: 'Feature', properties: { day: 1, lead_hours: 6, color: '#bd0026' },
+          geometry: { type: 'Polygon', coordinates: [[[-118.6, 34.0], [-118.5, 34.0], [-118.5, 34.1], [-118.6, 34.1], [-118.6, 34.0]]] } },
+      ],
+    },
+  };
   const multistepPayload = {
     bounds: [-118.6, 34.0, -118.1, 34.4],
     threshold: 0.85,
     display_floor: 0.02,
     step_hours: 6,
+    scene,
     steps: [
       { index: 0, lead_hours: 6, label: '6 hours', image_base64: 'frame-1', prob_max: 0.11, prob_mean: 0.03, area_fraction: 0.00, display_area_fraction: 0.08, display_floor: 0.02 },
       { index: 1, lead_hours: 12, label: '12 hours', image_base64: 'frame-2', prob_max: 0.19, prob_mean: 0.05, area_fraction: 0.00, display_area_fraction: 0.11, display_floor: 0.02 },
@@ -86,6 +109,11 @@ describe('Dashboard controls', () => {
     predictFireSpreadMultistep.mockResolvedValue(multistepPayload);
     prepareMultistepRasterFrames.mockImplementation(async payload => ({
       bounds: payload.bounds,
+      // The component reads this to decide whether the band view has anything
+      // to draw. Omitting it here silently routed every forecast test down the
+      // heatmap branch, which is why no test caught the band view not
+      // rendering.
+      scene: payload.scene || null,
       threshold: payload.threshold,
       stepHours: payload.step_hours,
       frames: payload.steps.map(step => ({
@@ -438,5 +466,40 @@ describe('Dashboard controls', () => {
     });
     expect(await screen.findByTestId('forecast-panel')).toBeInTheDocument();
     expect(prepareMultistepRasterFrames).toHaveBeenCalled();
+  });
+
+  test('the band view mutes the basemap and emphasises the active day', async () => {
+    // The unit tests for basemapFocus use their own fake map. This is the only
+    // check that the app actually CALLS it: the mapbox mock's getStyle()
+    // returns just the layers the app added, so a raster layer has to be
+    // seeded or setBasemapFocus finds nothing and silently returns.
+    const MapComponent = require('../MapComponent').default;
+
+    render(
+      <MapComponent
+        brightnessFilter=""
+        confidenceFilter=""
+        onFiresUpdated={jest.fn()}
+        setIsFetching={jest.fn()}
+        mapStyle="mapbox://styles/mapbox/satellite-streets-v12"
+        userLocation={null}
+        range={0}
+        onNearbyFiresUpdate={jest.fn()}
+      />
+    );
+
+    const map = mapboxgl.__mockMaps[mapboxgl.__mockMaps.length - 1];
+    map.addLayer({ id: 'satellite', type: 'raster' });
+
+    fireEvent.click(await screen.findByRole('button', { name: /history/i }));
+    fireEvent.click(screen.getByRole('button', { name: /camp\/paradise fire/i }));
+    expect(await screen.findByTestId('forecast-panel')).toBeInTheDocument();
+
+    await waitFor(() => {
+      const calls = map.setPaintProperty.mock.calls;
+      expect(calls.some(([layer, prop]) => layer === 'satellite' && prop === 'raster-saturation'))
+        .toBe(true);
+      expect(calls.some(([layer]) => layer === 'spread-bands-label')).toBe(true);
+    });
   });
 });
