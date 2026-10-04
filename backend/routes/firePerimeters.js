@@ -42,6 +42,13 @@ function buildWhere(incidentName) {
   ].join(' OR ');
 }
 
+// Perimeters arrive digitised far finer than the map can draw. At the
+// western-US view the map opens on, full precision is 50 MB of GeoJSON, and
+// parsing and re-serialising it lifts process memory by about 450 MB. ArcGIS
+// simplifies server side at about 9 m to 7.3 MB, within a pixel at zoom 14.
+// That bound matters because the map draws these and does not refetch on zoom.
+const PERIMETER_GEOMETRY_TOLERANCE_DEG = 0.0001;
+
 function arcgisParams({ bbox }) {
   const params = {
     f: 'geojson',
@@ -50,6 +57,8 @@ function arcgisParams({ bbox }) {
     returnGeometry: true,
     outSR: 4326,
     resultRecordCount: 500,
+    maxAllowableOffset: PERIMETER_GEOMETRY_TOLERANCE_DEG,
+    geometryPrecision: 6,
   };
 
   if (bbox) {
