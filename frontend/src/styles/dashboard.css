@@ -1889,13 +1889,16 @@ body {
 .drawer-tabs,
 .detail-tabs {
   display: grid;
-  grid-template-columns: repeat(4, 1fr);
+  grid-auto-flow: column;
+  grid-auto-columns: 1fr;
   border-bottom: 1px solid var(--ignis-border);
 }
 
 .drawer-tabs button,
 .detail-tabs button {
   height: 46px;
+  padding: 0 4px;
+  white-space: nowrap;
   border: 0;
   background: transparent;
   color: #66584e;
@@ -2339,7 +2342,7 @@ body {
 }
 
 .floating-map-controls.right {
-  right: calc(var(--detail-panel-width) + 18px);
+  right: 18px;
   top: 18px;
 }
 
@@ -2355,18 +2358,45 @@ body {
   cursor: pointer;
 }
 
+/* Opens below the Layers and Legend buttons rather than over them. */
 .legend-panel {
   position: absolute;
   z-index: 30;
-  top: 76px;
-  right: calc(var(--detail-panel-width) + 18px);
+  top: 134px;
+  right: 18px;
   width: 260px;
+  max-height: calc(100% - 152px);
+  overflow-y: auto;
   background: var(--ignis-panel);
   border: 1px solid var(--ignis-border);
   border-radius: 12px;
   box-shadow: 0 12px 28px rgba(0, 0, 0, 0.24);
   backdrop-filter: blur(18px);
-  overflow: hidden;
+}
+
+/* Map chrome steps out from under whichever side panels are open. */
+.floating-map-controls,
+.legend-panel,
+.watch-map-stage .mapboxgl-ctrl-bottom-right,
+.watch-map-stage .mapboxgl-ctrl-bottom-left {
+  transition: left 180ms ease, right 180ms ease, bottom 180ms ease;
+}
+
+.watch-map-stage.drawer-open .floating-map-controls.left {
+  left: calc(var(--drawer-width) + 18px);
+}
+
+.watch-map-stage.drawer-open .mapboxgl-ctrl-bottom-left {
+  left: var(--drawer-width);
+}
+
+.watch-map-stage.detail-open .floating-map-controls.right,
+.watch-map-stage.detail-open .legend-panel {
+  right: calc(var(--detail-panel-width) + 18px);
+}
+
+.watch-map-stage.detail-open .mapboxgl-ctrl-bottom-right {
+  right: var(--detail-panel-width);
 }
 
 .legend-row {
@@ -2601,13 +2631,8 @@ body {
     display: none;
   }
 
-  .detail-panel {
-    width: 344px;
-  }
-
-  .floating-map-controls.right,
-  .legend-panel {
-    right: 18px;
+  .watch-map-shell {
+    --detail-panel-width: 344px;
   }
 }
 
@@ -2636,13 +2661,17 @@ body {
     max-width: 100vw;
   }
 
+  .watch-map-shell {
+    --detail-sheet-height: min(72vh, 620px);
+  }
+
   .detail-panel {
     top: auto;
     left: 0;
     right: 0;
     width: 100vw;
     max-width: 100vw;
-    height: min(72vh, 620px);
+    height: var(--detail-sheet-height);
     border-left: 0;
     border-top: 1px solid var(--ignis-border);
     border-radius: 8px 8px 0 0;
@@ -2668,9 +2697,38 @@ body {
   }
 
   .legend-panel {
+    top: 116px;
     right: 12px;
     left: 12px;
     width: auto;
+  }
+
+  /* Phones zoom by pinching; the buttons would crowd a short map. */
+  .watch-map-stage .mapboxgl-ctrl-bottom-right .mapboxgl-ctrl-group {
+    display: none;
+  }
+
+  /* The drawer is full screen here and the detail panel a bottom sheet. */
+  .watch-map-stage.drawer-open .floating-map-controls.left {
+    left: 12px;
+  }
+
+  .watch-map-stage.drawer-open .mapboxgl-ctrl-bottom-left {
+    left: 0;
+  }
+
+  .watch-map-stage.detail-open .floating-map-controls.right,
+  .watch-map-stage.detail-open .legend-panel {
+    right: 12px;
+  }
+
+  .watch-map-stage.detail-open .mapboxgl-ctrl-bottom-right {
+    right: 0;
+    bottom: var(--detail-sheet-height);
+  }
+
+  .watch-map-stage.detail-open .mapboxgl-ctrl-bottom-left {
+    bottom: var(--detail-sheet-height);
   }
 }
 

@@ -18,7 +18,6 @@ import {
   predictFireSpreadMultistep
 } from '../api';
 import {
-  addPredictionOverlay,
   prepareMultistepRasterFrames,
   removePredictionOverlays,
   removePredictionRaster,
@@ -519,6 +518,34 @@ function hotspotCenterForIncident(fires = [], incident = {}) {
 }
 
 // ---- Component --------------------------------------------------------------
+// Every source setupLayers adds.
+const MAP_SOURCES = [
+  'nws-alerts-source',
+  'evacuation-zones-source',
+  'fire-perimeters-source',
+  'wildfire-footprints-source',
+  'observed-fire-cells-source',
+  'spread-observed-source',
+  'spread-bands-source',
+  'spread-ignition-source',
+  'wildfires-source',
+  'ignis-incidents-source',
+  'selected-incident-source',
+  'user-source',
+];
+
+// What a click on each layer does.
+const CLICKABLE_LAYERS = {
+  'ignis-incidents-layer': 'incident',
+  'wildfires-layer': 'hotspot',
+  'wildfire-footprints-fill': 'hotspot',
+  'observed-fire-cells-fill': 'hotspot',
+  'fire-perimeters-outline': 'perimeter',
+  'fire-perimeters-fill': 'perimeter',
+  'nws-alerts-outline': 'alert',
+  'nws-alerts-fill': 'alert',
+};
+
 const MapComponent = forwardRef(({
   brightnessFilter,
   confidenceFilter,
@@ -541,10 +568,7 @@ const MapComponent = forwardRef(({
 }, ref) => {
   const mapContainerRef = useRef();
   const mapRef          = useRef();
-  const clickHandlerRef = useRef();
-  const perimeterClickHandlerRef = useRef();
-  const incidentClickHandlerRef = useRef();
-  const alertClickHandlerRef = useRef();
+  const mapClickHandlerRef = useRef();
   const incidentsRef = useRef([]);
   const alertsRef = useRef([]);
   const evacuationsRef = useRef(NO_EVACUATIONS);
@@ -1291,32 +1315,6 @@ const MapComponent = forwardRef(({
     })();
   };
 
-  const addIgnisOverlayAt = async ({ latitude, longitude }, mode = 'raster') => {
-    try {
-        const map = mapRef.current;
-      if (!map) return;
-
-      const result = await addPredictionOverlay(map, {
-        apiBase: API_BASE,
-        lat: latitude,
-      lon: longitude,
-      mode,
-      gamma: 0.7,
-      opacity: 0.75,
-      smooth: true,
-      alphaThreshold: 0.01,
-      });
-
-      // Fit to tile bounds so overlay doesn’t look “random”
-      if (result?.bounds) {
-        const [w, s, e, n] = result.bounds;
-        map.fitBounds([[w, s], [e, n]], { padding: 40, duration: 800 });
-      }
-    } catch (e) {
-      console.error('Ignis overlay error:', e);
-    }
-  };
-
   // ---------- Historical fire test ----------
   const runHistoricalPrediction = async (preset) => {
     const map = mapRef.current;
@@ -1447,37 +1445,17 @@ const MapComponent = forwardRef(({
     const map = mapRef.current;
     if (!map) return;
 
-    // Observed fire shape: small per-detection cells are primary; raw scan/track footprints stay subdued.
-    [
-      'selected-incident-layer',
-      'ignis-incidents-label',
-      'ignis-incidents-layer',
-      'nws-alerts-outline',
-      'nws-alerts-fill',
-      'wildfires-layer',
-      'observed-fire-cells-outline',
-      'observed-fire-cells-fill',
-      'wildfire-footprints-outline',
-      'wildfire-footprints-fill',
-      'fire-perimeters-outline',
-      'fire-perimeters-fill',
-    ].forEach(id => {
-      if (map.getLayer(id)) map.removeLayer(id);
-    });
-    [
-      'selected-incident-source',
-      'ignis-incidents-source',
-      'nws-alerts-source',
-      'wildfires-source',
-      'observed-fire-cells-source',
-      'wildfire-footprints-source',
-      'fire-perimeters-source',
-      'spread-bands-source',
-      'spread-observed-source',
-      'spread-ignition-source',
-    ].forEach(id => {
+    // Both the map's load event and the style effect run this on mount. Clear
+    // everything it draws first, or the second run throws on a source that
+    // already exists after it has removed the incident and hotspot layers.
+    (map.getStyle()?.layers || [])
+      .filter(layer => MAP_SOURCES.includes(layer.source))
+      .forEach(layer => map.removeLayer(layer.id));
+    MAP_SOURCES.forEach(id => {
       if (map.getSource(id)) map.removeSource(id);
     });
+
+    // Observed fire shape: small per-detection cells are primary; raw scan/track footprints stay subdued.
 
     map.addSource('nws-alerts-source', {
       type: 'geojson',
@@ -1840,29 +1818,8 @@ const MapComponent = forwardRef(({
       }
     });
 
-    // Click handler (re-bind safely)
-    if (clickHandlerRef.current) {
-      ['observed-fire-cells-fill', 'wildfire-footprints-fill', 'wildfires-layer'].forEach(layerId => {
-        try { map.off('click', layerId, clickHandlerRef.current); } catch (_) {}
-      });
-    }
-    if (perimeterClickHandlerRef.current) {
-      ['fire-perimeters-fill', 'fire-perimeters-outline'].forEach(layerId => {
-        try { map.off('click', layerId, perimeterClickHandlerRef.current); } catch (_) {}
-      });
-    }
-    if (incidentClickHandlerRef.current) {
-      try { map.off('click', 'ignis-incidents-layer', incidentClickHandlerRef.current); } catch (_) {}
-    }
-    if (alertClickHandlerRef.current) {
-      ['nws-alerts-fill', 'nws-alerts-outline'].forEach(layerId => {
-        try { map.off('click', layerId, alertClickHandlerRef.current); } catch (_) {}
-      });
-    }
-    clickHandlerRef.current = async e => {
-      const f = e.features?.[0];
-      if (!f) return;
-
+    if (mapClickHandlerRef.current) map.off('click', mapClickHandlerRef.current);
+    const showHotspot = async f => {
       const p = f.properties || {};
       const pointCoords = Array.isArray(f.geometry?.coordinates) && f.geometry?.type === 'Point'
         ? f.geometry.coordinates
@@ -1908,12 +1865,6 @@ const MapComponent = forwardRef(({
                 Not enough signal for a reliable prediction (low brightness/confidence).
               </div>
             `}
-            <button id="ignis-overlay-raster" class="predict-spread-btn" style="margin-top:8px;background:#444;">
-              Add Ignis Overlay (raster)
-            </button>
-            <button id="ignis-overlay-vector" class="predict-spread-btn" style="margin-top:8px;background:#222;">
-              Add Ignis Overlay (vector)
-            </button>
           </div>
         `)
         .addTo(map);
@@ -1922,17 +1873,10 @@ const MapComponent = forwardRef(({
 
       const btn = document.getElementById('predict-spread-btn');
       if (btn && canPredict) btn.addEventListener('click', () => handlePredictFireSpread(fireProps));
-      document.getElementById('ignis-overlay-raster')?.addEventListener('click', () => addIgnisOverlayAt(fireProps, 'raster'));
-      document.getElementById('ignis-overlay-vector')?.addEventListener('click', () => addIgnisOverlayAt(fireProps, 'vector'));
     };
-    perimeterClickHandlerRef.current = e => {
-      const f = e.features?.[0];
-      if (!f) return;
+    const showPerimeter = (f, lngLat) => {
       const p = f.properties || {};
-      const center = map.getCenter?.();
-      const coords = e.lngLat
-        ? [e.lngLat.lng, e.lngLat.lat]
-        : [center?.lng ?? center?.lon ?? -98, center?.lat ?? 38];
+      const coords = [lngLat.lng, lngLat.lat];
       const name = p.poly_IncidentName || p.attr_IncidentName || p.IncidentName || p.FIRE_NAME || p.FireName || p.incidentName || 'Fire perimeter';
       const source = p.poly_Source || p.Source || p.source || (p.irwin_InitialLatitude ? 'WFIGS/FIRIS' : 'Authoritative perimeter');
       const date = p.poly_CreateDate || p.attr_ModifiedOnDateTime || p.ModifiedOnDateTime || p.CreateDate || p.date || p.perimeterDate;
@@ -1953,16 +1897,12 @@ const MapComponent = forwardRef(({
         .addTo(map);
       setActivePopup(popup);
     };
-    incidentClickHandlerRef.current = e => {
-      const f = e.features?.[0];
-      if (!f) return;
+    const selectIncident = f => {
       const id = f.properties?.id;
       const incident = incidentsRef.current.find(item => item.id === id) || f.properties;
       onIncidentSelect?.(incident);
     };
-    alertClickHandlerRef.current = e => {
-      const f = e.features?.[0];
-      if (!f) return;
+    const selectAlert = f => {
       const id = f.properties?.id;
       const alert = alertsRef.current.find(item => item.id === id) || {
         id,
@@ -1973,24 +1913,22 @@ const MapComponent = forwardRef(({
       };
       onAlertSelect?.(alert);
     };
-    map.on('click', 'observed-fire-cells-fill', clickHandlerRef.current);
-    map.on('click', 'wildfire-footprints-fill', clickHandlerRef.current);
-    map.on('click', 'wildfires-layer', clickHandlerRef.current);
-    map.on('click', 'fire-perimeters-fill', perimeterClickHandlerRef.current);
-    map.on('click', 'fire-perimeters-outline', perimeterClickHandlerRef.current);
-    map.on('click', 'ignis-incidents-layer', incidentClickHandlerRef.current);
-    map.on('click', 'nws-alerts-fill', alertClickHandlerRef.current);
-    map.on('click', 'nws-alerts-outline', alertClickHandlerRef.current);
-    [
-      'observed-fire-cells-fill',
-      'wildfire-footprints-fill',
-      'wildfires-layer',
-      'fire-perimeters-fill',
-      'fire-perimeters-outline',
-      'ignis-incidents-layer',
-      'nws-alerts-fill',
-      'nws-alerts-outline',
-    ].forEach(layerId => {
+    // One click acts on the topmost feature under the pointer. Hotspot points,
+    // their footprints and incident markers overlap, and a handler per layer
+    // opened a popup for each of them.
+    const clickActions = {
+      hotspot: showHotspot,
+      perimeter: showPerimeter,
+      incident: selectIncident,
+      alert: selectAlert,
+    };
+    mapClickHandlerRef.current = e => {
+      const layers = Object.keys(CLICKABLE_LAYERS).filter(id => map.getLayer(id));
+      const [feature] = map.queryRenderedFeatures(e.point, { layers });
+      if (feature) clickActions[CLICKABLE_LAYERS[feature.layer.id]](feature, e.lngLat);
+    };
+    map.on('click', mapClickHandlerRef.current);
+    Object.keys(CLICKABLE_LAYERS).forEach(layerId => {
       map.on('mouseenter', layerId, () => {
         const canvas = map.getCanvas?.();
         if (canvas?.style) canvas.style.cursor = 'pointer';
@@ -2002,8 +1940,6 @@ const MapComponent = forwardRef(({
     });
 
     // User marker
-    if (map.getLayer('user-layer'))  map.removeLayer('user-layer');
-    if (map.getSource('user-source')) map.removeSource('user-source');
     map.addSource('user-source', { type: 'geojson', data: { type: 'FeatureCollection', features: [] } });
     map.addLayer({
       id: 'user-layer',
@@ -2032,7 +1968,8 @@ const MapComponent = forwardRef(({
       zoom:      4,
       maxBounds: [[-130,22],[-66,50]]
     });
-    m.addControl(new mapboxgl.NavigationControl());
+    // Bottom right: the top right corner holds the Layers and Legend buttons.
+    m.addControl(new mapboxgl.NavigationControl(), 'bottom-right');
     mapRef.current = m;
 
     m.on('load', () => {
@@ -2510,7 +2447,6 @@ const MapComponent = forwardRef(({
       <div
         ref={mapContainerRef}
         style={{ width: '100%', height: '100%' }}
-        title="Press 'N' to toggle NDVI overlay"
       />
       {!watchShell && (
         <button className="hist-toggle" onClick={() => setShowHistPanel(v => !v)}>

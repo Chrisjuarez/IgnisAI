@@ -35,12 +35,16 @@ export function timeUntil(value, now = Date.now()) {
   return remaining <= 0 ? 'now' : `in ${duration(remaining)}`;
 }
 
-/** "1:33 PM" today, "Oct 3, 9:09 PM" on any other day. */
+/**
+ * "1:33 PM PDT" today, "Oct 3, 9:09 PM PDT" on any other day. The zone is
+ * named because a fire and the person reading about it are often in different ones.
+ */
 export function clockTime(value, now = Date.now()) {
   const ms = toMillis(value);
   if (ms == null) return null;
   const date = new Date(ms);
+  const time = { hour: 'numeric', minute: '2-digit', timeZoneName: 'short' };
   return date.toDateString() === new Date(now).toDateString()
-    ? date.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })
-    : date.toLocaleString([], { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
+    ? date.toLocaleTimeString([], time)
+    : date.toLocaleString([], { month: 'short', day: 'numeric', ...time });
 }

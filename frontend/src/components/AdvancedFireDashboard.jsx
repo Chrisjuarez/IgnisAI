@@ -54,11 +54,16 @@ function acreageSource(incident) {
   return [`${source.provider || 'Mapped'} perimeter`, when].filter(Boolean).join(' · ');
 }
 
-function formatAcres(value) {
+function formatAcreage(value) {
   const n = Number(value);
   if (!Number.isFinite(n)) return '-';
-  if (n >= 1000) return `${Math.round(n).toLocaleString()} acres`;
-  return `${Math.round(n * 10) / 10} acres`;
+  if (n >= 1000) return Math.round(n).toLocaleString();
+  return String(Math.round(n * 10) / 10);
+}
+
+function formatAcres(value) {
+  const acreage = formatAcreage(value);
+  return acreage === '-' ? acreage : `${acreage} acres`;
 }
 
 function incidentMarkerClass(incident) {
@@ -170,7 +175,7 @@ function Drawer({
           <span className="eyebrow">Western CONUS</span>
           <h2>Wildfire Intelligence</h2>
         </div>
-        <button className="icon-btn" type="button" onClick={onClose} aria-label="Close menu">x</button>
+        <button className="icon-btn" type="button" onClick={onClose} aria-label="Close menu">&times;</button>
       </div>
 
       <div className="drawer-tabs" role="tablist">
@@ -178,6 +183,8 @@ function Drawer({
           <button
             key={tab.id}
             type="button"
+            role="tab"
+            aria-selected={activeTab === tab.id}
             className={activeTab === tab.id ? 'active' : ''}
             onClick={() => setActiveTab(tab.id)}
           >
@@ -236,7 +243,7 @@ function Drawer({
           <LayerToggle id="evacuations" label="Evacuation zones" source="CalOES / Genasys" enabled={layerVisibility.evacuations} status={layerStatus.evacuations} onToggle={onToggleLayer} />
           <LayerToggle id="prediction" label="Ignis prediction" source="Advisory model output" enabled={layerVisibility.prediction} onToggle={onToggleLayer} />
           <LayerToggle id="forecastStart" label="Model's starting fire" source="Hotspots the forecast grew from" enabled={layerVisibility.forecastStart} onToggle={onToggleLayer} />
-          <LayerToggle id="ndvi" label="NDVI overlay" source="Vegetation context" enabled={layerVisibility.ndvi} onToggle={onToggleLayer} />
+          <LayerToggle id="ndvi" label="NDVI overlay" source="Vegetation context · press N" enabled={layerVisibility.ndvi} onToggle={onToggleLayer} />
         </div>
       )}
 
@@ -281,7 +288,7 @@ function IncidentDetailPanel({
           <h2>{incident.name}</h2>
           <p>{[incident.county, incident.state].filter(Boolean).join(', ') || 'Unknown location'}</p>
         </div>
-        <button className="icon-btn" type="button" onClick={onClose} aria-label="Close detail">x</button>
+        <button className="icon-btn" type="button" onClick={onClose} aria-label="Close detail">&times;</button>
       </div>
       <div className="incident-stats">
         <div title={incident.reportedAcres != null && incident.acresSource?.kind === 'perimeter'
@@ -289,7 +296,7 @@ function IncidentDetailPanel({
           : undefined}
         >
           <span>Acres</span>
-          <strong>{formatCount(incident.acres)}</strong>
+          <strong>{formatAcreage(incident.acres)}</strong>
           {acreageSource(incident) && <em className="incident-stat-source">{acreageSource(incident)}</em>}
         </div>
         <div><span>Containment</span><strong>{incident.containmentPct != null ? `${incident.containmentPct}%` : '-'}</strong></div>
@@ -381,7 +388,7 @@ function WarningDetailPanel({ warning, onClose }) {
           <h2>{warning.event}</h2>
           <p>{warning.areaDesc || 'NWS fire weather alert'}</p>
         </div>
-        <button className="icon-btn" type="button" onClick={onClose} aria-label="Close detail">x</button>
+        <button className="icon-btn" type="button" onClick={onClose} aria-label="Close detail">&times;</button>
       </div>
       <div className="incident-stats three">
         <div><span>Starts</span><strong>{warning.effective ? new Date(warning.effective).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }) : '-'}</strong></div>
@@ -403,7 +410,7 @@ function LegendPanel({ open, onClose }) {
     <div className="legend-panel">
       <div className="legend-header">
         <strong>Legend</strong>
-        <button className="icon-btn" type="button" onClick={onClose}>x</button>
+        <button className="icon-btn" type="button" onClick={onClose} aria-label="Close legend">&times;</button>
       </div>
       <div className="legend-row"><span className="legend-symbol incident" /> Active incident</div>
       <div className="legend-row"><span className="legend-symbol perimeter" /> Official perimeter</div>
@@ -604,6 +611,12 @@ const AdvancedFireDashboard = () => {
   const newDetectionsSinceForecast = forecastBasis?.incidentId === selectedIncident?.id
     && hasNewDetectionsSince(forecastBasis, selectedIncidentDetail?.freshness);
 
+  const stageClassName = [
+    'watch-map-stage',
+    drawerOpen && 'drawer-open',
+    (selectedIncident || selectedWarning) && 'detail-open',
+  ].filter(Boolean).join(' ');
+
   const selectedDetail = selectedIncidentDetail
     ? { ...selectedIncidentDetail, updates: selectedIncidentUpdates.length ? selectedIncidentUpdates : selectedIncidentDetail.updates }
     : null;
@@ -628,8 +641,8 @@ const AdvancedFireDashboard = () => {
               setActiveDrawerTab('incidents');
               setDrawerOpen(true);
             }}
-            placeholder="Search fires, counties, warnings"
-            aria-label="Search fires, counties, warnings"
+            placeholder="Search fires or counties"
+            aria-label="Search fires or counties"
           />
         </div>
         <button className="status-pill" type="button" onClick={loadMapData}>
@@ -639,13 +652,13 @@ const AdvancedFireDashboard = () => {
         <div className="user-chip">
           <div>
             <strong>{user?.fullName || user?.name || 'Guest'}</strong>
-            <span>{user?.email || 'guest@example.com'}</span>
+            {user?.email && <span>{user.email}</span>}
           </div>
           <em>{userInitials}</em>
         </div>
       </header>
 
-      <main className="watch-map-stage">
+      <main className={stageClassName}>
         <MapComponent
           ref={mapRef}
           brightnessFilter={brightness}
@@ -708,7 +721,7 @@ const AdvancedFireDashboard = () => {
           >
             Layers
           </button>
-          <button type="button" onClick={() => setLegendOpen(true)}>Legend</button>
+          <button type="button" aria-expanded={legendOpen} onClick={() => setLegendOpen((open) => !open)}>Legend</button>
         </div>
 
         <div className="floating-map-controls left">

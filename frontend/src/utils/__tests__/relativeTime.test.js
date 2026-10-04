@@ -38,6 +38,10 @@ describe('clockTime', () => {
     expect(today).not.toMatch(/Oct/);
     expect(yesterday).toMatch(/Oct 3/);
   });
+
+  test('names the time zone', () => {
+    expect(clockTime(minutesBefore(21), NOW)).toMatch(/M\s(?:[A-Z]{2,5}|GMT[+-][\d:]+)$/);
+  });
 });
 
 test.each([null, undefined, '', 'not a time'])('%p is unreadable everywhere', (value) => {
