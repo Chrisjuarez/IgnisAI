@@ -15,7 +15,7 @@ const DEFAULT_LAYERS = {
   perimeters: true,
   hotspots: true,
   warnings: true,
-  evacuations: false,
+  evacuations: true,
   prediction: true,
   ndvi: false,
 };
@@ -227,7 +227,7 @@ function Drawer({
           <LayerToggle id="perimeters" label="Official perimeters" source="WFIGS/FIRIS" enabled={layerVisibility.perimeters} status={layerStatus.perimeters} onToggle={onToggleLayer} />
           <LayerToggle id="hotspots" label="FIRMS hotspots" source="NASA VIIRS/MODIS" enabled={layerVisibility.hotspots} status={layerStatus.hotspots} onToggle={onToggleLayer} />
           <LayerToggle id="warnings" label="Fire weather warnings" source="NWS Alerts API" enabled={layerVisibility.warnings} status={layerStatus.alerts} onToggle={onToggleLayer} />
-          <LayerToggle id="evacuations" label="Evacuations" source="Official providers" enabled={layerVisibility.evacuations} status={layerStatus.evacuations} onToggle={onToggleLayer} />
+          <LayerToggle id="evacuations" label="Evacuation zones" source="CalOES / Genasys" enabled={layerVisibility.evacuations} status={layerStatus.evacuations} onToggle={onToggleLayer} />
           <LayerToggle id="prediction" label="Ignis prediction" source="Advisory model output" enabled={layerVisibility.prediction} onToggle={onToggleLayer} />
           <LayerToggle id="ndvi" label="NDVI overlay" source="Vegetation context" enabled={layerVisibility.ndvi} onToggle={onToggleLayer} />
         </div>
@@ -602,6 +602,7 @@ const AdvancedFireDashboard = () => {
           range={range}
           incidents={mapData?.incidents || []}
           alerts={warnings}
+          evacuations={mapData?.evacuations}
           layerVisibility={layerVisibility}
           selectedIncident={selectedIncident}
           selectedAlert={selectedWarning}

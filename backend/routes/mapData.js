@@ -29,6 +29,23 @@ const FIRIS_PUBLIC_URL =
   process.env.FIRIS_PERIMETERS_URL ||
   'https://services1.arcgis.com/jUJYIo9tSA7EHvfZ/ArcGIS/rest/services/CA_Perimeters_NIFC_FIRIS_public_view/FeatureServer/0/query';
 
+// Active evacuation Orders and Warnings for every California county, merged by
+// CalOES from county systems and Genasys - the same zones the CAL FIRE incident
+// map draws. One statewide feed, so there is no per-county provider to register.
+const CA_EVACUATIONS_URL =
+  process.env.CA_EVACUATIONS_URL ||
+  'https://services.arcgis.com/BLN4oKB0N1YSgvY8/arcgis/rest/services/CA_EVACUATIONS_CalOESHosted_view/FeatureServer/0/query';
+
+// About 22 m at California latitudes - under a pixel at the zooms a fire is
+// looked at. Generalising server-side took the twelve Bouquet Fire zones from
+// 648 KB to 33 KB with no visible difference.
+const EVACUATION_GEOMETRY_TOLERANCE_DEG = 0.0002;
+
+const EVACUATION_STATUS = {
+  'evacuation order': 'order',
+  'evacuation warning': 'warning',
+};
+
 // In-memory cache. Bounded LRU + TTL to prevent unbounded growth on
 // long-running instances; older entries are evicted lazily.
 const cache = new LruTtlCache({ max: CACHE_MAX_ENTRIES, ttl: CACHE_TTL_MS, maxBytes: CACHE_MAX_BYTES });
@@ -272,6 +289,47 @@ async function fetchPerimeters(bbox) {
   };
 }
 
+// US-CA-XLA-LAC-E018 -> LAC-E018, the form county and CAL FIRE maps print.
+function shortZoneId(zoneId) {
+  return String(zoneId || '').replace(/^US-[A-Z]{2}-X[A-Z0-9]{2}-/, '') || null;
+}
+
+function normalizeEvacuationZone(feature) {
+  const props = feature?.properties || {};
+  const status = EVACUATION_STATUS[String(props.STATUS || '').trim().toLowerCase()];
+  if (!status || !feature.geometry) return null;
+  return {
+    type: 'Feature',
+    geometry: feature.geometry,
+    properties: {
+      zone_id: shortZoneId(props.ZONE_ID) || props.ZONE_NAME || 'Zone',
+      zone_ref: props.ZONE_ID || null,
+      status,
+      status_label: status === 'order' ? 'Order' : 'Warning',
+      county: props.COUNTY || null,
+      updated: toIso(props.EDIT_DATE),
+    },
+  };
+}
+
+async function fetchEvacuations(bbox) {
+  const collection = await fetchArcgisGeoJson(CA_EVACUATIONS_URL, {
+    ...arcgisParams({ bbox, recordCount: 2000 }),
+    outFields: 'ZONE_ID,ZONE_NAME,STATUS,COUNTY,EDIT_DATE',
+    maxAllowableOffset: EVACUATION_GEOMETRY_TOLERANCE_DEG,
+    geometryPrecision: 5,
+  });
+  return {
+    geojson: {
+      type: 'FeatureCollection',
+      features: (collection.features || []).map(normalizeEvacuationZone).filter(Boolean),
+    },
+    // A truncated page drops zones without saying so, and a missing Order is
+    // the one omission this layer cannot afford. Report it instead.
+    partial: Boolean(collection.exceededTransferLimit || collection.properties?.exceededTransferLimit),
+  };
+}
+
 async function fetchHotspots(bbox) {
   const result = await fireDataHelpers.fetchCurrentFires({
     bbox: bbox.raw,
@@ -397,11 +455,12 @@ async function buildBootstrap(query = {}) {
   const cached = getCached(cacheKey);
   if (cached) return cached;
 
-  const [incidentResult, perimeterResult, hotspotResult, alertResult] = await Promise.allSettled([
+  const [incidentResult, perimeterResult, hotspotResult, alertResult, evacuationResult] = await Promise.allSettled([
     fetchIncidents(bbox),
     fetchPerimeters(bbox),
     fetchHotspots(bbox),
     fetchAlerts(),
+    fetchEvacuations(bbox),
   ]);
 
   const rawIncidents = incidentResult.status === 'fulfilled' ? incidentResult.value : [];
@@ -421,6 +480,9 @@ async function buildBootstrap(query = {}) {
       return Number(b.acres || 0) - Number(a.acres || 0);
     });
   const normalizedAlerts = (alerts.geojson.features || []).map(normalizeAlert);
+  const evacuations = evacuationResult.status === 'fulfilled'
+    ? evacuationResult.value
+    : { geojson: { type: 'FeatureCollection', features: [] }, partial: true };
 
   return setCached(cacheKey, {
     updatedAt: nowIso(),
@@ -434,7 +496,7 @@ async function buildBootstrap(query = {}) {
     hotspots: hotspots.fires,
     alerts: normalizedAlerts,
     alertsGeojson: alerts.geojson,
-    evacuations: [],
+    evacuations: evacuations.geojson,
     layerStatus: {
       incidents: incidentResult.status === 'fulfilled'
         ? statusOk('WFIGS Incident Locations Current', incidents.length)
@@ -448,15 +510,9 @@ async function buildBootstrap(query = {}) {
       alerts: alertResult.status === 'fulfilled'
         ? statusOk('NWS Alerts API', normalizedAlerts.length, { partial: alerts.partial })
         : statusError('NWS Alerts API', alertResult.reason),
-      evacuations: {
-        source: 'Official county/Genasys/CAL FIRE providers',
-        ok: false,
-        partial: true,
-        stale: false,
-        count: 0,
-        lastFetchedAt: nowIso(),
-        error: 'provider registry not configured for this county',
-      },
+      evacuations: evacuationResult.status === 'fulfilled'
+        ? statusOk('CalOES California Active Evacuation Zones', evacuations.geojson.features.length, { partial: evacuations.partial })
+        : statusError('CalOES California Active Evacuation Zones', evacuationResult.reason),
     },
   });
 }
@@ -592,6 +648,8 @@ router.get('/layers', async (_req, res) => {
 
 module.exports = router;
 module.exports._private = {
+  normalizeEvacuationZone,
+  shortZoneId,
   parseBbox,
   normalizeIncident,
   normalizeAlert,

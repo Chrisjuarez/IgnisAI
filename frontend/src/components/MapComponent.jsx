@@ -69,6 +69,14 @@ const SPREAD_BAND_FILL_OPACITY = 0.62;
 const SPREAD_OBSERVED_FILL_OPACITY = 0.55;
 const SPREAD_BAND_LINE_WIDTH = 1.4;
 const SPREAD_BAND_CASING_COLOR = '#2b1600';
+
+// Evacuation zones, coloured the way county and CAL FIRE maps colour them:
+// Orders red, Warnings amber. Translucent, because a zone is context for the
+// fire and the forecast, not the subject.
+const NO_EVACUATIONS = Object.freeze({ type: 'FeatureCollection', features: [] });
+const EVACUATION_FILL_COLOR = ['match', ['get', 'status'], 'order', '#c62828', '#e0a800'];
+const EVACUATION_LINE_COLOR = ['match', ['get', 'status'], 'order', '#8e1b1b', '#8a6d0b'];
+const EVACUATION_FILL_OPACITY = ['match', ['get', 'status'], 'order', 0.22, 0.16];
 const FOOTPRINT_FILL_OPACITY = [
   'interpolate', ['linear'], ['get', 'confidencePct'],
   0, 0.02,
@@ -488,6 +496,7 @@ const MapComponent = forwardRef(({
   onNearbyFiresUpdate,
   incidents = [],
   alerts = [],
+  evacuations = NO_EVACUATIONS,
   layerVisibility = {},
   selectedIncident = null,
   selectedAlert = null,
@@ -503,6 +512,7 @@ const MapComponent = forwardRef(({
   const alertClickHandlerRef = useRef();
   const incidentsRef = useRef([]);
   const alertsRef = useRef([]);
+  const evacuationsRef = useRef(NO_EVACUATIONS);
 
   const [wildfires, setWildfires]       = useState([]);
   const [wildfireFootprints, setWildfireFootprints] = useState(emptyFeatureCollection);
@@ -677,6 +687,11 @@ const MapComponent = forwardRef(({
     src.setData(alertFeatureCollection(data));
   }
 
+  function updateEvacuationSource(data = evacuationsRef.current) {
+    const src = mapRef.current?.getSource('evacuation-zones-source');
+    if (src) src.setData(data || NO_EVACUATIONS);
+  }
+
   function updateSelectedIncidentSource(incident = selectedIncident) {
     const map = mapRef.current;
     if (!map) return;
@@ -703,6 +718,7 @@ const MapComponent = forwardRef(({
       perimeters: ['fire-perimeters-fill', 'fire-perimeters-outline'],
       incidents: ['ignis-incidents-layer', 'ignis-incidents-label', 'selected-incident-layer'],
       warnings: ['nws-alerts-fill', 'nws-alerts-outline'],
+      evacuations: ['evacuation-zones-fill', 'evacuation-zones-outline', 'evacuation-zones-label'],
       prediction: [
         'ignis-pred-raster-layer',
         'ignis-pred-contour-line',
@@ -910,9 +926,11 @@ const MapComponent = forwardRef(({
     //
     // Order matters within the group too: burned area underneath, forecast
     // over it, seed point on top.
-    ['spread-observed-fill', 'spread-observed-outline',
+    // Evacuation outlines and labels ride along: a zone boundary lost under
+    // the heatmap is the one piece of context a person here would need.
+    ['spread-observed-fill', 'spread-observed-outline', 'evacuation-zones-outline',
      'spread-bands-fill', 'spread-bands-casing', 'spread-bands-outline',
-     'spread-bands-label', 'spread-ignition-point'].forEach((layerId) => {
+     'spread-bands-label', 'evacuation-zones-label', 'spread-ignition-point'].forEach((layerId) => {
       try {
         if (map?.getLayer?.(layerId)) map.moveLayer(layerId);
       } catch (_) {
@@ -1448,6 +1466,51 @@ const MapComponent = forwardRef(({
       }
     });
 
+    map.addSource('evacuation-zones-source', {
+      type: 'geojson',
+      data: evacuationsRef.current,
+    });
+    map.addLayer({
+      id: 'evacuation-zones-fill',
+      type: 'fill',
+      source: 'evacuation-zones-source',
+      paint: {
+        'fill-color': EVACUATION_FILL_COLOR,
+        'fill-opacity': EVACUATION_FILL_OPACITY,
+      },
+    });
+    map.addLayer({
+      id: 'evacuation-zones-outline',
+      type: 'line',
+      source: 'evacuation-zones-source',
+      layout: { 'line-join': 'round' },
+      paint: {
+        'line-color': EVACUATION_LINE_COLOR,
+        'line-width': ['match', ['get', 'status'], 'order', 1.8, 1.2],
+        'line-opacity': 0.9,
+      },
+    });
+    // Zone id and status, as CAL FIRE prints them. Held back until the map is
+    // close enough to read a zone: statewide, two dozen labels are clutter.
+    map.addLayer({
+      id: 'evacuation-zones-label',
+      type: 'symbol',
+      source: 'evacuation-zones-source',
+      minzoom: 9,
+      layout: {
+        'text-field': ['concat', ['get', 'zone_id'], '\n', ['get', 'status_label']],
+        'text-size': 11,
+        'text-font': ['DIN Offc Pro Medium', 'Arial Unicode MS Bold'],
+        'text-line-height': 1.15,
+        'text-padding': 4,
+      },
+      paint: {
+        'text-color': ['match', ['get', 'status'], 'order', '#6d1414', '#5c4807'],
+        'text-halo-color': '#ffffff',
+        'text-halo-width': 1.6,
+      },
+    });
+
     map.addSource('observed-fire-cells-source', {
       type: 'geojson',
       data: emptyFeatureCollection(),
@@ -1949,6 +2012,7 @@ const MapComponent = forwardRef(({
       updatePerimeterSource();
       updateIncidentSource();
       updateAlertSource();
+      updateEvacuationSource();
       updateSelectedIncidentSource();
       applyLayerVisibility();
       updateUserSource();
@@ -1993,6 +2057,10 @@ const MapComponent = forwardRef(({
     incidentsRef.current = incidents;
     updateIncidentSource(incidents);
   }, [incidents]);
+  useEffect(() => {
+    evacuationsRef.current = evacuations || NO_EVACUATIONS;
+    updateEvacuationSource();
+  }, [evacuations]);
   useEffect(() => {
     alertsRef.current = alerts;
     updateAlertSource(alerts);

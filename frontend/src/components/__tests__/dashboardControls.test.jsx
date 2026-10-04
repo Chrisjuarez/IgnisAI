@@ -342,6 +342,48 @@ describe('Dashboard controls', () => {
     expect(getFirePerimeters).toHaveBeenCalled();
   });
 
+  test('evacuation zones reach the map and follow the Layers toggle', async () => {
+    const MapComponent = require('../MapComponent').default;
+    const ring = [[[-118.45, 34.55], [-118.35, 34.55], [-118.35, 34.6], [-118.45, 34.6], [-118.45, 34.55]]];
+    const zones = {
+      type: 'FeatureCollection',
+      features: [
+        { type: 'Feature', geometry: { type: 'Polygon', coordinates: ring },
+          properties: { zone_id: 'LAC-E018', status: 'order', status_label: 'Order' } },
+        { type: 'Feature', geometry: { type: 'Polygon', coordinates: ring },
+          properties: { zone_id: 'LAC-E031-B', status: 'warning', status_label: 'Warning' } },
+      ],
+    };
+    const props = {
+      brightnessFilter: '', confidenceFilter: '', onFiresUpdated: jest.fn(), setIsFetching: jest.fn(),
+      mapStyle: 'mapbox://styles/mapbox/streets-v12', userLocation: null, range: 0, onNearbyFiresUpdate: jest.fn(),
+    };
+
+    const { rerender } = render(<MapComponent {...props} evacuations={zones} layerVisibility={{ evacuations: true }} />);
+    const map = mapboxgl.__mockMaps[mapboxgl.__mockMaps.length - 1];
+
+    await waitFor(() => {
+      expect(map.getLayer('evacuation-zones-fill')).toBeTruthy();
+      expect(map.getLayer('evacuation-zones-label')).toBeTruthy();
+      expect(map.getSource('evacuation-zones-source').config.data.features).toHaveLength(2);
+    });
+
+    // The Layers panel's toggle was a stub wired to nothing. It must now hide
+    // all three layers, not just the fill.
+    rerender(<MapComponent {...props} evacuations={zones} layerVisibility={{ evacuations: false }} />);
+    await waitFor(() => {
+      ['evacuation-zones-fill', 'evacuation-zones-outline', 'evacuation-zones-label'].forEach((layerId) => {
+        expect(map.setLayoutProperty).toHaveBeenCalledWith(layerId, 'visibility', 'none');
+      });
+    });
+
+    // New zones from the next bootstrap replace the old ones in place.
+    rerender(<MapComponent {...props} evacuations={{ ...zones, features: zones.features.slice(0, 1) }} layerVisibility={{ evacuations: true }} />);
+    await waitFor(() => {
+      expect(map.getSource('evacuation-zones-source').config.data.features).toHaveLength(1);
+    });
+  });
+
   test('forecast panel appears and slider updates the active forecast frame', async () => {
     const MapComponent = require('../MapComponent').default;
 

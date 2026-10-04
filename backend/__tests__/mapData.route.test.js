@@ -15,6 +15,16 @@ function collection(features = []) {
   return { type: 'FeatureCollection', features };
 }
 
+const ZONE_RING = [[[-118.45, 34.55], [-118.35, 34.55], [-118.35, 34.6], [-118.45, 34.6], [-118.45, 34.55]]];
+
+// Shaped like the CalOES feed for the Bouquet Fire on 2026-10-03.
+const EVACUATION_ZONES = [
+  { type: 'Feature', geometry: { type: 'Polygon', coordinates: ZONE_RING },
+    properties: { ZONE_ID: 'US-CA-XLA-LAC-E018', STATUS: 'Evacuation Order', COUNTY: 'LOS ANGELES', EDIT_DATE: Date.parse('2026-10-03T23:10:00Z') } },
+  { type: 'Feature', geometry: { type: 'Polygon', coordinates: ZONE_RING },
+    properties: { ZONE_ID: 'US-CA-XLA-LAC-E031-B', STATUS: 'Evacuation Warning', COUNTY: 'LOS ANGELES', EDIT_DATE: Date.parse('2026-10-03T23:10:00Z') } },
+];
+
 describe('GET /api/map/bootstrap', () => {
   beforeEach(() => {
     jest.clearAllMocks();
@@ -79,6 +89,9 @@ describe('GET /api/map/bootstrap', () => {
           ]),
         });
       }
+      if (String(url).includes('CA_EVACUATIONS_CalOESHosted_view')) {
+        return Promise.resolve({ data: collection(EVACUATION_ZONES) });
+      }
       return Promise.resolve({ data: collection([]) });
     });
   });
@@ -112,6 +125,81 @@ describe('GET /api/map/bootstrap', () => {
       hotspots: { ok: true },
       alerts: { ok: true },
     });
+  });
+});
+
+describe('evacuation zones on the bootstrap', () => {
+  const { normalizeEvacuationZone, shortZoneId } = require('../routes/mapData')._private;
+
+  it('carries normalised Orders and Warnings and reports the layer healthy', async () => {
+    const res = await request(app)
+      .get('/api/map/bootstrap')
+      .query({ bbox: '-118.6,34.4,-118.2,34.7' })
+      .expect(200);
+
+    expect(res.body.evacuations.type).toBe('FeatureCollection');
+    expect(res.body.evacuations.features.map(f => f.properties)).toEqual([
+      expect.objectContaining({ zone_id: 'LAC-E018', status: 'order', status_label: 'Order' }),
+      expect.objectContaining({ zone_id: 'LAC-E031-B', status: 'warning', status_label: 'Warning' }),
+    ]);
+    expect(res.body.layerStatus.evacuations).toMatchObject({ ok: true, count: 2, partial: false });
+  });
+
+  it('asks for generalised geometry so the payload stays small', async () => {
+    await request(app).get('/api/map/bootstrap').query({ bbox: '-118.61,34.4,-118.2,34.7' }).expect(200);
+
+    const call = axios.get.mock.calls.find(([url]) => String(url).includes('CA_EVACUATIONS_CalOESHosted_view'));
+    // Full-precision zones were 648 KB for one fire; generalised, 33 KB.
+    expect(call[1].params).toMatchObject({ maxAllowableOffset: expect.any(Number), geometryPrecision: 5 });
+    expect(call[1].params.outFields).not.toBe('*');
+  });
+
+  it('keeps every other layer when the evacuation feed is down', async () => {
+    const base = axios.get.getMockImplementation();
+    axios.get.mockImplementation((url, config) => (
+      String(url).includes('CA_EVACUATIONS_CalOESHosted_view')
+        ? Promise.reject(new Error('CalOES unavailable'))
+        : base(url, config)
+    ));
+
+    const res = await request(app)
+      .get('/api/map/bootstrap')
+      .query({ bbox: '-118.62,34.4,-118.2,34.7' })
+      .expect(200);
+
+    expect(res.body.evacuations.features).toEqual([]);
+    expect(res.body.layerStatus.evacuations).toMatchObject({ ok: false, error: 'CalOES unavailable' });
+    expect(res.body.layerStatus.incidents.ok).toBe(true);
+  });
+
+  it('flags a truncated page instead of silently dropping zones', async () => {
+    const base = axios.get.getMockImplementation();
+    axios.get.mockImplementation((url, config) => (
+      String(url).includes('CA_EVACUATIONS_CalOESHosted_view')
+        ? Promise.resolve({ data: { ...collection(EVACUATION_ZONES), properties: { exceededTransferLimit: true } } })
+        : base(url, config)
+    ));
+
+    const res = await request(app)
+      .get('/api/map/bootstrap')
+      .query({ bbox: '-118.63,34.4,-118.2,34.7' })
+      .expect(200);
+
+    expect(res.body.layerStatus.evacuations).toMatchObject({ ok: true, partial: true });
+  });
+
+  it.each([
+    ['US-CA-XLA-LAC-E018', 'LAC-E018'],
+    ['US-CA-XTU-PVL-E044', 'PVL-E044'],
+    ['US-CA-XMY-MRY-F015-C', 'MRY-F015-C'],
+    ['LOCAL-7', 'LOCAL-7'],
+  ])('shortens zone id %s to %s, as county maps print it', (raw, short) => {
+    expect(shortZoneId(raw)).toBe(short);
+  });
+
+  it('drops zones with no geometry or a status it does not recognise', () => {
+    expect(normalizeEvacuationZone({ geometry: null, properties: { STATUS: 'Evacuation Order' } })).toBeNull();
+    expect(normalizeEvacuationZone({ geometry: { type: 'Polygon', coordinates: ZONE_RING }, properties: { STATUS: 'Lifted' } })).toBeNull();
   });
 });
 
