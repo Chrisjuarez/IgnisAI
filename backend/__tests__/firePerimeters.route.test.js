@@ -50,4 +50,18 @@ describe('GET /api/fire-perimeters', () => {
     expect(res.body.partial).toBe(true);
     expect(res.body.geojson.features[0].properties.poly_IncidentName).toBe('Palisades');
   });
+
+  it('asks every source for simplified geometry so a wide viewport stays small', async () => {
+    axios.get.mockResolvedValue({ data: { type: 'FeatureCollection', features: [] } });
+
+    await request(app)
+      .get('/api/fire-perimeters')
+      .query({ bbox: '-125.1,31,-101.8,49.5' })
+      .expect(200);
+
+    expect(axios.get).toHaveBeenCalledTimes(2);
+    for (const [, config] of axios.get.mock.calls) {
+      expect(config.params).toMatchObject({ maxAllowableOffset: 0.0001, geometryPrecision: 6 });
+    }
+  });
 });
