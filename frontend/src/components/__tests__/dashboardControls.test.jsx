@@ -49,6 +49,7 @@ jest.mock('../../utils/addPredictionOverlay', () => ({
   prepareMultistepRasterFrames: jest.fn(async payload => ({
     bounds: payload.bounds,
     scene: payload.scene || null,
+    burnedArea: payload.burned_area || null,
     threshold: payload.threshold,
     stepHours: payload.step_hours,
     frames: payload.steps.map(step => ({
@@ -115,8 +116,9 @@ describe('Dashboard controls', () => {
       // The component reads this to decide whether the band view has anything
       // to draw. Omitting it here silently routed every forecast test down the
       // heatmap branch, which is why no test caught the band view not
-      // rendering.
+      // rendering. The burned area is passed through for the same reason.
       scene: payload.scene || null,
+      burnedArea: payload.burned_area || null,
       threshold: payload.threshold,
       stepHours: payload.step_hours,
       frames: payload.steps.map(step => ({
@@ -680,6 +682,37 @@ describe('Dashboard controls', () => {
       fireEvent.click(screen.getByRole('button', { name: /probability heat/i }));
 
       await waitFor(() => expect(map.moveLayer).toHaveBeenCalledWith('fire-perimeters-outline'));
+    });
+
+    test('an incident forecast grows from its perimeter and says so only when it did', async () => {
+      const MapComponent = require('../MapComponent').default;
+      const ref = React.createRef();
+      const forecastFor = predictFireSpreadMultistep.getMockImplementation();
+      predictFireSpreadMultistep.mockImplementationOnce(async (args) => ({
+        ...(await forecastFor(args)),
+        burned_area: { applied: true, acres: 1049.3, cells: 16 },
+      }));
+      render(<MapComponent ref={ref} {...baseProps} />);
+      await waitFor(() => expect(ref.current?.runPredictionForIncident).toBeDefined());
+
+      await act(async () => {
+        await ref.current.runPredictionForIncident({
+          id: 'IRWIN-BOUQUET', name: 'BOUQUET', lat: 34.5618, lon: -118.4018, hasPerimeter: true,
+        });
+      });
+
+      expect(predictFireSpreadMultistep).toHaveBeenCalledWith(
+        expect.objectContaining({ incidentId: 'IRWIN-BOUQUET', ignition: false }),
+      );
+      expect(await screen.findByText(/beyond the official perimeter/i)).toBeInTheDocument();
+    });
+
+    test('a forecast without a perimeter does not claim to start from one', async () => {
+      const MapComponent = require('../MapComponent').default;
+      render(<MapComponent {...baseProps} />);
+      await openCampForecast();
+
+      expect(screen.queryByText(/beyond the official perimeter/i)).not.toBeInTheDocument();
     });
 
     test('hotspots carry their age and are coloured by it', async () => {

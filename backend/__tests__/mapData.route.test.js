@@ -326,6 +326,32 @@ describe('matching perimeters to incidents', () => {
     const small = annotate(bouquet({ acres: null }), [square(0, { area_acres: 42.37, poly_DateCurrent: FLIGHT_2109 })]);
     expect(small.acres).toBe(42.4);
   });
+
+  describe('burned area for a forecast', () => {
+    const { burnedAreaFor } = require('../routes/mapData')._private;
+
+    it('is every perimeter mapped at the fire, geometry only', () => {
+      const flights = [
+        square(112, { source: 'USFS', area_acres: 709.7, poly_DateCurrent: Date.parse('2026-10-03T23:49:00Z') }),
+        square(112, { area_acres: 1048.26, poly_DateCurrent: FLIGHT_2109 }),
+      ];
+      const burned = burnedAreaFor(collection(flights), bouquet());
+
+      expect(burned.features).toHaveLength(2);
+      expect(burned.features.map((f) => f.geometry)).toEqual(flights.map((f) => f.geometry));
+      expect(burned.features.every((f) => Object.keys(f.properties).length === 0)).toBe(true);
+    });
+
+    it('leaves out a perimeter linked only by name', () => {
+      // Enough to say a perimeter exists, not to tell the model where fuel is gone.
+      const named = square(30000, { source: undefined, poly_IncidentName: 'Bouquet', poly_GISAcres: 50000 });
+      expect(burnedAreaFor(collection([named]), bouquet())).toBeNull();
+    });
+
+    it('is null for a fire with nothing mapped', () => {
+      expect(burnedAreaFor(collection([]), bouquet())).toBeNull();
+    });
+  });
 });
 
 describe('bootstrap response weight', () => {

@@ -507,6 +507,7 @@ export async function prepareMultistepRasterFrames(payload, opts = {}) {
     bounds,
     scene: payload?.scene || null,
     hybrid: payload?.hybrid || null,
+    burnedArea: payload?.burned_area || null,
     threshold: payload?.threshold,
     displayFloor: payload?.display_floor,
     stepHours: payload?.step_hours,

@@ -271,6 +271,23 @@ def _firms_snapshot_required() -> bool:
 
 
 # ---------------- FIRMS helpers ----------------
+#: An ignition seed stands in for a fire satellites have not seen yet. Within
+#: this distance of a detection in the latest day the fire is already in the
+#: channel, and a seed would only paint an extra block over it - which is what
+#: every forecast started from a hotspot was getting.
+IGNITION_SEED_SKIP_RADIUS_M = 2000.0
+
+
+def _detected_near(fire: np.ndarray, lat: float, lon: float, affine, radius_m: float) -> bool:
+    """Whether any alight cell's centre lies within `radius_m` of the point."""
+    rows, cols = np.nonzero(fire > 0)
+    if rows.size == 0:
+        return False
+    x, y = lonlat_to_xy_m(lon, lat)
+    cell_x, cell_y = affine * (cols + 0.5, rows + 0.5)
+    return bool(np.hypot(cell_x - x, cell_y - y).min() <= radius_m)
+
+
 def _rasterize_ignition_point(lat: float, lon: float, affine):
     pix_m = float(abs(affine.a))
     buf_m = max(0.8 * pix_m, 300.0)
@@ -724,7 +741,10 @@ def build_dynamic_for_tile(
     fire_stack = np.stack(fire_stack, axis=0).astype(np.float32)  # [T,H,W]
     frp_stack = np.stack(frp_stack, axis=0).astype(np.float32)    # [T,H,W]
 
-    if ignition:
+    if ignition and _detected_near(fire_stack[-1], lat, lon, A, IGNITION_SEED_SKIP_RADIUS_M):
+        print("[tilesvc] Ignition seed skipped: detections within "
+              f"{IGNITION_SEED_SKIP_RADIUS_M / 1000:.0f} km of the point in the latest day")
+    elif ignition:
         ign = _rasterize_ignition_point(lat, lon, A)      # [H,W] in 5070 meters
         ign = fire_boost(ign, scale=5.0)
         # Inject into the most recent timestep (last index)

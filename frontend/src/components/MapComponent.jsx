@@ -579,6 +579,9 @@ const MapComponent = forwardRef(({
   const [spreadView, setSpreadView] = useState('bands');
   const [forecastScene, setForecastScene] = useState(null);
   const [forecastHybrid, setForecastHybrid] = useState(null);
+  // Whether tilesvc grew this forecast from the official perimeter. Only then
+  // are the bands growth beyond it, and only then may the panel say so.
+  const [forecastBurnedArea, setForecastBurnedArea] = useState(null);
 
   // Historical fire testing state
   const [showHistPanel, setShowHistPanel] = useState(false);
@@ -888,6 +891,7 @@ const MapComponent = forwardRef(({
     setForecastFrames([]);
     setForecastScene(null);
     setForecastHybrid(null);
+    setForecastBurnedArea(null);
     setActiveForecastIndex(0);
     setForecastLayerMode('new_burn');
     removePredictionOverlays(mapRef.current);
@@ -974,6 +978,7 @@ const MapComponent = forwardRef(({
     steps = 6,
     stepHours,
     ignition,
+    incidentId,
     fitBounds = true,
   }) => {
     setIsForecastLoading(true);
@@ -1005,6 +1010,7 @@ const MapComponent = forwardRef(({
         steps,
         ...(stepHours ? { stepHours } : {}),
         ...(ignition != null ? { ignition } : {}),
+        ...(incidentId ? { incidentId } : {}),
       });
       const payload = response?.data ?? response;
       console.info('[forecast] 2/5 HTTP response received', {
@@ -1054,6 +1060,7 @@ const MapComponent = forwardRef(({
       setForecastTitle(title);
       setForecastScene(prepared.scene || null);
       setForecastHybrid(prepared.hybrid || null);
+      setForecastBurnedArea(prepared.burnedArea || null);
       setForecastFrames(prepared.frames);
       setActiveForecastIndex(0);
       setIsForecastPlaying(false);
@@ -1157,6 +1164,7 @@ const MapComponent = forwardRef(({
         title: `${incident.name || 'Incident'} Ignis Advisory`,
         stepHours: DEFAULT_STEP_HOURS,
         ignition: useSyntheticIgnition,
+        incidentId: incident.id,
       });
     } catch (error) {
       console.error('Incident forecast failed:', error);
@@ -2587,7 +2595,9 @@ const MapComponent = forwardRef(({
           </div>
           <div className="forecast-advisory">
             {showingBands
-              ? 'Each band is where the model expects fire to have reached by that day. It is not an observed or predicted official perimeter.'
+              ? (forecastBurnedArea?.applied
+                ? 'Each band is where the model expects fire to have spread beyond the official perimeter by that day. It is not an observed or predicted official perimeter.'
+                : 'Each band is where the model expects fire to have reached by that day. It is not an observed or predicted official perimeter.')
               : 'The heatmap shows how likely each spot is to burn by this day. It is not an observed or predicted official perimeter.'}
           </div>
           <div className="forecast-badges">

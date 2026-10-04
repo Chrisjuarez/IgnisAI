@@ -342,6 +342,26 @@ function perimetersForIncident(perimeters, incident) {
   };
 }
 
+// The ground a forecast should treat as already burned: every perimeter mapped
+// at the incident's location, merged by the caller. Name matches are left out
+// on purpose. A shared word in a name is enough to say a perimeter exists, not
+// to tell the model where fuel has already gone.
+function burnedAreaFor(perimeters, incident) {
+  const { byLocation } = matchPerimeters(indexPerimeters(perimeters), incident);
+  if (!byLocation.length) return null;
+  return {
+    type: 'FeatureCollection',
+    features: byLocation.map(({ feature }) => ({ type: 'Feature', properties: {}, geometry: feature.geometry })),
+  };
+}
+
+/** The incident's burned area from the shared bootstrap, or null without one. */
+async function burnedAreaForIncident(incidentId) {
+  const payload = await buildBootstrap();
+  const incident = payload.incidents.find((item) => item.id === incidentId);
+  return incident ? burnedAreaFor(payload.perimeters, incident) : null;
+}
+
 function annotateIncidents(incidents, perimeters, hotspots) {
   const index = indexPerimeters(perimeters);
 
@@ -763,8 +783,10 @@ router.get('/layers', async (_req, res) => {
 });
 
 module.exports = router;
+module.exports.burnedAreaForIncident = burnedAreaForIncident;
 module.exports._private = {
   annotateIncidents,
+  burnedAreaFor,
   resolveAcreage,
   perimetersForIncident,
   normalizeEvacuationZone,

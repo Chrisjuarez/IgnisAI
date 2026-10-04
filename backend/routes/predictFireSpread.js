@@ -1,6 +1,7 @@
 // backend/routes/predictFireSpread.js
 const express = require("express");
 const axios = require("axios");
+const mapData = require("./mapData");
 
 const router = express.Router();
 
@@ -255,11 +256,25 @@ router.get("/vector", async (req, res) => {
   }
 });
 
-// GET /api/predict-fire-spread/multistep?lat=&lon=&steps=&step_hours=&Tseq=&thr=&date=&debug=
+// An incident's official burned area, or null. A lookup failure costs the
+// forecast its perimeter, not the forecast itself.
+async function burnedAreaOrNull(incidentId) {
+  if (!incidentId) return null;
+  try {
+    return await mapData.burnedAreaForIncident(String(incidentId));
+  } catch (err) {
+    console.warn(`burned area lookup failed for ${incidentId}: ${err.message}`);
+    return null;
+  }
+}
+
+// GET /api/predict-fire-spread/multistep?lat=&lon=&steps=&step_hours=&Tseq=&thr=&date=&debug=&incident_id=
 router.get("/multistep", async (req, res) => {
   try {
     if (!predictionsEnabled()) return sendPredictionsDisabled(res);
-    const { lat, lon, steps, step_hours, Tseq, thr, display_floor, crop_frac, date, debug, ignition } = req.query;
+    const {
+      lat, lon, steps, step_hours, Tseq, thr, display_floor, crop_frac, date, debug, ignition, incident_id,
+    } = req.query;
     if (lat == null || lon == null) {
       return res.status(400).json({ error: "lat and lon are required" });
     }
@@ -281,13 +296,17 @@ router.get("/multistep", async (req, res) => {
       ...(debug ? { debug } : {}),
     };
 
-    // retries=0 (default): a multistep retry restarts the whole rollout on
-    // tilesvc's side, which usually guarantees the next attempt also times
-    // out. One generous attempt is strictly better than three short ones.
-    const forecast = await getJSON(
+    // For an incident with a mapped perimeter, the forecast grows from it:
+    // tilesvc treats it as burned and draws the bands beyond it. Sent as a
+    // body because a perimeter does not fit in a query string.
+    //
+    // No retry: a multistep retry restarts the whole rollout on tilesvc's
+    // side, which usually guarantees the next attempt also times out.
+    const burnedArea = await burnedAreaOrNull(incident_id);
+    const { data: forecast } = await axios.post(
       `${TILE_SVC}/predict_multistep`,
-      params,
-      { timeoutMs: MULTISTEP_TIMEOUT_MS, retries: 0 },
+      { burned_area: burnedArea },
+      { params, timeout: MULTISTEP_TIMEOUT_MS },
     );
     if (!Array.isArray(forecast?.bounds) || forecast.bounds.length !== 4 || !Array.isArray(forecast?.steps)) {
       throw new Error(`tilesvc multistep missing bounds/steps: ${JSON.stringify(forecast)?.slice(0, 200)}`);

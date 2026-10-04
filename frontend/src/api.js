@@ -113,6 +113,7 @@ export const predictFireSpreadMultistep = async ({
   stepHours,
   displayFloor,
   ignition,
+  incidentId,
 } = {}) => {
   const latitude = lat != null ? Number(lat) : null;
   const longitude =
@@ -140,6 +141,9 @@ export const predictFireSpreadMultistep = async ({
       ...(displayFloor != null && !Number.isNaN(Number(displayFloor)) ? { display_floor: Number(displayFloor) } : {}),
       ...(date ? { date } : {}),
       ...(ignitionParam != null ? { ignition: ignitionParam } : {}),
+      // Lets the backend send the incident's mapped perimeter with the request,
+      // so the forecast grows from it rather than over it.
+      ...(incidentId ? { incident_id: incidentId } : {}),
     },
   });
 
