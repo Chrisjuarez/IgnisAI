@@ -67,6 +67,12 @@ function segmentDistance(px, py, ax, ay, bx, by) {
   return Math.hypot(px - (ax + t * dx), py - (ay + t * dy));
 }
 
+/** Metres between two points, on a tangent plane at the first. */
+function distanceMetres(lon, lat, otherLon, otherLat) {
+  const kx = METRES_PER_DEG_LON_AT_EQUATOR * Math.cos((lat * Math.PI) / 180);
+  return Math.hypot((otherLon - lon) * kx, (otherLat - lat) * METRES_PER_DEG_LAT);
+}
+
 /**
  * Metres from (lon, lat) to the nearest part of a Polygon or MultiPolygon:
  * zero inside it, Infinity for anything that is not a polygon.
@@ -89,4 +95,4 @@ function distanceToPolygonMetres(lon, lat, geometry) {
   return nearest;
 }
 
-module.exports = { bboxOf, bboxWithinRadius, distanceToPolygonMetres };
+module.exports = { bboxOf, bboxWithinRadius, distanceMetres, distanceToPolygonMetres };

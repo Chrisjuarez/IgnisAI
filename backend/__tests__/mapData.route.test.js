@@ -2,6 +2,9 @@ const request = require('supertest');
 
 jest.mock('axios', () => ({ get: jest.fn() }));
 jest.mock('../models/Wildfire', () => ({ insertMany: jest.fn(), find: jest.fn() }));
+jest.mock('../utils/satellitePasses', () => ({
+  nextPasses: jest.fn(async () => [{ satellite: 'NOAA-20', instrument: 'VIIRS', at: '2026-10-04T21:29:00.000Z' }]),
+}));
 
 const axios = require('axios');
 const app = require('../app');
@@ -245,6 +248,22 @@ describe('GET /api/map/bootstrap', () => {
       expect(res.body.perimeters.features.map(f => f.properties.poly_IncidentName)).toEqual(['Palisades Fire']);
       expect(res.body.incident).toMatchObject({ name: 'Palisades Fire', hasPerimeter: true });
     });
+
+    it('dates each source on the detail route and says when satellites next look', async () => {
+      const { nextPasses } = require('../utils/satellitePasses');
+
+      const res = await request(app)
+        .get(`/api/incidents/${encodeURIComponent('wfigs:abc-123')}`)
+        .query({ bbox: '-119.02,33,-117,35' })
+        .expect(200);
+
+      expect(res.body.freshness).toEqual({
+        perimeterMappedAt: null,
+        lastDetectionAt: null,
+        nextPasses: [{ satellite: 'NOAA-20', instrument: 'VIIRS', at: '2026-10-04T21:29:00.000Z' }],
+      });
+      expect(nextPasses).toHaveBeenCalledWith(34.05, -118.55);
+    });
   });
 });
 
@@ -325,6 +344,56 @@ describe('matching perimeters to incidents', () => {
   it('rounds measured acreage the way the panel displays it', () => {
     const small = annotate(bouquet({ acres: null }), [square(0, { area_acres: 42.37, poly_DateCurrent: FLIGHT_2109 })]);
     expect(small.acres).toBe(42.4);
+  });
+
+  describe('freshness', () => {
+    const { freshnessFor } = require('../routes/mapData')._private;
+    const detection = (lon, lat, iso) => ({ longitude: lon, latitude: lat, timestamp: new Date(iso) });
+    // 1 km of longitude at Bouquet's latitude, in degrees.
+    const KM_LON = 1 / (111.32 * Math.cos((34.561835 * Math.PI) / 180));
+
+    it('dates the newest perimeter and the newest detection on or near it', async () => {
+      const mapped = square(112, { area_acres: 1048.26, poly_DateCurrent: FLIGHT_2109 });
+      const westEdge = mapped.geometry.coordinates[0][0][0];
+      const payload = {
+        perimeters: collection([
+          square(112, { source: 'USFS', area_acres: 709.7, poly_DateCurrent: Date.parse('2026-10-03T23:49:00Z') }),
+          mapped,
+        ]),
+        hotspots: [
+          detection(westEdge + 0.01, 34.56, '2026-10-04T09:13:00Z'),        // inside the perimeter
+          detection(westEdge - 1.5 * KM_LON, 34.56, '2026-10-04T20:33:00Z'), // 1.5 km off its edge
+          detection(westEdge - 5 * KM_LON, 34.56, '2026-10-04T21:48:00Z'),   // another fire, 5 km off
+        ],
+      };
+
+      const freshness = await freshnessFor(payload, bouquet());
+
+      expect(freshness.perimeterMappedAt).toBe('2026-10-04T04:09:00.000Z');
+      expect(freshness.lastDetectionAt).toBe('2026-10-04T20:33:00.000Z');
+      expect(freshness.nextPasses[0]).toMatchObject({ satellite: 'NOAA-20' });
+    });
+
+    it('measures from the reported origin when nothing is mapped', async () => {
+      const payload = {
+        perimeters: collection([]),
+        hotspots: [
+          detection(-118.40183 - 1 * KM_LON, 34.561835, '2026-10-04T09:13:00Z'),
+          detection(-118.40183 - 3 * KM_LON, 34.561835, '2026-10-04T20:33:00Z'),
+        ],
+      };
+
+      const freshness = await freshnessFor(payload, bouquet());
+
+      expect(freshness.perimeterMappedAt).toBeNull();
+      expect(freshness.lastDetectionAt).toBe('2026-10-04T09:13:00.000Z');
+    });
+
+    it('has no last detection when none fall near the fire', async () => {
+      const payload = { perimeters: collection([]), hotspots: [detection(-117.0, 34.0, '2026-10-04T20:33:00Z')] };
+
+      expect((await freshnessFor(payload, bouquet())).lastDetectionAt).toBeNull();
+    });
   });
 
   describe('burned area for a forecast', () => {
