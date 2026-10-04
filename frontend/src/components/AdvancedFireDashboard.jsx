@@ -6,7 +6,8 @@ import SourceHealthPanel from './SourceHealthPanel';
 import SiteExposurePanel from './SiteExposurePanel';
 import { parseViewState, serializeViewState, viewStateChanged } from '../utils/viewState';
 import { timeAgo } from '../utils/relativeTime';
-import DataFreshness from './DataFreshness';
+import useRecheckAfterNextPass from '../hooks/useRecheckAfterNextPass';
+import DataFreshness, { hasNewDetectionsSince } from './DataFreshness';
 import { HOTSPOT_AGE_BANDS } from '../utils/hotspotAge';
 import '../styles/dashboard.css';
 
@@ -262,6 +263,7 @@ function IncidentDetailPanel({
   setActiveTab,
   runningPrediction,
   onRunPrediction,
+  newDetectionsSinceForecast = false,
   onClose,
 }) {
   if (!incident) return null;
@@ -319,7 +321,12 @@ function IncidentDetailPanel({
             <div><span>Hotspots</span><strong>{incident.hasHotspots ? 'Live context' : 'Sparse'}</strong></div>
             <div><span>Prediction</span><strong>{canPredict ? 'Ready' : 'Limited'}</strong></div>
           </div>
-          <DataFreshness freshness={detail?.freshness} />
+          <DataFreshness
+            freshness={detail?.freshness}
+            newDetectionsSinceForecast={newDetectionsSinceForecast}
+            onRerunForecast={() => onRunPrediction(incident)}
+            rerunning={runningPrediction}
+          />
           <button
             className="primary-action"
             type="button"
@@ -430,6 +437,9 @@ const AdvancedFireDashboard = () => {
   const [selectedIncidentUpdates, setSelectedIncidentUpdates] = useState([]);
   const [detailTab, setDetailTab] = useState('prediction');
   const [runningPrediction, setRunningPrediction] = useState(false);
+  // The selected incident's freshness as it stood when its forecast was run.
+  const [forecastBasis, setForecastBasis] = useState(null);
+  const selectedIncidentIdRef = useRef(null);
   const [legendOpen, setLegendOpen] = useState(false);
   const [brightness] = useState('');
   const [confidence] = useState('');
@@ -513,28 +523,36 @@ const AdvancedFireDashboard = () => {
   const warnings = mapData?.alerts || [];
   const layerStatus = mapData?.layerStatus || {};
 
-  const handleIncidentSelect = useCallback(async (incident) => {
+  useEffect(() => {
+    selectedIncidentIdRef.current = selectedIncident?.id ?? null;
+  }, [selectedIncident]);
+
+  // Detail and updates for one incident. A response that lands after the user
+  // has moved to another incident is dropped rather than shown under its name.
+  const loadIncidentDetail = useCallback(async (incident) => {
+    const [detailResponse, updatesResponse] = await Promise.allSettled([
+      getIncident(incident.id, { bbox: WESTERN_CONUS_BBOX }),
+      getIncidentUpdates(incident.id, { bbox: WESTERN_CONUS_BBOX }),
+    ]);
+    if (selectedIncidentIdRef.current !== incident.id) return null;
+    const detail = detailResponse.status === 'fulfilled' ? (detailResponse.value?.data ?? detailResponse.value) : null;
+    if (detail) setSelectedIncidentDetail(detail);
+    if (updatesResponse.status === 'fulfilled') {
+      const payload = updatesResponse.value?.data ?? updatesResponse.value;
+      setSelectedIncidentUpdates(payload?.updates || []);
+    }
+    return detail;
+  }, []);
+
+  const handleIncidentSelect = useCallback((incident) => {
+    selectedIncidentIdRef.current = incident.id;
     setSelectedIncident(incident);
     setSelectedWarning(null);
     setDetailTab('prediction');
     setDrawerOpen(false);
     mapRef.current?.flyToIncident?.(incident);
-    try {
-      const [detailResponse, updatesResponse] = await Promise.allSettled([
-        getIncident(incident.id, { bbox: WESTERN_CONUS_BBOX }),
-        getIncidentUpdates(incident.id, { bbox: WESTERN_CONUS_BBOX }),
-      ]);
-      if (detailResponse.status === 'fulfilled') {
-        setSelectedIncidentDetail(detailResponse.value?.data ?? detailResponse.value);
-      }
-      if (updatesResponse.status === 'fulfilled') {
-        const payload = updatesResponse.value?.data ?? updatesResponse.value;
-        setSelectedIncidentUpdates(payload?.updates || []);
-      }
-    } catch (error) {
-      console.warn('incident detail fetch failed', error);
-    }
-  }, []);
+    loadIncidentDetail(incident);
+  }, [loadIncidentDetail]);
 
   const handleWarningSelect = useCallback((warning) => {
     setSelectedWarning(warning);
@@ -544,14 +562,26 @@ const AdvancedFireDashboard = () => {
     mapRef.current?.flyToAlert?.(warning);
   }, []);
 
+  // The incident's freshness is re-read alongside the forecast, so the
+  // detections a later check is compared with are the ones known at run time.
   const handleRunPrediction = useCallback(async (incident) => {
     setRunningPrediction(true);
     try {
-      await mapRef.current?.runPredictionForIncident?.(incident);
+      const [detail, forecast] = await Promise.all([
+        loadIncidentDetail(incident),
+        mapRef.current?.runPredictionForIncident?.(incident),
+      ]);
+      setForecastBasis(detail && forecast
+        ? { incidentId: incident.id, lastDetectionAt: detail.freshness?.lastDetectionAt ?? null }
+        : null);
     } finally {
       setRunningPrediction(false);
     }
-  }, []);
+  }, [loadIncidentDetail]);
+
+  const recheckSelectedIncident = useCallback(() => {
+    if (selectedIncident) loadIncidentDetail(selectedIncident);
+  }, [selectedIncident, loadIncidentDetail]);
 
   const handleToggleLayer = useCallback((id) => {
     setLayerVisibility((current) => {
@@ -569,6 +599,10 @@ const AdvancedFireDashboard = () => {
     .join('') || 'G')
     .slice(0, 2)
     .toUpperCase();
+
+  useRecheckAfterNextPass(selectedIncidentDetail?.freshness, recheckSelectedIncident);
+  const newDetectionsSinceForecast = forecastBasis?.incidentId === selectedIncident?.id
+    && hasNewDetectionsSince(forecastBasis, selectedIncidentDetail?.freshness);
 
   const selectedDetail = selectedIncidentDetail
     ? { ...selectedIncidentDetail, updates: selectedIncidentUpdates.length ? selectedIncidentUpdates : selectedIncidentDetail.updates }
@@ -691,6 +725,7 @@ const AdvancedFireDashboard = () => {
           setActiveTab={setDetailTab}
           runningPrediction={runningPrediction}
           onRunPrediction={handleRunPrediction}
+          newDetectionsSinceForecast={newDetectionsSinceForecast}
           onClose={() => {
             setSelectedIncident(null);
             setSelectedIncidentDetail(null);

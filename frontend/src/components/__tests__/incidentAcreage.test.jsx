@@ -1,4 +1,4 @@
-import { render, screen } from '@testing-library/react';
+import { render, screen, fireEvent } from '@testing-library/react';
 import { IncidentDetailPanel } from '../AdvancedFireDashboard';
 
 const baseIncident = {
@@ -72,3 +72,27 @@ describe('incident dates', () => {
     expect(screen.queryByText('Created')).not.toBeInTheDocument();
   });
 });
+
+describe('re-running a stale forecast', () => {
+  test('the notice re-runs the forecast for the incident on screen', () => {
+    const onRunPrediction = jest.fn();
+    const incident = { ...baseIncident, hasPrediction: true };
+    render(
+      <IncidentDetailPanel
+        incident={incident}
+        detail={{ freshness: { lastDetectionAt: '2026-10-04T20:33:00.000Z', perimeterMappedAt: null, nextPasses: [] } }}
+        activeTab="prediction"
+        setActiveTab={() => {}}
+        runningPrediction={false}
+        onRunPrediction={onRunPrediction}
+        newDetectionsSinceForecast
+        onClose={() => {}}
+      />
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: 'Re-run' }));
+
+    expect(onRunPrediction).toHaveBeenCalledWith(incident);
+  });
+});
+

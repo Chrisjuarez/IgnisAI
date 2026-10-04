@@ -1,6 +1,6 @@
 import React from 'react';
-import { render, screen } from '@testing-library/react';
-import DataFreshness from '../DataFreshness';
+import { render, screen, fireEvent } from '@testing-library/react';
+import DataFreshness, { hasNewDetectionsSince } from '../DataFreshness';
 
 const NOW = Date.parse('2026-10-04T20:54:00Z');
 
@@ -39,3 +39,43 @@ describe('DataFreshness', () => {
     expect(container).toBeEmptyDOMElement();
   });
 });
+
+describe('hasNewDetectionsSince', () => {
+  const at = (iso) => ({ lastDetectionAt: iso });
+
+  test.each([
+    ['a later detection', at('2026-10-04T09:13:00Z'), at('2026-10-04T20:33:00Z'), true],
+    ['the same detection the forecast had', at('2026-10-04T20:33:00Z'), at('2026-10-04T20:33:00Z'), false],
+    ['a first detection after a forecast that had none', at(null), at('2026-10-04T20:33:00Z'), true],
+    ['still nothing detected', at(null), at(null), false],
+    ['no forecast run', null, at('2026-10-04T20:33:00Z'), false],
+  ])('%s', (_label, basis, freshness, expected) => {
+    expect(hasNewDetectionsSince(basis, freshness)).toBe(expected);
+  });
+});
+
+describe('re-run notice', () => {
+  const freshness = { lastDetectionAt: '2026-10-04T20:33:00.000Z', perimeterMappedAt: null, nextPasses: [] };
+
+  test('offers a re-run when satellites have seen the fire since the forecast', () => {
+    const onRerunForecast = jest.fn();
+    render(<DataFreshness now={NOW} freshness={freshness} newDetectionsSinceForecast onRerunForecast={onRerunForecast} />);
+
+    expect(screen.getByRole('status')).toHaveTextContent('New satellite detection since your forecast');
+    fireEvent.click(screen.getByRole('button', { name: 'Re-run' }));
+    expect(onRerunForecast).toHaveBeenCalledTimes(1);
+  });
+
+  test('cannot be pressed twice while the forecast is running', () => {
+    render(<DataFreshness now={NOW} freshness={freshness} newDetectionsSinceForecast rerunning onRerunForecast={jest.fn()} />);
+
+    expect(screen.getByRole('button', { name: 'Running...' })).toBeDisabled();
+  });
+
+  test('stays quiet otherwise', () => {
+    render(<DataFreshness now={NOW} freshness={freshness} />);
+
+    expect(screen.queryByRole('status')).not.toBeInTheDocument();
+  });
+});
+
