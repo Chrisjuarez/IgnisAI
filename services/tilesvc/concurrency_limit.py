@@ -4,7 +4,9 @@ A prediction holds about 150 MB above idle while it builds inputs, runs the
 rollout and draws the bands. On a 512 MB instance three at once exceed the
 limit, and the restart drops every request in flight with it. Queueing the
 excess instead keeps the peak at what one prediction needs; a queued request
-holds nothing but its connection.
+holds nothing but its connection. It is also faster: the work is CPU-bound, so
+running predictions side by side finishes them all at about the same late time,
+while a queue hands the first one back as soon as it is done.
 
 Plain ASGI rather than an HTTP middleware so the slot is held until the
 response has been sent, not just until the handler returns.

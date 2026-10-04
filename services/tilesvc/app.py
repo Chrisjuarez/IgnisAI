@@ -53,10 +53,11 @@ ConvLSTMUNet, RUNTIME_ARCH_VERSION, MODEL_MODULE, append_derived_features, DERIV
 
 app = FastAPI(title="Ignis Tilesvc", version="1.0")
 
-# Routes that build model inputs or run the rollout. They run one at a time on
-# the 512 MB instance - see concurrency_limit. Raise PREDICTION_CONCURRENCY only
-# on an instance with memory for more than one prediction. Added before the
-# metrics middleware so request latency includes time spent waiting.
+# Routes that build model inputs or run the rollout. They run one at a time -
+# see concurrency_limit. A prediction is CPU-bound, so on a one-CPU instance
+# running them side by side only splits the CPU: three at once averaged 37 s
+# each against 24 s queued. Raise PREDICTION_CONCURRENCY only with more CPUs.
+# Added before the metrics middleware so latency includes time spent waiting.
 PREDICTION_ROUTE_PREFIXES = ("/predict", "/spread_bands", "/site_exposure", "/input_audit")
 app.add_middleware(
     ConcurrencyLimit,
