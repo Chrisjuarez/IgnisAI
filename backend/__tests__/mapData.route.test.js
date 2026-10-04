@@ -218,14 +218,20 @@ describe('GET /api/map/bootstrap', () => {
 
     it('returns only the incident\'s own perimeters on the detail route', async () => {
       const base = axios.get.getMockImplementation();
-      const perimeter = (name) => ({
+      // Each perimeter where its fire actually is. Perimeters are also matched by
+      // location now, so three sharing one polygon would all sit on the incident.
+      const perimeter = (name, [lon, lat]) => ({
         type: 'Feature',
-        geometry: { type: 'Polygon', coordinates: [[[-118.6, 34], [-118.5, 34], [-118.5, 34.1], [-118.6, 34.1], [-118.6, 34]]] },
+        geometry: { type: 'Polygon', coordinates: [[[lon - 0.05, lat - 0.05], [lon + 0.05, lat - 0.05], [lon + 0.05, lat + 0.05], [lon - 0.05, lat + 0.05], [lon - 0.05, lat - 0.05]]] },
         properties: { poly_IncidentName: name },
       });
       axios.get.mockImplementation((url, config) => (
         String(url).includes('WFIGS_Interagency_Perimeters_Current')
-          ? Promise.resolve({ data: collection([perimeter('Palisades Fire'), perimeter('Bouquet'), perimeter('Eaton')]) })
+          ? Promise.resolve({ data: collection([
+            perimeter('Palisades Fire', [-118.55, 34.05]),
+            perimeter('Bouquet', [-118.40, 34.56]),
+            perimeter('Eaton', [-118.10, 34.19]),
+          ]) })
           : base(url, config)
       ));
 
@@ -239,6 +245,86 @@ describe('GET /api/map/bootstrap', () => {
       expect(res.body.perimeters.features.map(f => f.properties.poly_IncidentName)).toEqual(['Palisades Fire']);
       expect(res.body.incident).toMatchObject({ name: 'Palisades Fire', hasPerimeter: true });
     });
+  });
+});
+
+describe('matching perimeters to incidents', () => {
+  const { annotateIncidents } = require('../routes/mapData')._private;
+  const DISCOVERED = '2026-10-03T21:16:00.000Z';
+  const FLIGHT_2109 = Date.parse('2026-10-04T04:09:00Z');
+
+  // Bouquet, as WFIGS reported it after its size was overwritten.
+  const bouquet = (over = {}) => ({
+    id: 'wfigs:bouquet', name: 'BOUQUET', lat: 34.561835, lon: -118.40183,
+    acres: 0.1, createdAt: DISCOVERED, updatedAt: '2026-10-04T03:30:00.000Z', sourceNames: ['WFIGS', 'NIFC'],
+    ...over,
+  });
+  // A square whose nearest edge is `gapM` metres west of the incident.
+  const square = (gapM, props) => {
+    const east = -118.40183 - gapM / (111320 * Math.cos((34.561835 * Math.PI) / 180));
+    return {
+      type: 'Feature',
+      geometry: { type: 'Polygon', coordinates: [[[east - 0.02, 34.55], [east, 34.55], [east, 34.57], [east - 0.02, 34.57], [east - 0.02, 34.55]]] },
+      properties: { source: 'FIRIS', mission: 'CA-ANF-BOQUET-N50X', incident_name: null, ...props },
+    };
+  };
+  const annotate = (incident, features) => annotateIncidents([incident], collection(features), [])[0];
+
+  it('links a nameless perimeter mapped just outside the reported origin', () => {
+    // The Bouquet case: no incident name on the perimeter, a misspelled mission
+    // code, and the origin 112 m outside the burned area.
+    const result = annotate(bouquet(), [square(112, { area_acres: 1048.26, poly_DateCurrent: FLIGHT_2109 })]);
+
+    expect(result.hasPerimeter).toBe(true);
+    expect(result.acres).toBe(1048);
+    expect(result.reportedAcres).toBe(0.1);
+    expect(result.acresSource).toEqual({ kind: 'perimeter', provider: 'FIRIS', asOf: '2026-10-04T04:09:00.000Z' });
+  });
+
+  it('does not reach past the match radius', () => {
+    const result = annotate(bouquet(), [square(4700, { area_acres: 5000, poly_DateCurrent: FLIGHT_2109 })]);
+    expect(result.hasPerimeter).toBe(false);
+    expect(result.acres).toBe(0.1);
+    expect(result.acresSource.kind).toBe('reported');
+  });
+
+  it('ignores a perimeter mapped before the fire existed', () => {
+    // An earlier fire's perimeter on the same hillside must not lend a new
+    // incident its acreage.
+    const result = annotate(bouquet(), [square(50, { area_acres: 9000, poly_DateCurrent: Date.parse('2026-08-20T00:00:00Z') })]);
+    expect(result.hasPerimeter).toBe(false);
+    expect(result.acres).toBe(0.1);
+  });
+
+  it('takes the newest measurement when several perimeters match', () => {
+    const result = annotate(bouquet(), [
+      square(112, { source: 'USFS', area_acres: 709.7, poly_DateCurrent: Date.parse('2026-10-03T23:49:00Z') }),
+      square(112, { area_acres: 1048.26, poly_DateCurrent: FLIGHT_2109 }),
+      square(112, { source: 'USFS', area_acres: 842.8, poly_DateCurrent: Date.parse('2026-10-04T00:27:00Z') }),
+    ]);
+    expect(result.acres).toBe(1048);
+    expect(result.acresSource.provider).toBe('FIRIS');
+  });
+
+  it('keeps a reported size that is already larger than the measurement', () => {
+    // Reported sizes include estimates beyond the last flight; a smaller,
+    // older perimeter must not drag a correct figure down.
+    const result = annotate(bouquet({ acres: 1500 }), [square(112, { area_acres: 1048.26, poly_DateCurrent: FLIGHT_2109 })]);
+    expect(result.acres).toBe(1500);
+    expect(result.acresSource.kind).toBe('reported');
+    expect(result.hasPerimeter).toBe(true);
+  });
+
+  it('still links a named perimeter too far away to locate, without borrowing its acreage', () => {
+    const named = square(30000, { source: undefined, poly_IncidentName: 'Bouquet', poly_GISAcres: 50000 });
+    const result = annotate(bouquet(), [named]);
+    expect(result.hasPerimeter).toBe(true);
+    expect(result.acres).toBe(0.1);
+  });
+
+  it('rounds measured acreage the way the panel displays it', () => {
+    const small = annotate(bouquet({ acres: null }), [square(0, { area_acres: 42.37, poly_DateCurrent: FLIGHT_2109 })]);
+    expect(small.acres).toBe(42.4);
   });
 });
 

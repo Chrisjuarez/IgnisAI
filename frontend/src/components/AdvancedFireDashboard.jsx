@@ -37,6 +37,18 @@ function formatCount(value) {
   return Number.isFinite(n) ? n.toLocaleString() : '-';
 }
 
+// Where the acreage came from, when it is not the official feed's own number.
+// Shown only then: a reported size needs no footnote, but a figure that
+// disagrees with WFIGS has to say why it should be believed instead.
+function acreageSource(incident) {
+  const source = incident?.acresSource;
+  if (source?.kind !== 'perimeter') return null;
+  const when = source.asOf
+    ? new Date(source.asOf).toLocaleString([], { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' })
+    : null;
+  return [`${source.provider || 'Mapped'} perimeter`, when].filter(Boolean).join(' · ');
+}
+
 function formatAcres(value) {
   const n = Number(value);
   if (!Number.isFinite(n)) return '-';
@@ -276,7 +288,14 @@ function IncidentDetailPanel({
         <button className="icon-btn" type="button" onClick={onClose} aria-label="Close detail">x</button>
       </div>
       <div className="incident-stats">
-        <div><span>Acres</span><strong>{formatCount(incident.acres)}</strong></div>
+        <div title={incident.reportedAcres != null && incident.acresSource?.kind === 'perimeter'
+          ? `WFIGS reports ${formatCount(incident.reportedAcres)} acres`
+          : undefined}
+        >
+          <span>Acres</span>
+          <strong>{formatCount(incident.acres)}</strong>
+          {acreageSource(incident) && <em className="incident-stat-source">{acreageSource(incident)}</em>}
+        </div>
         <div><span>Containment</span><strong>{incident.containmentPct != null ? `${incident.containmentPct}%` : '-'}</strong></div>
       </div>
       <div className="detail-tabs">
@@ -691,4 +710,5 @@ const AdvancedFireDashboard = () => {
   );
 };
 
+export { IncidentDetailPanel };
 export default AdvancedFireDashboard;
