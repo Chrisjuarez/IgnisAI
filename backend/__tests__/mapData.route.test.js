@@ -126,80 +126,119 @@ describe('GET /api/map/bootstrap', () => {
       alerts: { ok: true },
     });
   });
-});
 
-describe('evacuation zones on the bootstrap', () => {
-  const { normalizeEvacuationZone, shortZoneId } = require('../routes/mapData')._private;
+  describe('evacuation zones on the bootstrap', () => {
+    const { normalizeEvacuationZone, shortZoneId } = require('../routes/mapData')._private;
 
-  it('carries normalised Orders and Warnings and reports the layer healthy', async () => {
-    const res = await request(app)
-      .get('/api/map/bootstrap')
-      .query({ bbox: '-118.6,34.4,-118.2,34.7' })
-      .expect(200);
+    it('carries normalised Orders and Warnings and reports the layer healthy', async () => {
+      const res = await request(app)
+        .get('/api/map/bootstrap')
+        .query({ bbox: '-118.6,34.4,-118.2,34.7' })
+        .expect(200);
 
-    expect(res.body.evacuations.type).toBe('FeatureCollection');
-    expect(res.body.evacuations.features.map(f => f.properties)).toEqual([
-      expect.objectContaining({ zone_id: 'LAC-E018', status: 'order', status_label: 'Order' }),
-      expect.objectContaining({ zone_id: 'LAC-E031-B', status: 'warning', status_label: 'Warning' }),
-    ]);
-    expect(res.body.layerStatus.evacuations).toMatchObject({ ok: true, count: 2, partial: false });
+      expect(res.body.evacuations.type).toBe('FeatureCollection');
+      expect(res.body.evacuations.features.map(f => f.properties)).toEqual([
+        expect.objectContaining({ zone_id: 'LAC-E018', status: 'order', status_label: 'Order' }),
+        expect.objectContaining({ zone_id: 'LAC-E031-B', status: 'warning', status_label: 'Warning' }),
+      ]);
+      expect(res.body.layerStatus.evacuations).toMatchObject({ ok: true, count: 2, partial: false });
+    });
+
+    it('asks for generalised geometry so the payload stays small', async () => {
+      await request(app).get('/api/map/bootstrap').query({ bbox: '-118.61,34.4,-118.2,34.7' }).expect(200);
+
+      const call = axios.get.mock.calls.find(([url]) => String(url).includes('CA_EVACUATIONS_CalOESHosted_view'));
+      // Full-precision zones were 648 KB for one fire; generalised, 33 KB.
+      expect(call[1].params).toMatchObject({ maxAllowableOffset: expect.any(Number), geometryPrecision: 5 });
+      expect(call[1].params.outFields).not.toBe('*');
+    });
+
+    it('keeps every other layer when the evacuation feed is down', async () => {
+      const base = axios.get.getMockImplementation();
+      axios.get.mockImplementation((url, config) => (
+        String(url).includes('CA_EVACUATIONS_CalOESHosted_view')
+          ? Promise.reject(new Error('CalOES unavailable'))
+          : base(url, config)
+      ));
+
+      const res = await request(app)
+        .get('/api/map/bootstrap')
+        .query({ bbox: '-118.62,34.4,-118.2,34.7' })
+        .expect(200);
+
+      expect(res.body.evacuations.features).toEqual([]);
+      expect(res.body.layerStatus.evacuations).toMatchObject({ ok: false, error: 'CalOES unavailable' });
+      expect(res.body.layerStatus.incidents.ok).toBe(true);
+    });
+
+    it('flags a truncated page instead of silently dropping zones', async () => {
+      const base = axios.get.getMockImplementation();
+      axios.get.mockImplementation((url, config) => (
+        String(url).includes('CA_EVACUATIONS_CalOESHosted_view')
+          ? Promise.resolve({ data: { ...collection(EVACUATION_ZONES), properties: { exceededTransferLimit: true } } })
+          : base(url, config)
+      ));
+
+      const res = await request(app)
+        .get('/api/map/bootstrap')
+        .query({ bbox: '-118.63,34.4,-118.2,34.7' })
+        .expect(200);
+
+      expect(res.body.layerStatus.evacuations).toMatchObject({ ok: true, partial: true });
+    });
+
+    it.each([
+      ['US-CA-XLA-LAC-E018', 'LAC-E018'],
+      ['US-CA-XTU-PVL-E044', 'PVL-E044'],
+      ['US-CA-XMY-MRY-F015-C', 'MRY-F015-C'],
+      ['LOCAL-7', 'LOCAL-7'],
+    ])('shortens zone id %s to %s, as county maps print it', (raw, short) => {
+      expect(shortZoneId(raw)).toBe(short);
+    });
+
+    it('drops zones with no geometry or a status it does not recognise', () => {
+      expect(normalizeEvacuationZone({ geometry: null, properties: { STATUS: 'Evacuation Order' } })).toBeNull();
+      expect(normalizeEvacuationZone({ geometry: { type: 'Polygon', coordinates: ZONE_RING }, properties: { STATUS: 'Lifted' } })).toBeNull();
+    });
   });
 
-  it('asks for generalised geometry so the payload stays small', async () => {
-    await request(app).get('/api/map/bootstrap').query({ bbox: '-118.61,34.4,-118.2,34.7' }).expect(200);
+  describe('perimeter memory', () => {
+    it('asks for generalised perimeter geometry on the bootstrap', async () => {
+      // Full-precision perimeters for the western US were 50 MB of GeoJSON per
+      // cold bootstrap on a 512 MB instance, and a redeploy could OOM the first
+      // request. annotateIncidents reads only names; the polygons do not need
+      // full precision here.
+      await request(app).get('/api/map/bootstrap').query({ bbox: '-118.7,34.4,-118.2,34.7' }).expect(200);
 
-    const call = axios.get.mock.calls.find(([url]) => String(url).includes('CA_EVACUATIONS_CalOESHosted_view'));
-    // Full-precision zones were 648 KB for one fire; generalised, 33 KB.
-    expect(call[1].params).toMatchObject({ maxAllowableOffset: expect.any(Number), geometryPrecision: 5 });
-    expect(call[1].params.outFields).not.toBe('*');
-  });
+      ['WFIGS_Interagency_Perimeters_Current', 'CA_Perimeters_NIFC_FIRIS_public_view'].forEach((service) => {
+        const call = axios.get.mock.calls.find(([url]) => String(url).includes(service));
+        expect(call[1].params).toMatchObject({ maxAllowableOffset: expect.any(Number), geometryPrecision: 5 });
+      });
+    });
 
-  it('keeps every other layer when the evacuation feed is down', async () => {
-    const base = axios.get.getMockImplementation();
-    axios.get.mockImplementation((url, config) => (
-      String(url).includes('CA_EVACUATIONS_CalOESHosted_view')
-        ? Promise.reject(new Error('CalOES unavailable'))
-        : base(url, config)
-    ));
+    it('returns only the incident\'s own perimeters on the detail route', async () => {
+      const base = axios.get.getMockImplementation();
+      const perimeter = (name) => ({
+        type: 'Feature',
+        geometry: { type: 'Polygon', coordinates: [[[-118.6, 34], [-118.5, 34], [-118.5, 34.1], [-118.6, 34.1], [-118.6, 34]]] },
+        properties: { poly_IncidentName: name },
+      });
+      axios.get.mockImplementation((url, config) => (
+        String(url).includes('WFIGS_Interagency_Perimeters_Current')
+          ? Promise.resolve({ data: collection([perimeter('Palisades Fire'), perimeter('Bouquet'), perimeter('Eaton')]) })
+          : base(url, config)
+      ));
 
-    const res = await request(app)
-      .get('/api/map/bootstrap')
-      .query({ bbox: '-118.62,34.4,-118.2,34.7' })
-      .expect(200);
+      const res = await request(app)
+        .get(`/api/incidents/${encodeURIComponent('wfigs:abc-123')}`)
+        .query({ bbox: '-119.02,33,-117,35' })
+        .expect(200);
 
-    expect(res.body.evacuations.features).toEqual([]);
-    expect(res.body.layerStatus.evacuations).toMatchObject({ ok: false, error: 'CalOES unavailable' });
-    expect(res.body.layerStatus.incidents.ok).toBe(true);
-  });
-
-  it('flags a truncated page instead of silently dropping zones', async () => {
-    const base = axios.get.getMockImplementation();
-    axios.get.mockImplementation((url, config) => (
-      String(url).includes('CA_EVACUATIONS_CalOESHosted_view')
-        ? Promise.resolve({ data: { ...collection(EVACUATION_ZONES), properties: { exceededTransferLimit: true } } })
-        : base(url, config)
-    ));
-
-    const res = await request(app)
-      .get('/api/map/bootstrap')
-      .query({ bbox: '-118.63,34.4,-118.2,34.7' })
-      .expect(200);
-
-    expect(res.body.layerStatus.evacuations).toMatchObject({ ok: true, partial: true });
-  });
-
-  it.each([
-    ['US-CA-XLA-LAC-E018', 'LAC-E018'],
-    ['US-CA-XTU-PVL-E044', 'PVL-E044'],
-    ['US-CA-XMY-MRY-F015-C', 'MRY-F015-C'],
-    ['LOCAL-7', 'LOCAL-7'],
-  ])('shortens zone id %s to %s, as county maps print it', (raw, short) => {
-    expect(shortZoneId(raw)).toBe(short);
-  });
-
-  it('drops zones with no geometry or a status it does not recognise', () => {
-    expect(normalizeEvacuationZone({ geometry: null, properties: { STATUS: 'Evacuation Order' } })).toBeNull();
-    expect(normalizeEvacuationZone({ geometry: { type: 'Polygon', coordinates: ZONE_RING }, properties: { STATUS: 'Lifted' } })).toBeNull();
+      // It used to ship every perimeter in the bootstrap - 553 at full extent -
+      // on each incident click, for a field no client reads.
+      expect(res.body.perimeters.features.map(f => f.properties.poly_IncidentName)).toEqual(['Palisades Fire']);
+      expect(res.body.incident).toMatchObject({ name: 'Palisades Fire', hasPerimeter: true });
+    });
   });
 });
 
