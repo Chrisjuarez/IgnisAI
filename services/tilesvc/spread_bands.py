@@ -224,6 +224,7 @@ def spread_bands(
     to_wgs84,
     *,
     threshold: float = DEFAULT_BAND_THRESHOLD,
+    burned_area=None,
 ) -> Dict[str, Any]:
     """Nested day bands as GeoJSON, outermost (latest) day first.
 
@@ -231,6 +232,10 @@ def spread_bands(
     renderer can paint them at full opacity without colours stacking. Later
     days are still emitted first so draw order stays correct even for a
     renderer that ignores the sort key.
+
+    With `burned_area` (tile CRS), each band is what lies beyond it: the
+    official perimeter is the fire so far, and a band is only worth drawing
+    where it adds to that.
     """
     masks = cumulative_masks(rollout, threshold)
 
@@ -257,7 +262,10 @@ def spread_bands(
             bands.append(None)
             continue
         inner = cumulative[index - 1] if index else None
-        bands.append(outline if inner is None else _repair(outline.difference(inner)))
+        band = outline if inner is None else _repair(outline.difference(inner))
+        if band is not None and burned_area is not None:
+            band = _repair(band.difference(burned_area))
+        bands.append(band)
 
     features: List[Dict[str, Any]] = []
     for index in range(len(bands) - 1, -1, -1):
@@ -342,6 +350,7 @@ def spread_scene(
     ignition_lon: float,
     ignition_lat: float,
     threshold: float = DEFAULT_BAND_THRESHOLD,
+    burned_area=None,
 ) -> Dict[str, Any]:
     """The whole picture: where it started, what has burned, where it may go.
 
@@ -355,5 +364,5 @@ def spread_scene(
         "observed": (observed_polygons(observed, tile, to_wgs84)
                      if observed is not None
                      else {"type": "FeatureCollection", "features": []}),
-        "forecast": spread_bands(rollout, tile, to_wgs84, threshold=threshold),
+        "forecast": spread_bands(rollout, tile, to_wgs84, threshold=threshold, burned_area=burned_area),
     }

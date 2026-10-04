@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Optional, Tuple, Dict, Any, List
 
 import numpy as np
-from fastapi import FastAPI, Query, Request
+from fastapi import Body, FastAPI, Query, Request
 from fastapi.responses import Response, JSONResponse
 from scipy.ndimage import gaussian_filter
 from pyproj import Transformer
@@ -29,6 +29,7 @@ from .grid import (
 )
 from .dynamic_builder import DEFAULT_DYNAMIC_ORDER, build_dynamic_for_tile, fetch_weather_grids, weather_quality_status
 from .static_builder import CHANNEL_ORDER
+from .burned_area import burned_area_geometry, burned_cells
 from .cache_health import firms_snapshot_status, noaa_cycle_status
 from .concurrency_limit import ConcurrencyLimit
 from .wind_summary import wind_from_sequence, wind_vector_from_sequence
@@ -136,6 +137,7 @@ async def input_unavailable_handler(_request: Request, exc: InputUnavailable):
     )
 
 _TO_WGS84 = Transformer.from_crs("EPSG:5070", "EPSG:4326", always_xy=True)
+SQ_M_PER_ACRE = 4046.8564224
 
 def _get_torch_device() -> torch.device:
     d = os.getenv("TORCH_DEVICE", "cpu").lower().strip()
@@ -1384,7 +1386,14 @@ def _rollout_multistep_predictions(
     ref_time: Optional[dt.datetime],
     threshold: float,
     debug_sink: Optional[Dict[str, Any]] = None,
+    burned: Optional[np.ndarray] = None,
 ) -> Tuple[Tuple[float, float, float, float], Dict[str, Any], list]:
+    """Run the model forward `steps` days, feeding each day back in.
+
+    `burned` marks cells already inside the official perimeter. They cannot
+    burn again, so they get no new fire on any day - and because each day is
+    fed back, that also keeps a burned-out interior from seeding the next.
+    """
     dyn, stat, bounds, base_time, static_summary = _prepare_prediction_inputs_with_summary(
         lat,
         lon,
@@ -1409,6 +1418,8 @@ def _rollout_multistep_predictions(
     for index in range(normalized_steps):
         lead_hours = (index + 1) * int(step_hours)
         prob = _predict_probability_from_inputs(current_dyn, stat, log_label=f"Forecast step {index + 1}")
+        if burned is not None:
+            prob = np.where(burned, 0.0, prob).astype(np.float32)
         if crop_window is None:
             crop_window = _build_crop_window(prob.shape, bounds, lat, lon, crop_frac)
         rollout.append({
@@ -1912,7 +1923,7 @@ def predict_raster_json_raw(lat: float = Query(...), lon: float = Query(...), Ts
 SUPPORTED_FORECAST_MODELS = frozenset({"ignis", "downwind"})
 
 
-@app.get("/predict_multistep")
+@app.api_route("/predict_multistep", methods=["GET", "POST"])
 def predict_multistep(
     lat: float = Query(...),
     lon: float = Query(...),
@@ -1943,6 +1954,15 @@ def predict_multistep(
             "Multiple modes may be combined, e.g. debug=solid,dump."
         ),
     ),
+    burned_area: Optional[Dict[str, Any]] = Body(
+        None,
+        embed=True,
+        description=(
+            "The fire's official burned area as WGS84 GeoJSON, sent by POST. "
+            "Cells inside it get no new fire, and the arrival bands show "
+            "growth beyond it. Without it the forecast is unchanged."
+        ),
+    ),
 ):
     ref_time = _parse_date_param(date)
     threshold = float(thr) if thr is not None else MODEL_THRESHOLD
@@ -1960,6 +1980,8 @@ def predict_multistep(
         )
     baseline_only = resolved_model == "downwind"
     debug_sink: Dict[str, Any] = {}
+    burned_geometry = burned_area_geometry(burned_area)
+    burned = burned_cells(burned_geometry, lonlat_to_tile(lon, lat)) if burned_geometry is not None else None
 
     if debug_solid or baseline_only:
         # Neither of these runs the network, but both need everything that
@@ -2005,6 +2027,10 @@ def predict_multistep(
                 step_hours=step_hours,
                 ignition_rc=(int(SIZE // 2), int(SIZE // 2)),
             )
+            if burned is not None:
+                # Same rule as the model gets, so the two stay comparable.
+                rollout = [{**step, "prob": np.where(burned, 0.0, step["prob"]).astype(np.float32)}
+                           for step in rollout]
     else:
         bounds, crop_window, rollout = _rollout_multistep_predictions(
             lat,
@@ -2017,6 +2043,7 @@ def predict_multistep(
             ref_time=ref_time,
             threshold=threshold,
             debug_sink=debug_sink,
+            burned=burned,
         )
 
     payload_steps = []
@@ -2173,7 +2200,15 @@ def predict_multistep(
             _TO_WGS84.transform,
             ignition_lon=lon,
             ignition_lat=lat,
+            burned_area=burned_geometry,
         ),
+        # Whether the official burned area shaped this forecast, so a client
+        # can say the bands are growth beyond the perimeter only when they are.
+        "burned_area": {
+            "applied": burned_geometry is not None,
+            "acres": round(burned_geometry.area / SQ_M_PER_ACRE, 1) if burned_geometry is not None else None,
+            "cells": int(burned.sum()) if burned is not None else 0,
+        },
         # Which forecaster produced these steps. An unrecognised ?model= value
         # used to fall through to the learned model silently, so a baseline
         # comparison could report two runs of the same thing and look like the

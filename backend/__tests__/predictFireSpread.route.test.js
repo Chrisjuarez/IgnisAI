@@ -1,4 +1,4 @@
-jest.mock('axios', () => ({ get: jest.fn() }));
+jest.mock('axios', () => ({ get: jest.fn(), post: jest.fn() }));
 
 const request = require('supertest');
 const axios = require('axios');
@@ -119,7 +119,7 @@ describe('GET /api/predict-fire-spread routes', () => {
   });
 
   it('forwards multistep params and sets ignition for dated requests', async () => {
-    axios.get.mockResolvedValue({
+    axios.post.mockResolvedValue({
       data: {
         bounds: [-118.6, 34.0, -118.1, 34.4],
         coordinates: [
@@ -186,8 +186,9 @@ describe('GET /api/predict-fire-spread routes', () => {
         })
       ]
     });
-    expect(axios.get).toHaveBeenCalledWith(
+    expect(axios.post).toHaveBeenCalledWith(
       expect.stringContaining('/predict_multistep'),
+      { burned_area: null },
       expect.objectContaining({
         params: expect.objectContaining({
           lat: '34.05',
@@ -230,7 +231,7 @@ describe('GET /api/predict-fire-spread routes', () => {
       model: 'learned',
       field_added_next_quarter: { anything: true },
     };
-    axios.get.mockResolvedValue({ data: forecast });
+    axios.post.mockResolvedValue({ data: forecast });
 
     const res = await request(app)
       .get('/api/predict-fire-spread/multistep')
@@ -241,7 +242,7 @@ describe('GET /api/predict-fire-spread routes', () => {
   });
 
   it('still refuses a forecast without bounds or steps', async () => {
-    axios.get.mockResolvedValue({ data: { scene: {}, steps: [] } });
+    axios.post.mockResolvedValue({ data: { scene: {}, steps: [] } });
 
     const res = await request(app)
       .get('/api/predict-fire-spread/multistep')
@@ -252,7 +253,7 @@ describe('GET /api/predict-fire-spread routes', () => {
   });
 
   it('always sends ignition=true on live multistep requests (no date)', async () => {
-    axios.get.mockResolvedValue({
+    axios.post.mockResolvedValue({
       data: {
         bounds: [-118.6, 34.0, -118.1, 34.4],
         threshold: 0.85,
@@ -268,8 +269,9 @@ describe('GET /api/predict-fire-spread routes', () => {
       .query({ lat: 34.05, lon: -118.25 })
       .expect(200);
 
-    expect(axios.get).toHaveBeenCalledWith(
+    expect(axios.post).toHaveBeenCalledWith(
       expect.stringContaining('/predict_multistep'),
+      { burned_area: null },
       expect.objectContaining({
         params: expect.objectContaining({
           lat: '34.05',
@@ -279,12 +281,12 @@ describe('GET /api/predict-fire-spread routes', () => {
       })
     );
     // Dateless request should not forward a date param.
-    expect(axios.get.mock.calls[0][1].params).not.toHaveProperty('date');
-    expect(axios.get.mock.calls[0][1].params).not.toHaveProperty('thr');
+    expect(axios.post.mock.calls[0][2].params).not.toHaveProperty('date');
+    expect(axios.post.mock.calls[0][2].params).not.toHaveProperty('thr');
   });
 
   it('honors explicit ignition=false opt-out for multistep requests', async () => {
-    axios.get.mockResolvedValue({
+    axios.post.mockResolvedValue({
       data: {
         bounds: [-118.6, 34.0, -118.1, 34.4],
         threshold: 0.85,
@@ -300,7 +302,7 @@ describe('GET /api/predict-fire-spread routes', () => {
       .query({ lat: 34.05, lon: -118.25, ignition: 'false' })
       .expect(200);
 
-    expect(axios.get.mock.calls[0][1].params).toMatchObject({ ignition: false });
+    expect(axios.post.mock.calls[0][2].params).toMatchObject({ ignition: false });
   });
 
   it('sends ignition=true on live raster requests (no date)', async () => {
@@ -328,7 +330,7 @@ describe('GET /api/predict-fire-spread routes', () => {
   });
 
   it('propagates multistep tilesvc failures as structured 5xx json', async () => {
-    axios.get.mockRejectedValue(new Error('tilesvc down'));
+    axios.post.mockRejectedValue(new Error('tilesvc down'));
 
     const res = await request(app)
       .get('/api/predict-fire-spread/multistep')
@@ -338,6 +340,76 @@ describe('GET /api/predict-fire-spread routes', () => {
     expect(res.body).toMatchObject({
       error: 'tilesvc_multistep_failed',
       detail: expect.any(String),
+    });
+  });
+
+  describe('incident burned area', () => {
+    const mapData = require('../routes/mapData');
+    const perimeter = {
+      type: 'FeatureCollection',
+      features: [{ type: 'Feature', properties: {}, geometry: {
+        type: 'Polygon', coordinates: [[[-118.45, 34.55], [-118.4, 34.55], [-118.4, 34.58], [-118.45, 34.55]]],
+      } }],
+    };
+    const forecast = { bounds: [-118.6, 34.0, -118.1, 34.4], steps: [], burned_area: { applied: true } };
+
+    afterEach(() => jest.restoreAllMocks());
+
+    it('sends the incident\'s mapped perimeter to tilesvc as its burned area', async () => {
+      const lookup = jest.spyOn(mapData, 'burnedAreaForIncident').mockResolvedValue(perimeter);
+      axios.post.mockResolvedValue({ data: forecast });
+
+      await request(app)
+        .get('/api/predict-fire-spread/multistep')
+        .query({ lat: 34.56, lon: -118.4, incident_id: 'IRWIN-1' })
+        .expect(200);
+
+      expect(lookup).toHaveBeenCalledWith('IRWIN-1');
+      expect(axios.post).toHaveBeenCalledWith(
+        expect.stringContaining('/predict_multistep'),
+        { burned_area: perimeter },
+        expect.objectContaining({ params: expect.not.objectContaining({ incident_id: expect.anything() }) }),
+      );
+    });
+
+    it('still forecasts when the perimeter lookup fails', async () => {
+      jest.spyOn(mapData, 'burnedAreaForIncident').mockRejectedValue(new Error('ArcGIS down'));
+      jest.spyOn(console, 'warn').mockImplementation(() => {});
+      axios.post.mockResolvedValue({ data: forecast });
+
+      await request(app)
+        .get('/api/predict-fire-spread/multistep')
+        .query({ lat: 34.56, lon: -118.4, incident_id: 'IRWIN-1' })
+        .expect(200);
+
+      expect(axios.post.mock.calls[0][1]).toEqual({ burned_area: null });
+    });
+
+    it('cannot forge log lines through the incident id', async () => {
+      jest.spyOn(mapData, 'burnedAreaForIncident').mockRejectedValue(new Error('ArcGIS down'));
+      const warn = jest.spyOn(console, 'warn').mockImplementation(() => {});
+      axios.post.mockResolvedValue({ data: forecast });
+
+      await request(app)
+        .get('/api/predict-fire-spread/multistep')
+        .query({ lat: 34.56, lon: -118.4, incident_id: 'IRWIN-1\r\n[admin] login ok' })
+        .expect(200);
+
+      const [line] = warn.mock.calls.find(([message]) => message.startsWith('burned area lookup failed'));
+      expect(line).not.toMatch(/[\r\n]/);
+      expect(line).toContain('IRWIN-1[admin] login ok');
+    });
+
+    it('does not look anything up for a forecast that is not tied to an incident', async () => {
+      const lookup = jest.spyOn(mapData, 'burnedAreaForIncident');
+      axios.post.mockResolvedValue({ data: forecast });
+
+      await request(app)
+        .get('/api/predict-fire-spread/multistep')
+        .query({ lat: 34.56, lon: -118.4 })
+        .expect(200);
+
+      expect(lookup).not.toHaveBeenCalled();
     });
   });
 
@@ -552,7 +624,7 @@ describe('GET /api/predict-fire-spread routes', () => {
   });
 
   it('returns 502 when multistep response is missing steps array', async () => {
-    axios.get.mockResolvedValue({
+    axios.post.mockResolvedValue({
       data: { bounds: [-118.6, 34.0, -118.1, 34.4] }, // no steps array
     });
 
