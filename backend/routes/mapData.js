@@ -41,6 +41,16 @@ const CA_EVACUATIONS_URL =
 // 648 KB to 33 KB with no visible difference.
 const EVACUATION_GEOMETRY_TOLERANCE_DEG = 0.0002;
 
+// Perimeters are fetched here for their attributes - annotateIncidents reads
+// the incident name and nothing else - but the polygons arrived at full
+// precision anyway: 50 MB of GeoJSON for the western US, parsed into objects
+// several times that size on a 512 MB instance, then discarded before the
+// response. A cold bootstrap could not survive it; every redeploy was a coin
+// flip on whether the first request got the process killed. Generalising to
+// about 50 m keeps every attribute and takes the download to 2.6 MB. The map
+// draws perimeters from /fire-perimeters at full resolution, not from here.
+const PERIMETER_GEOMETRY_TOLERANCE_DEG = 0.0005;
+
 const EVACUATION_STATUS = {
   'evacuation order': 'order',
   'evacuation warning': 'warning',
@@ -231,6 +241,24 @@ function perimeterIncidentName(feature) {
   ]);
 }
 
+function perimeterNameMatches(perimeterName, incidentName) {
+  return Boolean(perimeterName && incidentName && (
+    perimeterName === incidentName ||
+    perimeterName.includes(incidentName) ||
+    incidentName.includes(perimeterName)
+  ));
+}
+
+function perimetersForIncident(perimeters, incident) {
+  const nameKey = normalizeName(incident?.name);
+  return {
+    type: 'FeatureCollection',
+    features: (perimeters?.features || []).filter((feature) => (
+      perimeterNameMatches(normalizeName(perimeterIncidentName(feature)), nameKey)
+    )),
+  };
+}
+
 function annotateIncidents(incidents, perimeters, hotspots) {
   const perimeterNames = new Set(
     (perimeters?.features || [])
@@ -242,7 +270,7 @@ function annotateIncidents(incidents, perimeters, hotspots) {
   return incidents.map((incident) => {
     const nameKey = normalizeName(incident.name);
     const hasPerimeter = perimeterNames.has(nameKey) ||
-      Array.from(perimeterNames).some((candidate) => candidate && nameKey && (candidate.includes(nameKey) || nameKey.includes(candidate)));
+      Array.from(perimeterNames).some((candidate) => perimeterNameMatches(candidate, nameKey));
     const hasHotspots = hotspots.some((fire) => {
       const dLat = Math.abs(Number(fire.latitude) - incident.lat);
       const dLon = Math.abs(Number(fire.longitude) - incident.lon);
@@ -273,9 +301,14 @@ async function fetchIncidents(bbox) {
 }
 
 async function fetchPerimeters(bbox) {
+  const params = {
+    ...arcgisParams({ bbox, recordCount: 1000 }),
+    maxAllowableOffset: PERIMETER_GEOMETRY_TOLERANCE_DEG,
+    geometryPrecision: 5,
+  };
   const [wfigs, firis] = await Promise.allSettled([
-    fetchArcgisGeoJson(WFIGS_PERIMETERS_URL, arcgisParams({ bbox, recordCount: 1000 })),
-    fetchArcgisGeoJson(FIRIS_PUBLIC_URL, arcgisParams({ bbox, recordCount: 1000 })),
+    fetchArcgisGeoJson(WFIGS_PERIMETERS_URL, params),
+    fetchArcgisGeoJson(FIRIS_PUBLIC_URL, params),
   ]);
   const features = [];
   for (const result of [wfigs, firis]) {
@@ -594,7 +627,11 @@ router.get('/incidents/:id', async (req, res) => {
   const alerts = payload.alerts.slice(0, 8);
   return res.json({
     incident,
-    perimeters: payload.perimeters,
+    // This sent every perimeter in the bootstrap - 553 across the western US,
+    // re-serialised on each incident click - for a field no client reads. The
+    // incident's own perimeters, matched the same way annotateIncidents
+    // matches them, are what the field was for.
+    perimeters: perimetersForIncident(payload.perimeters, incident),
     recentHotspots: payload.hotspots.filter((fire) => {
       const dLat = Math.abs(Number(fire.latitude) - incident.lat);
       const dLon = Math.abs(Number(fire.longitude) - incident.lon);
@@ -648,6 +685,7 @@ router.get('/layers', async (_req, res) => {
 
 module.exports = router;
 module.exports._private = {
+  perimetersForIncident,
   normalizeEvacuationZone,
   shortZoneId,
   parseBbox,
