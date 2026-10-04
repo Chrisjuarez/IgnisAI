@@ -30,6 +30,7 @@ from .grid import (
 from .dynamic_builder import DEFAULT_DYNAMIC_ORDER, build_dynamic_for_tile, fetch_weather_grids, weather_quality_status
 from .static_builder import CHANNEL_ORDER
 from .cache_health import firms_snapshot_status, noaa_cycle_status
+from .concurrency_limit import ConcurrencyLimit
 from .wind_summary import wind_from_sequence, wind_vector_from_sequence
 from .validation_reports import list_reports, report_dir
 from .baseline_spread import baseline_rollout
@@ -51,6 +52,17 @@ ConvLSTMUNet, RUNTIME_ARCH_VERSION, MODEL_MODULE, append_derived_features, DERIV
 
 
 app = FastAPI(title="Ignis Tilesvc", version="1.0")
+
+# Routes that build model inputs or run the rollout. They run one at a time on
+# the 512 MB instance - see concurrency_limit. Raise PREDICTION_CONCURRENCY only
+# on an instance with memory for more than one prediction. Added before the
+# metrics middleware so request latency includes time spent waiting.
+PREDICTION_ROUTE_PREFIXES = ("/predict", "/spread_bands", "/site_exposure", "/input_audit")
+app.add_middleware(
+    ConcurrencyLimit,
+    path_prefixes=PREDICTION_ROUTE_PREFIXES,
+    limit=int(os.getenv("PREDICTION_CONCURRENCY", "1")),
+)
 
 
 _METRIC_COUNTERS: Dict[str, float] = {}
