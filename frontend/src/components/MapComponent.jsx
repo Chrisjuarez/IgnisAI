@@ -23,9 +23,12 @@ import {
   removePredictionOverlays,
   removePredictionRaster,
   removePredictionScene,
-  renderPredictionRasterFrame
+  renderPredictionRasterFrame,
+  setPredictionRasterOpacity
 } from '../utils/addPredictionOverlay';
 import { forgetBasemapFocus, setBasemapFocus } from '../utils/basemapFocus';
+import { HOTSPOT_AGE_COLOR, hotspotAgeHours } from '../utils/hotspotAge';
+import ForecastMapLayers from './ForecastMapLayers';
 
 // ---- Tokens / Base URLs -----------------------------------------------------
 const MAPBOX_TOKEN =
@@ -58,17 +61,46 @@ const FORECAST_RENDER_TIMEOUT_MS = 15_000;
 // default which may drift if re-tuned.
 const DEFAULT_STEP_HOURS = 24;
 
-const FOOTPRINT_FILL_COLOR = [
-  'match', ['get', 'brightnessCat'],
-  'Extreme', '#d34823',
-  'Severe',  '#ff6b35',
-  'Moderate', '#ff9b45',
-  '#ffd977'
-];
 const SPREAD_BAND_FILL_OPACITY = 0.62;
 const SPREAD_OBSERVED_FILL_OPACITY = 0.55;
 const SPREAD_BAND_LINE_WIDTH = 1.4;
 const SPREAD_BAND_CASING_COLOR = '#2b1600';
+
+// What the probability heatmap can show. Only the heat view draws these, so
+// they live with the model details rather than beside the view switch, where
+// they used to sit doing nothing whenever the bands were up.
+const HEAT_LAYER_CHOICES = [
+  {
+    id: 'new_burn',
+    label: 'Chance of new fire',
+    hint: 'How likely each spot that is not burning yet is to catch fire by this day.',
+  },
+  {
+    id: 'next_fire',
+    label: 'Chance of any fire',
+    hint: 'Includes spots already burning, so the starting fire shows as certain.',
+  },
+  {
+    id: 'hybrid',
+    label: 'Physics hybrid',
+    hint: 'Rank-mean of the physics engines and the model. A ranking, not a probability.',
+  },
+];
+
+// Official context drawn over the forecast rather than under it: the perimeter
+// line is what a forecast is read against, and a zone name buried under a band
+// is no use to anyone deciding whether to leave.
+const CONTEXT_OVER_FORECAST = ['fire-perimeters-outline', 'evacuation-zones-label'];
+
+function raiseLayers(map, layerIds) {
+  layerIds.forEach((layerId) => {
+    try {
+      if (map?.getLayer?.(layerId)) map.moveLayer(layerId);
+    } catch (_) {
+      // A style reload can race this; the next paint raises them again.
+    }
+  });
+}
 
 // Evacuation zones, coloured the way county and CAL FIRE maps colour them:
 // Orders red, Warnings amber. Translucent, because a zone is context for the
@@ -254,6 +286,7 @@ function normalizedFootprintFeature(feature) {
       confidencePct,
       confidence: confidencePct,
       predictable: props.predictable === true || props.predictable === 'true',
+      ageHours: hotspotAgeHours(props.timestamp),
     },
   };
 }
@@ -292,6 +325,7 @@ function normalizedFireProperties(fire) {
     confidence: pct,
     predictable,
     timestamp: fire.timestamp,
+    ageHours: hotspotAgeHours(fire.timestamp),
     brightness: fire.brightness,
     frp: fire.frp,
     scan: fire.scan,
@@ -498,6 +532,7 @@ const MapComponent = forwardRef(({
   alerts = [],
   evacuations = NO_EVACUATIONS,
   layerVisibility = {},
+  onToggleLayer,
   selectedIncident = null,
   selectedAlert = null,
   onIncidentSelect,
@@ -531,8 +566,14 @@ const MapComponent = forwardRef(({
   const [forecastTitle, setForecastTitle] = useState('Ignis Forecast Timeline');
   const [isForecastLoading, setIsForecastLoading] = useState(false);
   const [forecastError, setForecastError] = useState(null);
-  const [observedLayersVisible, setObservedLayersVisibleState] = useState(true);
   const [forecastLayerMode, setForecastLayerMode] = useState('new_burn');
+  // How strongly the forecast is drawn. Lowered to read what lies beneath it -
+  // the perimeter, hotspots, zones - without switching the forecast off. Kept
+  // in a ref too, so a frame change can draw at the current strength without
+  // the opacity becoming a dependency that redraws every frame on each drag.
+  const [forecastOpacity, setForecastOpacity] = useState(1);
+  const forecastOpacityRef = useRef(1);
+  const predictionVisible = layerVisibility.prediction !== false;
   // 'bands' draws cumulative day-by-day arrival polygons; 'heat' keeps the
   // per-cell probability raster for reading confidence inside a single day.
   const [spreadView, setSpreadView] = useState('bands');
@@ -726,7 +767,13 @@ const MapComponent = forwardRef(({
         'ignis-pred-bounds-layer',
         'ignis-pred-vector-fill',
         'ignis-pred-vector-line',
+        'spread-bands-fill',
+        'spread-bands-casing',
+        'spread-bands-outline',
+        'spread-bands-label',
+        'spread-ignition-point',
       ],
+      forecastStart: ['spread-observed-fill', 'spread-observed-outline'],
       ndvi: [NDVI_LAYER_ID],
     };
     Object.entries(groups).forEach(([key, layerIds]) => {
@@ -755,25 +802,6 @@ const MapComponent = forwardRef(({
     paint.forEach(([layerId, property, value]) => {
       if (map.getLayer(layerId)) {
         try { map.setPaintProperty(layerId, property, value); } catch (_) {}
-      }
-    });
-  }
-
-  function setObservedLayersVisible(visible) {
-    const map = mapRef.current;
-    setObservedLayersVisibleState(Boolean(visible));
-    if (!map) return;
-    [
-      'observed-fire-cells-fill',
-      'observed-fire-cells-outline',
-      'wildfire-footprints-fill',
-      'wildfire-footprints-outline',
-      'wildfires-layer',
-      'fire-perimeters-fill',
-      'fire-perimeters-outline',
-    ].forEach(layerId => {
-      if (map.getLayer(layerId)) {
-        try { map.setLayoutProperty(layerId, 'visibility', visible ? 'visible' : 'none'); } catch (_) {}
       }
     });
   }
@@ -877,14 +905,17 @@ const MapComponent = forwardRef(({
   // Which day is "now" on the timeline. Bands up to it are solid, the band at
   // it is the front and draws heaviest, later ones stay as faint outlines so
   // the shape of the whole forecast is still legible without competing.
-  const emphasiseSpreadBands = useCallback((map, activeLeadHours) => {
+  const emphasiseSpreadBands = useCallback((map, activeLeadHours, opacity = 1) => {
     if (!map) return;
     const lead = ['coalesce', ['get', 'lead_hours'], ['*', ['coalesce', ['get', 'day'], 0], 24]];
     const reached = Number.isFinite(activeLeadHours) ? ['<=', lead, activeLeadHours] : true;
     const isFront = Number.isFinite(activeLeadHours) ? ['==', lead, activeLeadHours] : false;
 
+    // Opacity scales the fills only. The dated edges stay full strength, so a
+    // faded forecast still says where each day ends over whatever shows through.
     const paints = {
-      'spread-bands-fill': { 'fill-opacity': ['case', reached, SPREAD_BAND_FILL_OPACITY, 0] },
+      'spread-observed-fill': { 'fill-opacity': SPREAD_OBSERVED_FILL_OPACITY * opacity },
+      'spread-bands-fill': { 'fill-opacity': ['case', reached, SPREAD_BAND_FILL_OPACITY * opacity, 0] },
       'spread-bands-casing': {
         'line-width': ['case', isFront, SPREAD_BAND_LINE_WIDTH + 3.4, SPREAD_BAND_LINE_WIDTH + 2.0],
         'line-opacity': ['case', reached, 0.8, 0.2],
@@ -928,15 +959,11 @@ const MapComponent = forwardRef(({
     // over it, seed point on top.
     // Evacuation outlines and labels ride along: a zone boundary lost under
     // the heatmap is the one piece of context a person here would need.
-    ['spread-observed-fill', 'spread-observed-outline', 'evacuation-zones-outline',
-     'spread-bands-fill', 'spread-bands-casing', 'spread-bands-outline',
-     'spread-bands-label', 'evacuation-zones-label', 'spread-ignition-point'].forEach((layerId) => {
-      try {
-        if (map?.getLayer?.(layerId)) map.moveLayer(layerId);
-      } catch (_) {
-        // A style reload can race this; the next paint re-raises them.
-      }
-    });
+    raiseLayers(map, [
+      'spread-observed-fill', 'spread-observed-outline', 'evacuation-zones-outline',
+      'spread-bands-fill', 'spread-bands-casing', 'spread-bands-outline',
+      'spread-bands-label', ...CONTEXT_OVER_FORECAST, 'spread-ignition-point',
+    ]);
   }, []);
 
   const loadForecastTimeline = useCallback(async ({
@@ -1011,7 +1038,10 @@ const MapComponent = forwardRef(({
         coordinateCount: Array.isArray(firstFrame?.coordinates) ? firstFrame.coordinates.length : 0,
       });
       await withTimeout(
-        renderPredictionRasterFrame(mapRef.current, firstFrame, { layerMode: forecastLayerMode }),
+        renderPredictionRasterFrame(mapRef.current, firstFrame, {
+          layerMode: forecastLayerMode,
+          opacity: forecastOpacityRef.current,
+        }),
         FORECAST_RENDER_TIMEOUT_MS,
         `Forecast map render timed out after ${Math.round(FORECAST_RENDER_TIMEOUT_MS / 1000)}s`,
       );
@@ -1520,7 +1550,7 @@ const MapComponent = forwardRef(({
       type: 'fill',
       source: 'observed-fire-cells-source',
       paint: {
-        'fill-color': FOOTPRINT_FILL_COLOR,
+        'fill-color': HOTSPOT_AGE_COLOR,
         'fill-opacity': OBSERVED_CELL_FILL_OPACITY,
       }
     });
@@ -1671,7 +1701,7 @@ const MapComponent = forwardRef(({
       type: 'fill',
       source: 'wildfire-footprints-source',
       paint: {
-        'fill-color': FOOTPRINT_FILL_COLOR,
+        'fill-color': HOTSPOT_AGE_COLOR,
         'fill-opacity': FOOTPRINT_FILL_OPACITY,
       }
     });
@@ -1723,13 +1753,7 @@ const MapComponent = forwardRef(({
           'Moderate', 3.5,
           3
         ],
-        'circle-color': [
-          'match', ['get', 'brightnessCat'],
-          'Extreme', '#d94b21',
-          'Severe',  '#ff6b35',
-          'Moderate', '#ff9440',
-          '#ffc766'
-        ],
+        'circle-color': HOTSPOT_AGE_COLOR,
         'circle-opacity': POINT_CIRCLE_OPACITY,
         'circle-stroke-width': [
           'match', ['get', 'brightnessCat'],
@@ -2035,7 +2059,6 @@ const MapComponent = forwardRef(({
       updateSelectedIncidentSource();
       updateUserSource();
       setObservedLayerMode(forecastVisible ? 'forecast' : 'normal');
-      setObservedLayersVisible(observedLayersVisible);
       applyLayerVisibility();
       // The new style brought its own basemap paint, so the values captured
       // from the previous one describe layers that no longer exist. Drop them
@@ -2080,10 +2103,10 @@ const MapComponent = forwardRef(({
     if (!map || !frame) return;
     const bands = spreadView === 'bands' && Boolean(forecastScene?.forecast?.features?.length);
 
-    // Mute the satellite imagery only under the bands. The probability
-    // heatmap is a continuous field that reads fine over it, and dimming for
-    // that view would be a change nobody asked for.
-    setBasemapFocus(map, bands);
+    // Mute the satellite imagery only under visible bands. The probability
+    // heatmap is a continuous field that reads fine over it, and with the
+    // forecast switched off the imagery is what the user wants to see.
+    setBasemapFocus(map, bands && predictionVisible);
 
     if (bands) {
       // The scene layers created at map init are the single renderer for
@@ -2092,14 +2115,32 @@ const MapComponent = forwardRef(({
       // raster away and tell them which day is in front.
       removePredictionRaster(map);
       removePredictionScene(map);
-      emphasiseSpreadBands(map, frame.lead_hours);
+      emphasiseSpreadBands(map, frame.lead_hours, forecastOpacityRef.current);
       return;
     }
     removePredictionScene(map);
-    renderPredictionRasterFrame(map, frame, { layerMode: forecastLayerMode }).catch(err => {
-      console.error('Forecast frame render error:', err);
-    });
-  }, [spreadView, forecastScene, forecastLayerMode, emphasiseSpreadBands]);
+    renderPredictionRasterFrame(map, frame, {
+      layerMode: forecastLayerMode,
+      opacity: forecastOpacityRef.current,
+      visible: predictionVisible,
+    })
+      // Each frame lands on top of the stack, so the perimeter it is read
+      // against has to be lifted back over it every time.
+      .then(() => raiseLayers(map, CONTEXT_OVER_FORECAST))
+      .catch(err => {
+        console.error('Forecast frame render error:', err);
+      });
+  }, [spreadView, forecastScene, forecastLayerMode, predictionVisible, emphasiseSpreadBands]);
+
+  // Fade in place: re-rendering the frame for every step of the slider would
+  // reload the heat image on each one.
+  useEffect(() => {
+    forecastOpacityRef.current = forecastOpacity;
+    const map = mapRef.current;
+    if (!map || !forecastVisible) return;
+    emphasiseSpreadBands(map, forecastFrames[activeForecastIndex]?.lead_hours, forecastOpacity);
+    setPredictionRasterOpacity(map, forecastOpacity);
+  }, [forecastOpacity]);
 
   useEffect(() => {
     if (!forecastVisible || !forecastFrames.length) return;
@@ -2198,6 +2239,7 @@ const MapComponent = forwardRef(({
       .forecast-panel {
         position: absolute; left: 50%; bottom: 18px; transform: translateX(-50%);
         z-index: 12; min-width: 360px; max-width: calc(100% - 32px);
+        max-height: calc(100% - 36px); overflow-y: auto;
         background: rgba(22, 24, 27, 0.94); color: #f7f3ea;
         border-radius: 8px; padding: 14px 16px; box-shadow: 0 10px 30px rgba(0,0,0,0.35);
         border: 1px solid rgba(255,255,255,0.08);
@@ -2205,6 +2247,9 @@ const MapComponent = forwardRef(({
       .watch-shell .forecast-panel {
         left: 20px; right: auto; bottom: 18px; transform: none;
         width: min(370px, calc(100% - 440px)); min-width: 0; max-width: 370px;
+        /* Stays below the Refresh / Clear Loc buttons; opening Model details
+           scrolls the panel instead of growing it over them. */
+        max-height: calc(100% - 210px); overflow-y: auto; overscroll-behavior: contain;
         background: rgba(21, 15, 12, 0.92);
         border-radius: 14px;
         padding: 14px 16px 12px;
@@ -2282,8 +2327,7 @@ const MapComponent = forwardRef(({
       .forecast-badges {
         display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 10px;
       }
-      .watch-shell .forecast-badges,
-      .watch-shell .forecast-layer-controls {
+      .watch-shell .forecast-badges {
         gap: 5px;
         margin-bottom: 8px;
       }
@@ -2294,9 +2338,6 @@ const MapComponent = forwardRef(({
       }
       .forecast-badge.warn { color: #111; background: #ffcf70; border-color: transparent; }
       .forecast-badge.good { color: #111; background: #91f0b7; border-color: transparent; }
-      .forecast-layer-controls {
-        display: flex; flex-wrap: wrap; gap: 6px; margin: 0 0 10px;
-      }
       .forecast-layer-btn {
         border: 1px solid rgba(255,255,255,0.14); border-radius: 8px;
         background: transparent; color: #f7f3ea; padding: 6px 9px;
@@ -2323,6 +2364,42 @@ const MapComponent = forwardRef(({
       .forecast-band-key li.current .swatch {
         box-shadow: 0 0 0 2px rgba(247,243,234,0.85);
       }
+      .forecast-map-layers {
+        border: 1px solid rgba(255,255,255,0.10); border-radius: 8px;
+        margin: 0 0 10px; padding: 6px 10px 8px;
+      }
+      .forecast-map-layers legend {
+        padding: 0 4px; font-size: 10.5px; font-weight: 700; letter-spacing: 0.04em;
+        text-transform: uppercase; color: rgba(247,243,234,0.6);
+      }
+      .forecast-map-layers__list {
+        display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 3px 10px;
+      }
+      .forecast-map-layers__item {
+        display: flex; align-items: center; gap: 6px; cursor: pointer;
+        font-size: 11.5px; font-weight: 600; color: #f7f3ea;
+      }
+      .forecast-map-layers__item input,
+      .forecast-heat-layer input { accent-color: #ff7b2f; margin: 0; }
+      .forecast-map-layers__opacity {
+        display: flex; align-items: center; gap: 10px; margin-top: 7px;
+        font-size: 11px; font-weight: 600; color: rgba(247,243,234,0.72);
+      }
+      .forecast-map-layers__opacity span { white-space: nowrap; }
+      .forecast-map-layers__opacity input { flex: 1; accent-color: #ff7b2f; }
+      .forecast-map-layers__opacity input:disabled { opacity: 0.35; }
+      .forecast-details { margin-top: 10px; }
+      .forecast-details summary {
+        cursor: pointer; font-size: 11px; font-weight: 700;
+        color: rgba(247,243,234,0.6); list-style-position: inside;
+      }
+      .forecast-details[open] summary { margin-bottom: 8px; }
+      .forecast-heat-layer {
+        display: flex; flex-wrap: wrap; align-items: center; gap: 4px 12px;
+        margin-bottom: 8px; font-size: 11.5px; font-weight: 600;
+      }
+      .forecast-heat-layer label { display: flex; align-items: center; gap: 5px; cursor: pointer; }
+      .forecast-heat-layer__title { width: 100%; color: rgba(247,243,234,0.6); font-size: 10.5px; }
       .forecast-metric em {
         display: block; font-style: normal; font-size: 10px;
         color: rgba(247,243,234,0.45); margin-top: 2px;
@@ -2510,14 +2587,13 @@ const MapComponent = forwardRef(({
           </div>
           <div className="forecast-advisory">
             {showingBands
-              ? 'Each band is where the model expects fire to have reached by that lead time. It is not an observed or predicted official perimeter.'
-              : 'This heatmap shows modeled relative risk of new fire spread. It is not an observed or predicted official perimeter.'}
+              ? 'Each band is where the model expects fire to have reached by that day. It is not an observed or predicted official perimeter.'
+              : 'The heatmap shows how likely each spot is to burn by this day. It is not an observed or predicted official perimeter.'}
           </div>
           <div className="forecast-badges">
             <span className={`forecast-badge ${qualityBadgeClass}`}>
               {activeQualityLabel}
             </span>
-            <span className="forecast-badge">Model: {activeTargetMode}</span>
             {activeThresholdOverride && (
               <span className="forecast-badge warn">Threshold override active</span>
             )}
@@ -2530,14 +2606,14 @@ const MapComponent = forwardRef(({
               className={`forecast-layer-btn ${showingBands ? 'active' : ''}`}
               onClick={() => setSpreadView('bands')}
               disabled={!bandsAvailable}
-              title={bandsAvailable ? 'Cumulative arrival bands' : 'No arrival bands in this forecast'}
+              title={bandsAvailable ? 'Where fire could be by each day' : 'No arrival bands in this forecast'}
             >
               Arrival bands
             </button>
             <button
               className={`forecast-layer-btn ${showingBands ? '' : 'active'}`}
               onClick={() => setSpreadView('heat')}
-              title="Per-cell probability heatmap"
+              title="How likely each spot is to burn"
             >
               Probability heat
             </button>
@@ -2559,82 +2635,14 @@ const MapComponent = forwardRef(({
                 ))}
             </ol>
           )}
-          <div className="forecast-layer-controls" aria-label="Forecast layer controls">
-            <button
-              className={`forecast-layer-btn ${observedLayersVisible ? 'active' : ''}`}
-              onClick={() => setObservedLayersVisible(!observedLayersVisible)}
-            >
-              Observed
-            </button>
-            <button
-              className={`forecast-layer-btn ${forecastLayerMode === 'new_burn' ? 'active' : ''}`}
-              onClick={() => setForecastLayerMode('new_burn')}
-            >
-              New Burn Risk
-            </button>
-            <button
-              className={`forecast-layer-btn ${forecastLayerMode === 'next_fire' ? 'active' : ''}`}
-              onClick={() => setForecastLayerMode('next_fire')}
-            >
-              Next Fire
-            </button>
-            {forecastHybrid?.available && (
-              <button
-                className={`forecast-layer-btn ${forecastLayerMode === 'hybrid' ? 'active' : ''}`}
-                onClick={() => setForecastLayerMode('hybrid')}
-                title={`Rank-mean of ${(forecastHybrid.engines || []).join(', ')} - a relative ranking, not a calibrated probability`}
-              >
-                Hybrid
-              </button>
-            )}
-          </div>
-          <div className="forecast-meta">
-            Frame {activeForecastIndex + 1} of {forecastFrames.length}
-            {activeCalibratedPeak != null
-              ? ` · Peak calibrated confidence ${(activeCalibratedPeak * 100).toFixed(1)}%`
-              : activeRawPeak != null ? ` · Peak raw score ${(activeRawPeak * 100).toFixed(1)}%` : ''}
-            {activeAboveThreshold != null ? ` · Above threshold ${(activeAboveThreshold * 100).toFixed(1)}%` : ''}
-            {activeStepHours ? ` · ${activeStepHours}h cadence` : ''}
-          </div>
-          <div className="forecast-ramp" aria-hidden="true" />
-          <div className="forecast-metrics">
-            <div className="forecast-metric">
-              <strong>{activeThreshold != null ? `${(activeThreshold * 100).toFixed(0)}%` : '--'}</strong>
-              Decision threshold
-            </div>
-            <div className="forecast-metric">
-              <strong>{activeCalibratedPeak != null ? `${(activeCalibratedPeak * 100).toFixed(1)}%` : '--'}</strong>
-              Peak calibrated confidence
-              {activeRawPeak != null && (
-                <em>raw {(activeRawPeak * 100).toFixed(0)}%</em>
-              )}
-            </div>
-            <div className="forecast-metric">
-              <strong>{activeAboveThreshold != null ? `${(activeAboveThreshold * 100).toFixed(1)}%` : '--'}</strong>
-              Above decision threshold
-            </div>
-            <div className="forecast-metric">
-              <strong>{activeNextFire?.area_fraction != null ? `${(activeNextFire.area_fraction * 100).toFixed(1)}%` : activeForecastFrame?.area_fraction != null ? `${(activeForecastFrame.area_fraction * 100).toFixed(1)}%` : '--'}</strong>
-              Next-fire area
-            </div>
-          </div>
-          <div className={`forecast-status ${missingStaticChannels.length ? 'warn' : ''}`}>
-            Scale: {activeScaleMode} 0-1.
-            {activeDisplayFloor != null ? ` Display floor ${(activeDisplayFloor * 100).toFixed(0)}%.` : ''}
-            {activeDisplayArea != null ? ` Visible cells ${(activeDisplayArea * 100).toFixed(1)}%.` : ''}
-            {activeObservedFire?.area_fraction != null ? ` Observed ${(activeObservedFire.area_fraction * 100).toFixed(1)}%.` : ''}
-            {activeDisplayMask?.masked_fraction != null ? ` Masked nonburnable ${(activeDisplayMask.masked_fraction * 100).toFixed(1)}%.` : ''}
-            {' '}
-            View: {showingBands ? `arrival bands (${sceneBandCount} polygons)` : 'probability heat'}.
-            {' '}
-            Layer: {forecastLayerMode === 'hybrid'
-              ? `hybrid rank of ${(forecastHybrid?.engines || []).length} engines - relative ranking, not calibrated`
-              : forecastLayerMode === 'next_fire' ? 'reconstructed next-fire context' : 'new-burn risk'}.
-            {' '}
-            {missingStaticChannels.length
-              ? `Static placeholders: ${missingStaticChannels.slice(0, 5).join(', ')}${missingStaticChannels.length > 5 ? '...' : ''}`
-              : `Input quality: ${activeQualityText}. ${activeModelStatus}`}
-          </div>
+          {onToggleLayer && (
+            <ForecastMapLayers
+              visibility={layerVisibility}
+              onToggle={onToggleLayer}
+              opacity={forecastOpacity}
+              onOpacityChange={setForecastOpacity}
+            />
+          )}
           <input
             className="forecast-slider"
             type="range"
@@ -2674,6 +2682,72 @@ const MapComponent = forwardRef(({
               Next
             </button>
           </div>
+          <details className="forecast-details">
+            <summary>Model details</summary>
+            {!showingBands && (
+              <div className="forecast-heat-layer" role="radiogroup" aria-label="Heatmap shows">
+                <span className="forecast-heat-layer__title">Heatmap shows</span>
+                {HEAT_LAYER_CHOICES
+                  .filter(choice => choice.id !== 'hybrid' || forecastHybrid?.available)
+                  .map(choice => (
+                    <label key={choice.id} title={choice.hint}>
+                      <input
+                        type="radio"
+                        name="forecast-heat-layer"
+                        checked={forecastLayerMode === choice.id}
+                        onChange={() => setForecastLayerMode(choice.id)}
+                      />
+                      {choice.label}
+                    </label>
+                  ))}
+              </div>
+            )}
+            <div className="forecast-meta">
+              Frame {activeForecastIndex + 1} of {forecastFrames.length}
+              {activeCalibratedPeak != null
+                ? ` · Peak calibrated confidence ${(activeCalibratedPeak * 100).toFixed(1)}%`
+                : activeRawPeak != null ? ` · Peak raw score ${(activeRawPeak * 100).toFixed(1)}%` : ''}
+              {activeAboveThreshold != null ? ` · Above threshold ${(activeAboveThreshold * 100).toFixed(1)}%` : ''}
+              {activeStepHours ? ` · ${activeStepHours}h cadence` : ''}
+            </div>
+            <div className="forecast-ramp" aria-hidden="true" />
+            <div className="forecast-metrics">
+              <div className="forecast-metric">
+                <strong>{activeThreshold != null ? `${(activeThreshold * 100).toFixed(0)}%` : '--'}</strong>
+                Decision threshold
+              </div>
+              <div className="forecast-metric">
+                <strong>{activeCalibratedPeak != null ? `${(activeCalibratedPeak * 100).toFixed(1)}%` : '--'}</strong>
+                Peak calibrated confidence
+                {activeRawPeak != null && (
+                  <em>raw {(activeRawPeak * 100).toFixed(0)}%</em>
+                )}
+              </div>
+              <div className="forecast-metric">
+                <strong>{activeAboveThreshold != null ? `${(activeAboveThreshold * 100).toFixed(1)}%` : '--'}</strong>
+                Above decision threshold
+              </div>
+              <div className="forecast-metric">
+                <strong>{activeNextFire?.area_fraction != null ? `${(activeNextFire.area_fraction * 100).toFixed(1)}%` : activeForecastFrame?.area_fraction != null ? `${(activeForecastFrame.area_fraction * 100).toFixed(1)}%` : '--'}</strong>
+                Next-fire area
+              </div>
+            </div>
+            <div className={`forecast-status ${missingStaticChannels.length ? 'warn' : ''}`}>
+              Model: {activeTargetMode}.
+              {' '}
+              Scale: {activeScaleMode} 0-1.
+              {activeDisplayFloor != null ? ` Display floor ${(activeDisplayFloor * 100).toFixed(0)}%.` : ''}
+              {activeDisplayArea != null ? ` Visible cells ${(activeDisplayArea * 100).toFixed(1)}%.` : ''}
+              {activeObservedFire?.area_fraction != null ? ` Starting fire ${(activeObservedFire.area_fraction * 100).toFixed(1)}%.` : ''}
+              {activeDisplayMask?.masked_fraction != null ? ` Masked nonburnable ${(activeDisplayMask.masked_fraction * 100).toFixed(1)}%.` : ''}
+              {' '}
+              View: {showingBands ? `arrival bands (${sceneBandCount} polygons)` : 'probability heat'}.
+              {' '}
+              {missingStaticChannels.length
+                ? `Static placeholders: ${missingStaticChannels.slice(0, 5).join(', ')}${missingStaticChannels.length > 5 ? '...' : ''}`
+                : `Input quality: ${activeQualityText}. ${activeModelStatus}`}
+            </div>
+          </details>
         </div>
       )}
     </div>

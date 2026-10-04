@@ -2343,6 +2343,33 @@ body {
   border: 2px solid #ffefcd;
 }
 
+.legend-group {
+  border-top: 1px solid rgba(77, 64, 55, 0.12);
+  border-bottom: 1px solid rgba(77, 64, 55, 0.12);
+  padding: 6px 0;
+}
+
+.legend-group-title {
+  display: block;
+  padding: 2px 14px;
+  color: #8a7768;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.legend-group .legend-row {
+  padding-top: 4px;
+  padding-bottom: 4px;
+}
+
+.legend-group .legend-symbol.hotspot {
+  width: 14px;
+  height: 14px;
+  border: 1px solid rgba(0, 0, 0, 0.25);
+}
+
 .legend-symbol.warning {
   background: rgba(170, 96, 149, 0.18);
   border: 2px dashed #aa6095;

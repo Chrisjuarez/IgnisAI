@@ -1,4 +1,4 @@
-import { renderPredictionRasterFrame } from '../addPredictionOverlay';
+import { renderPredictionRasterFrame, setPredictionRasterOpacity } from '../addPredictionOverlay';
 
 function makeMap(overrides = {}) {
   return {
@@ -70,5 +70,60 @@ describe('prediction raster overlay rendering', () => {
       'ignis-pred-raster-src',
       expect.objectContaining({ coordinates }),
     );
+  });
+});
+
+describe('forecast visibility and opacity on heat frames', () => {
+  const frame = {
+    bounds: [-118.58, 33.97, -118.36, 34.15],
+    heatmapUrl: 'data:image/png;base64,abc123',
+    contour: {
+      type: 'FeatureCollection',
+      features: [{ type: 'Feature', properties: {}, geometry: { type: 'LineString', coordinates: [[-118.5, 34], [-118.4, 34.1]] } }],
+    },
+  };
+
+  test('a frame drawn while the forecast is hidden arrives hidden, at the chosen opacity', async () => {
+    const map = makeMap();
+
+    await renderPredictionRasterFrame(map, frame, { visible: false, opacity: 0.4 });
+
+    expect(map.addLayer).toHaveBeenCalledWith(expect.objectContaining({
+      id: 'ignis-pred-raster-layer',
+      layout: { visibility: 'none' },
+      paint: expect.objectContaining({ 'raster-opacity': 0.4 }),
+    }));
+    expect(map.addLayer).toHaveBeenCalledWith(expect.objectContaining({
+      id: 'ignis-pred-contour-line',
+      layout: { visibility: 'none' },
+    }));
+  });
+
+  test('defaults to visible at full strength', async () => {
+    const map = makeMap();
+
+    await renderPredictionRasterFrame(map, frame);
+
+    expect(map.addLayer).toHaveBeenCalledWith(expect.objectContaining({
+      id: 'ignis-pred-raster-layer',
+      layout: { visibility: 'visible' },
+      paint: expect.objectContaining({ 'raster-opacity': 1 }),
+    }));
+  });
+
+  test('opacity changes in place and is clamped', () => {
+    const map = makeMap({ getLayer: jest.fn(() => true), setPaintProperty: jest.fn() });
+
+    setPredictionRasterOpacity(map, 1.6);
+
+    expect(map.setPaintProperty).toHaveBeenCalledWith('ignis-pred-raster-layer', 'raster-opacity', 1);
+  });
+
+  test('opacity is a no-op before any frame is drawn', () => {
+    const map = makeMap({ setPaintProperty: jest.fn() });
+
+    setPredictionRasterOpacity(map, 0.5);
+
+    expect(map.setPaintProperty).not.toHaveBeenCalled();
   });
 });
