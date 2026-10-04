@@ -53,11 +53,11 @@ const EVACUATION_GEOMETRY_TOLERANCE_DEG = 0.0002;
 // draws perimeters from /fire-perimeters at full resolution, not from here.
 const PERIMETER_GEOMETRY_TOLERANCE_DEG = 0.0005;
 
-// A perimeter belongs to an incident when it lies within this distance of the
-// incident's reported origin. Names cannot be relied on - FIRIS perimeters carry
-// none, and the only label on Bouquet's was a mission code that misspelled it -
-// and neither can containment: Bouquet's reported origin sat 112 m outside every
-// perimeter mapped around it.
+// A perimeter is mapped at an incident when it lies within this distance of the
+// incident's reported origin. FIRIS perimeters carry no IRWIN ID and often no
+// name - the only label on Bouquet's was a mission code that misspelled it - and
+// containment cannot be relied on either: Bouquet's reported origin sat 112 m
+// outside every perimeter mapped around it.
 const PERIMETER_MATCH_RADIUS_M = 1000;
 
 // ...and was mapped no more than this long before the fire was discovered. A
@@ -194,10 +194,31 @@ function normalizeName(value) {
     .toLowerCase();
 }
 
+// IRWIN IDs arrive braced in some feeds and bare in others.
+function irwinKey(value) {
+  return value ? String(value).replace(/[{}]/g, '').trim().toUpperCase() : null;
+}
+
+// A contained fire is held inside its lines, so it is listed after the active
+// ones and not offered a spread forecast.
+function incidentStatus({ isOut, containmentPct }) {
+  if (isOut) return 'inactive';
+  if (containmentPct >= 100) return 'contained';
+  return 'active';
+}
+
+const STATUS_ORDER = { active: 0, contained: 1, inactive: 2 };
+
+function byStatusThenSize(a, b) {
+  return (STATUS_ORDER[a.status] ?? 3) - (STATUS_ORDER[b.status] ?? 3)
+    || Number(b.acres || 0) - Number(a.acres || 0);
+}
+
 function resolvePredictionEligibility(incident, { hasPerimeter = false, hasHotspots = false } = {}) {
   const reasons = [];
   if (incident?.type !== 'wildfire') reasons.push('record is not an active wildfire');
-  if (incident?.status !== 'active') reasons.push('incident is not active');
+  if (incident?.status === 'contained') reasons.push('incident is contained');
+  else if (incident?.status !== 'active') reasons.push('incident is not active');
   if (!hasPerimeter && !hasHotspots) reasons.push('prediction requires a recent hotspot cluster or matching perimeter');
   return {
     eligible: reasons.length === 0,
@@ -221,20 +242,22 @@ function normalizeIncident(feature) {
   const category = String(firstValue(props, ['IncidentTypeCategory', 'IncidentTypeKind']) || 'WF').toUpperCase();
   const fireOut = toIso(firstValue(props, ['FireOutDateTime', 'FireOutDateTime_dt']));
   const isActiveCandidate = String(firstValue(props, ['ActiveFireCandidate']) ?? '').toLowerCase();
-  const status = fireOut || isActiveCandidate === '0' || isActiveCandidate === 'false' ? 'inactive' : 'active';
+  const containmentPct = toNumber(firstValue(props, ['PercentContained', 'Containment', 'ContainmentPercent']));
+  const isOut = Boolean(fireOut) || isActiveCandidate === '0' || isActiveCandidate === 'false';
 
   return {
     id: `wfigs:${irwinId || uniqueId || objectId || `${lat.toFixed(4)}:${lon.toFixed(4)}`}`,
     sourceId: irwinId || uniqueId || objectId || null,
+    irwinId: irwinKey(irwinId),
     name: String(rawName).replace(/\s+/g, ' ').trim(),
     type: category.includes('RX') || category.includes('PRESCRIB') ? 'prescribed' : 'wildfire',
-    status,
+    status: incidentStatus({ isOut, containmentPct }),
     lat,
     lon,
     county: firstValue(props, ['POOCounty', 'County', 'county']) || null,
     state: firstValue(props, ['POOState', 'State', 'state']) || null,
     acres: toNumber(firstValue(props, ['IncidentSize', 'DailyAcres', 'GISAcres', 'Acres'])),
-    containmentPct: toNumber(firstValue(props, ['PercentContained', 'Containment', 'ContainmentPercent'])),
+    containmentPct,
     updatedAt: toIso(firstValue(props, ['ModifiedOnDateTime_dt', 'ModifiedOnDateTime', 'CreateDate', 'DateCurrent'])),
     createdAt: toIso(firstValue(props, ['FireDiscoveryDateTime', 'FireDiscoveryDateTime_dt', 'CreatedOnDateTime_dt'])),
     sourceNames: ['WFIGS', 'NIFC'],
@@ -253,6 +276,7 @@ function perimeterIncidentName(feature) {
     'poly_IncidentName',
     'attr_IncidentName',
     'IncidentName',
+    'incident_name',
     'FIRE_NAME',
     'FireName',
     'incidentname',
@@ -281,6 +305,7 @@ function indexPerimeters(perimeters) {
     return {
       feature,
       name: normalizeName(perimeterIncidentName(feature)),
+      irwinId: irwinKey(firstValue(props, ['attr_IrwinID', 'poly_IRWINID'])),
       bbox: bboxOf(feature?.geometry),
       mappedAt: toMillis(firstValue(props, ['poly_DateCurrent', 'poly_PolygonDateTime', 'CreationDate', 'poly_CreateDate'])),
       acres: toNumber(firstValue(props, ['area_acres', 'poly_GISAcres', 'GISAcres'])),
@@ -300,19 +325,48 @@ function mappedNearIncident(entry, incident) {
   return distanceToPolygonMetres(incident.lon, incident.lat, entry.feature.geometry) <= PERIMETER_MATCH_RADIUS_M;
 }
 
-function matchPerimeters(index, incident) {
-  const nameKey = normalizeName(incident?.name);
-  return {
-    byLocation: index.filter((entry) => mappedNearIncident(entry, incident)),
-    byName: index.filter((entry) => perimeterNameMatches(entry.name, nameKey)),
-  };
+// Whether a perimeter maps the incident's own fire. One carrying an IRWIN ID -
+// every WFIGS perimeter does - belongs to that incident alone: a complex's
+// perimeter covers the origins of the fires it absorbed, and each of them would
+// otherwise take its acreage. One without - FIRIS and USFS heat perimeters -
+// belongs to the incident it is named for among those mapped around it, or to
+// the only one there.
+function ownsPerimeter(incident, entry, claimants) {
+  if (entry.irwinId) return entry.irwinId === incident.irwinId;
+  if (!claimants.includes(incident)) return false;
+  const named = claimants.filter((claimant) => perimeterNameMatches(entry.name, normalizeName(claimant.name)));
+  return named.length > 0 ? named.includes(incident) : claimants.length === 1;
 }
 
-// The newest located perimeter with a measured area. Only located matches
-// count: name matching is a substring test, loose enough to say a perimeter
-// exists but not to borrow a number from.
-function latestMeasurement(located) {
-  return located
+const NO_PERIMETERS = { located: [], own: [] };
+
+// Each incident's perimeters, by incident id. `located` is everything mapped at
+// its origin: ground a forecast treats as burned, whichever fire burned it.
+// `own` is the fire's own perimeters, which its size, its perimeter date and
+// its detections are read from.
+function matchPerimetersToIncidents(perimeters, incidents) {
+  const index = indexPerimeters(perimeters);
+  const located = new Map(incidents.map((incident) => [
+    incident.id,
+    index.filter((entry) => mappedNearIncident(entry, incident)),
+  ]));
+  const claimants = new Map(index.map((entry) => [entry, []]));
+  incidents.forEach((incident) => {
+    located.get(incident.id).forEach((entry) => claimants.get(entry).push(incident));
+  });
+  return new Map(incidents.map((incident) => [incident.id, {
+    located: located.get(incident.id),
+    own: index.filter((entry) => ownsPerimeter(incident, entry, claimants.get(entry))),
+  }]));
+}
+
+function perimetersOf(payload, incident) {
+  return payload.incidentPerimeters.get(incident.id) || NO_PERIMETERS;
+}
+
+// The newest of the fire's own perimeters with a measured area.
+function latestMeasurement(own) {
+  return own
     .filter((entry) => Number.isFinite(entry.acres) && entry.acres > 0)
     .sort((a, b) => (b.mappedAt ?? 0) - (a.mappedAt ?? 0))[0] || null;
 }
@@ -325,8 +379,8 @@ function roundAcres(value) {
 // reported size below the newest measured perimeter is stale or wrong: Bouquet's
 // was overwritten with its 0.1-acre discovery size hours after FIRIS had mapped
 // 1,048. The measurement wins then, and says so.
-function resolveAcreage(incident, located) {
-  const measured = latestMeasurement(located);
+function resolveAcreage(incident, own) {
+  const measured = latestMeasurement(own);
   if (measured && !(Number(incident.acres) >= measured.acres)) {
     return {
       acres: roundAcres(measured.acres),
@@ -339,44 +393,36 @@ function resolveAcreage(incident, located) {
   };
 }
 
-function perimetersForIncident(perimeters, incident) {
-  const { byLocation, byName } = matchPerimeters(indexPerimeters(perimeters), incident);
+function perimetersForIncident({ own }) {
   return {
     type: 'FeatureCollection',
-    features: [...new Set([...byLocation, ...byName].map((entry) => entry.feature))],
+    features: own.map((entry) => entry.feature),
   };
 }
 
-// The perimeters mapped at the incident's location. Name matches are left out
-// on purpose: a shared word in a name is enough to say a perimeter exists, not
-// to say where the fire is.
-function locatedPerimeters(perimeters, incident) {
-  return matchPerimeters(indexPerimeters(perimeters), incident).byLocation;
-}
-
-// The ground a forecast should treat as already burned: every located
-// perimeter, merged by the caller.
-function burnedAreaFor(perimeters, incident) {
-  const located = locatedPerimeters(perimeters, incident);
-  if (!located.length) return null;
+// The ground a forecast should treat as already burned: the fire's own
+// perimeters and any other mapped at its origin, merged by the caller.
+function burnedAreaFor({ located, own }) {
+  const burned = [...new Set([...own, ...located])];
+  if (!burned.length) return null;
   return {
     type: 'FeatureCollection',
-    features: located.map(({ feature }) => ({ type: 'Feature', properties: {}, geometry: feature.geometry })),
+    features: burned.map(({ feature }) => ({ type: 'Feature', properties: {}, geometry: feature.geometry })),
   };
 }
 
-function detectedNearFire(fire, incident, located) {
+function detectedNearFire(fire, incident, own) {
   const lon = Number(fire.longitude);
   const lat = Number(fire.latitude);
-  if (!located.length) return distanceMetres(incident.lon, incident.lat, lon, lat) <= DETECTION_NEAR_FIRE_M;
-  return located.some(({ bbox, feature }) => bboxWithinRadius(bbox, lon, lat, DETECTION_NEAR_FIRE_M)
+  if (!own.length) return distanceMetres(incident.lon, incident.lat, lon, lat) <= DETECTION_NEAR_FIRE_M;
+  return own.some(({ bbox, feature }) => bboxWithinRadius(bbox, lon, lat, DETECTION_NEAR_FIRE_M)
     && distanceToPolygonMetres(lon, lat, feature.geometry) <= DETECTION_NEAR_FIRE_M);
 }
 
 /** The newest detection on or near the fire, as ISO, or null. */
-function lastDetectionAt(hotspots, incident, located) {
+function lastDetectionAt(hotspots, incident, own) {
   const times = hotspots
-    .filter((fire) => detectedNearFire(fire, incident, located))
+    .filter((fire) => detectedNearFire(fire, incident, own))
     .map((fire) => toMillis(fire.timestamp))
     .filter(Number.isFinite);
   return times.length ? toIso(Math.max(...times)) : null;
@@ -386,11 +432,11 @@ function lastDetectionAt(hotspots, incident, located) {
 // Perimeters come from aircraft and detections from satellites, on different
 // clocks, so each is dated on its own rather than summed into one "updated".
 async function freshnessFor(payload, incident) {
-  const located = locatedPerimeters(payload.perimeters, incident);
-  const mappedAt = located.map((entry) => entry.mappedAt).filter(Number.isFinite);
+  const { own } = perimetersOf(payload, incident);
+  const mappedAt = own.map((entry) => entry.mappedAt).filter(Number.isFinite);
   return {
     perimeterMappedAt: mappedAt.length ? toIso(Math.max(...mappedAt)) : null,
-    lastDetectionAt: lastDetectionAt(payload.hotspots, incident, located),
+    lastDetectionAt: lastDetectionAt(payload.hotspots, incident, own),
     nextPasses: await nextPasses(incident.lat, incident.lon),
   };
 }
@@ -399,24 +445,20 @@ async function freshnessFor(payload, incident) {
 async function burnedAreaForIncident(incidentId) {
   const payload = await buildBootstrap();
   const incident = payload.incidents.find((item) => item.id === incidentId);
-  return incident ? burnedAreaFor(payload.perimeters, incident) : null;
+  return incident ? burnedAreaFor(perimetersOf(payload, incident)) : null;
 }
 
-function annotateIncidents(incidents, perimeters, hotspots) {
-  const index = indexPerimeters(perimeters);
-
+// Hotspots are the fire's own by the same rule freshness uses, so the panel
+// cannot call them live while saying none fell near the fire.
+function annotateIncidents(incidents, incidentPerimeters, hotspots) {
   return incidents.map((incident) => {
-    const { byLocation, byName } = matchPerimeters(index, incident);
-    const hasPerimeter = byLocation.length > 0 || byName.length > 0;
-    const hasHotspots = hotspots.some((fire) => {
-      const dLat = Math.abs(Number(fire.latitude) - incident.lat);
-      const dLon = Math.abs(Number(fire.longitude) - incident.lon);
-      return dLat <= 0.35 && dLon <= 0.35;
-    });
+    const { own } = incidentPerimeters.get(incident.id) || NO_PERIMETERS;
+    const hasPerimeter = own.length > 0;
+    const hasHotspots = hotspots.some((fire) => detectedNearFire(fire, incident, own));
     const predictionEligibility = resolvePredictionEligibility(incident, { hasPerimeter, hasHotspots });
     return {
       ...incident,
-      ...resolveAcreage(incident, byLocation),
+      ...resolveAcreage(incident, own),
       reportedAcres: incident.acres,
       hasPerimeter,
       hasHotspots,
@@ -646,11 +688,8 @@ async function buildBootstrap(query = {}) {
     ? alertResult.value
     : { geojson: { type: 'FeatureCollection', features: [] }, partial: true };
 
-  const incidents = annotateIncidents(rawIncidents, perimeters.geojson, hotspots.fires)
-    .sort((a, b) => {
-      if (a.status !== b.status) return a.status === 'active' ? -1 : 1;
-      return Number(b.acres || 0) - Number(a.acres || 0);
-    });
+  const incidentPerimeters = matchPerimetersToIncidents(perimeters.geojson, rawIncidents);
+  const incidents = annotateIncidents(rawIncidents, incidentPerimeters, hotspots.fires).sort(byStatusThenSize);
   const normalizedAlerts = (alerts.geojson.features || []).map(normalizeAlert);
   const evacuations = evacuationResult.status === 'fulfilled'
     ? evacuationResult.value
@@ -661,6 +700,9 @@ async function buildBootstrap(query = {}) {
     bbox: bbox.raw,
     incidents,
     perimeters: perimeters.geojson,
+    // Each incident's own and located perimeters, read by /incidents/:id and
+    // the forecast's burned area. A Map, and withheld from every response.
+    incidentPerimeters,
     // Detections stay on the shared payload because /incidents/:id reads them
     // to find hotspots near one fire. They are withheld from the bootstrap
     // RESPONSE instead - see bootstrapResponse below. `hotspotFootprints` is
@@ -720,7 +762,7 @@ function filterIncidents(incidents, query = {}) {
  * are reported as counts.
  */
 function bootstrapResponse(payload) {
-  const { hotspots, perimeters, ...response } = payload;
+  const { hotspots, perimeters, incidentPerimeters, ...response } = payload;
   return {
     ...response,
     hotspotCount: Array.isArray(hotspots) ? hotspots.length : 0,
@@ -771,7 +813,7 @@ router.get('/incidents/:id', async (req, res) => {
     // re-serialised on each incident click - for a field no client reads. The
     // incident's own perimeters, matched the same way annotateIncidents
     // matches them, are what the field was for.
-    perimeters: perimetersForIncident(payload.perimeters, incident),
+    perimeters: perimetersForIncident(perimetersOf(payload, incident)),
     recentHotspots: payload.hotspots.filter((fire) => {
       const dLat = Math.abs(Number(fire.latitude) - incident.lat);
       const dLon = Math.abs(Number(fire.longitude) - incident.lon);
@@ -827,6 +869,7 @@ module.exports = router;
 module.exports.burnedAreaForIncident = burnedAreaForIncident;
 module.exports._private = {
   annotateIncidents,
+  matchPerimetersToIncidents,
   burnedAreaFor,
   freshnessFor,
   resolveAcreage,
