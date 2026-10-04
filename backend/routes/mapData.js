@@ -695,7 +695,7 @@ async function buildBootstrap(query = {}) {
     ? evacuationResult.value
     : { geojson: { type: 'FeatureCollection', features: [] }, partial: true };
 
-  return setCached(cacheKey, {
+  const payload = {
     updatedAt: nowIso(),
     bbox: bbox.raw,
     incidents,
@@ -728,7 +728,10 @@ async function buildBootstrap(query = {}) {
         ? statusOk('CalOES California Active Evacuation Zones', evacuations.geojson.features.length, { partial: evacuations.partial })
         : statusError('CalOES California Active Evacuation Zones', evacuationResult.reason),
     },
-  });
+  };
+  // Without incidents the map has nothing to show; asking again on the next
+  // request beats serving an empty list for the life of the cache entry.
+  return incidentResult.status === 'fulfilled' ? setCached(cacheKey, payload) : payload;
 }
 
 function filterIncidents(incidents, query = {}) {
@@ -776,19 +779,7 @@ router.get('/map/bootstrap', async (req, res) => {
     res.json(bootstrapResponse(payload));
   } catch (err) {
     console.error('map bootstrap error:', err.message);
-    res.status(200).json({
-      updatedAt: nowIso(),
-      incidents: [],
-      hotspotCount: 0,
-      perimeterCount: 0,
-      alerts: [],
-      alertsGeojson: { type: 'FeatureCollection', features: [] },
-      evacuations: [],
-      layerStatus: {
-        partial: true,
-        error: err.message,
-      },
-    });
+    res.status(502).json({ error: 'map_data_unavailable', message: 'Fire data could not be loaded. Try again shortly.' });
   }
 });
 

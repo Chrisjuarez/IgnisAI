@@ -2,6 +2,7 @@
 const express = require("express");
 const axios = require("axios");
 const mapData = require("./mapData");
+const { forecastFailure } = require("../utils/forecastFailure");
 
 const router = express.Router();
 
@@ -324,7 +325,8 @@ router.get("/multistep", async (req, res) => {
     return res.json(forecast);
   } catch (err) {
     console.error("multistep error:", err?.response?.data || err.message);
-    return res.status(502).json({ error: "tilesvc_multistep_failed", detail: err.message });
+    const { status, body } = forecastFailure(err);
+    return res.status(status).json(body);
   }
 });
 
@@ -394,13 +396,9 @@ router.get("/site-exposure", async (req, res) => {
 
     return res.json(payload);
   } catch (err) {
-    const status = err?.response?.status;
-    const detail = err?.response?.data ?? err.message;
-    console.error("site-exposure failed:", status || err.code, detail);
-    return res.status(status === 422 ? 422 : 502).json({
-      error: "site_exposure_failed",
-      detail,
-    });
+    console.error("site-exposure failed:", err?.response?.status || err.code, err?.response?.data ?? err.message);
+    const { status, body } = forecastFailure(err);
+    return res.status(status).json(body);
   }
 });
 

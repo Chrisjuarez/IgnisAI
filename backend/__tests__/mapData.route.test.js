@@ -99,6 +99,23 @@ describe('GET /api/map/bootstrap', () => {
     });
   });
 
+  it('does not cache a bootstrap whose incident feed failed', async () => {
+    const base = axios.get.getMockImplementation();
+    axios.get.mockImplementation((url, config = {}) => (
+      String(url).includes('WFIGS_Incident_Locations_Current')
+        ? Promise.reject(new Error('WFIGS unavailable'))
+        : base(url, config)
+    ));
+    const bbox = '-118.9,34.1,-118.3,34.6';
+    const incidentCalls = () => axios.get.mock.calls.filter(([url]) => String(url).includes('WFIGS_Incident_Locations_Current')).length;
+
+    const first = await request(app).get('/api/map/bootstrap').query({ bbox }).expect(200);
+    await request(app).get('/api/map/bootstrap').query({ bbox }).expect(200);
+
+    expect(first.body.layerStatus.incidents).toMatchObject({ ok: false });
+    expect(incidentCalls()).toBe(2);
+  });
+
   it('returns normalized incidents, perimeters, hotspots, alerts, and layer status', async () => {
     const res = await request(app)
       .get('/api/map/bootstrap')

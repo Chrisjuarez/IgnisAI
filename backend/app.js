@@ -38,7 +38,7 @@ app.use(cors({
     if (!origin || CORS_ORIGINS.includes(origin)) {
       return callback(null, true);
     }
-    return callback(new Error(`CORS origin not allowed: ${origin}`));
+    return callback(Object.assign(new Error('Origin not allowed'), { status: 403, expose: true }));
   },
   methods: ['GET','POST','PUT','DELETE','OPTIONS'],
   allowedHeaders: ['Content-Type','Authorization'],
@@ -73,7 +73,21 @@ mountRoute('/api/ndvi', './routes/ndvi');
 mountRoute('/api/fire-perimeters', './routes/firePerimeters');
 mountRoute('/api/predict-fire-spread', './routes/predictFireSpread');
 
-// Export app for tests (your existing code - unchanged)
+// Whatever no route answered, and whatever a route threw, as JSON. Express's
+// defaults are HTML pages, and a thrown error's message can name internals.
+app.use((req, res) => {
+  res.status(404).json({ error: 'not_found' });
+});
+
+app.use((err, req, res, _next) => {
+  const status = err.status || err.statusCode || 500;
+  if (status >= 500) {
+    console.error(`${req.method} ${req.originalUrl} failed:`, err);
+    return res.status(status).json({ error: 'internal_error' });
+  }
+  return res.status(status).json({ error: 'request_rejected', message: err.expose ? err.message : undefined });
+});
+
 module.exports = app;
 
 // ---- Run server directly (not in tests) ----

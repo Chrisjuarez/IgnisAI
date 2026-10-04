@@ -45,4 +45,26 @@ describe('CORS configuration', () => {
 
     expect(response.headers['access-control-allow-origin']).toBe('https://two.example');
   });
+
+  it('refuses an unlisted origin with a JSON 403', async () => {
+    const app = loadAppWithCors(null);
+
+    const response = await request(app)
+      .get('/api/map/bootstrap')
+      .set('Origin', 'https://elsewhere.example')
+      .expect(403);
+
+    expect(response.body).toEqual({ error: 'request_rejected', message: 'Origin not allowed' });
+  });
+});
+
+describe('unmatched routes', () => {
+  it('answer with a JSON 404', async () => {
+    jest.resetModules();
+    const app = require('../app');
+
+    const response = await request(app).get('/api/no-such-route').expect(404);
+
+    expect(response.body).toEqual({ error: 'not_found' });
+  });
 });

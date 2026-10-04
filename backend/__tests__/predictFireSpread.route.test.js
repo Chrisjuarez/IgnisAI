@@ -249,7 +249,7 @@ describe('GET /api/predict-fire-spread routes', () => {
       .query({ lat: 34.56, lon: -118.4 })
       .expect(502);
 
-    expect(res.body.error).toBe('tilesvc_multistep_failed');
+    expect(res.body.error).toBe('forecast_service_unavailable');
   });
 
   it('always sends ignition=true on live multistep requests (no date)', async () => {
@@ -338,9 +338,49 @@ describe('GET /api/predict-fire-spread routes', () => {
       .expect(502);
 
     expect(res.body).toMatchObject({
-      error: 'tilesvc_multistep_failed',
-      detail: expect.any(String),
+      error: 'forecast_service_unavailable',
+      message: expect.any(String),
     });
+  });
+
+  it('says why tilesvc could not gather a forecast\'s inputs', async () => {
+    const failure = Object.assign(new Error('Request failed with status code 422'), {
+      response: { status: 422, data: { error: 'input_unavailable', reason: 'static_channel_nodata_heavy', detail: 'fuel_model mostly nodata' } },
+    });
+    axios.post.mockRejectedValue(failure);
+
+    const res = await request(app)
+      .get('/api/predict-fire-spread/multistep')
+      .query({ lat: 34.05, lon: -118.25 })
+      .expect(422);
+
+    expect(res.body).toEqual({
+      error: 'forecast_inputs_unavailable',
+      reason: 'static_channel_nodata_heavy',
+      message: 'Terrain and fuel data for this area could not be loaded.',
+    });
+  });
+
+  it('answers 504 when the forecast times out', async () => {
+    axios.post.mockRejectedValue(Object.assign(new Error('timeout of 240000ms exceeded'), { code: 'ECONNABORTED' }));
+
+    const res = await request(app)
+      .get('/api/predict-fire-spread/multistep')
+      .query({ lat: 34.05, lon: -118.25 })
+      .expect(504);
+
+    expect(res.body.error).toBe('forecast_timeout');
+  });
+
+  it('gives site exposure the same failure messages', async () => {
+    axios.get.mockRejectedValue(Object.assign(new Error('connect ECONNREFUSED'), { code: 'ECONNREFUSED' }));
+
+    const res = await request(app)
+      .get('/api/predict-fire-spread/site-exposure')
+      .query({ site_lat: 34.05, site_lon: -118.25 })
+      .expect(502);
+
+    expect(res.body).toMatchObject({ error: 'forecast_service_unavailable', message: expect.any(String) });
   });
 
   describe('incident burned area', () => {
@@ -633,6 +673,6 @@ describe('GET /api/predict-fire-spread routes', () => {
       .query({ lat: 34.05, lon: -118.25 })
       .expect(502);
 
-    expect(res.body).toMatchObject({ error: 'tilesvc_multistep_failed' });
+    expect(res.body).toMatchObject({ error: 'forecast_service_unavailable' });
   });
 });
