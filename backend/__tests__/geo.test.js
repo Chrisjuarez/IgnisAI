@@ -1,4 +1,4 @@
-const { bboxOf, bboxWithinRadius, distanceToPolygonMetres } = require('../utils/geo');
+const { bboxOf, bboxWithinRadius, distanceMetres, distanceToPolygonMetres } = require('../utils/geo');
 
 // About 1.11 km a side at 34.5 deg N.
 const SQUARE = { type: 'Polygon', coordinates: [[[-118.41, 34.55], [-118.40, 34.55], [-118.40, 34.56], [-118.41, 34.56], [-118.41, 34.55]]] };
@@ -42,6 +42,16 @@ describe('distanceToPolygonMetres', () => {
   it('is Infinity for anything that is not a polygon', () => {
     expect(distanceToPolygonMetres(-118.4, 34.5, { type: 'Point', coordinates: [-118.4, 34.5] })).toBe(Infinity);
     expect(distanceToPolygonMetres(-118.4, 34.5, null)).toBe(Infinity);
+  });
+});
+
+describe('distanceMetres', () => {
+  it('measures a hundredth of a degree of latitude as about 1.1 km', () => {
+    expect(distanceMetres(-118.4, 34.56, -118.4, 34.57)).toBeCloseTo(1105, -1);
+  });
+
+  it('shortens degrees of longitude away from the equator', () => {
+    expect(distanceMetres(-118.4, 34.56, -118.39, 34.56)).toBeCloseTo(917, -1);
   });
 });
 

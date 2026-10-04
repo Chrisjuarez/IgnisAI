@@ -2230,6 +2230,32 @@ body {
   color: var(--ignis-ink);
 }
 
+.data-freshness {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 5px 12px;
+  margin: 0 0 12px;
+  padding: 10px 12px;
+  background: rgba(255, 252, 248, 0.78);
+  border: 1px solid rgba(177, 138, 109, 0.16);
+  border-radius: 8px;
+}
+
+.data-freshness dt {
+  align-self: center;
+  color: var(--ignis-muted);
+  font-size: 11px;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.data-freshness dd {
+  margin: 0;
+  color: var(--ignis-ink);
+  font-size: 13px;
+  font-weight: 600;
+}
+
 .updates-list {
   display: flex;
   flex-direction: column;

@@ -62,3 +62,13 @@ describe('incident acreage', () => {
     expect(caption(container)).toBeNull();
   });
 });
+
+describe('incident dates', () => {
+  test('names the discovery date as such, apart from the feed record update', () => {
+    renderPanel({ createdAt: '2026-10-03T22:19:00.000Z', updatedAt: '2026-10-04T13:28:00.000Z' });
+
+    expect(screen.getByText('Discovered')).toBeInTheDocument();
+    expect(screen.getByText('Feed record updated')).toBeInTheDocument();
+    expect(screen.queryByText('Created')).not.toBeInTheDocument();
+  });
+});

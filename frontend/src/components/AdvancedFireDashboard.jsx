@@ -5,6 +5,8 @@ import { useAuth } from './auth/AuthContext';
 import SourceHealthPanel from './SourceHealthPanel';
 import SiteExposurePanel from './SiteExposurePanel';
 import { parseViewState, serializeViewState, viewStateChanged } from '../utils/viewState';
+import { timeAgo } from '../utils/relativeTime';
+import DataFreshness from './DataFreshness';
 import { HOTSPOT_AGE_BANDS } from '../utils/hotspotAge';
 import '../styles/dashboard.css';
 
@@ -58,17 +60,6 @@ function formatAcres(value) {
   return `${Math.round(n * 10) / 10} acres`;
 }
 
-function formatRelative(value) {
-  if (!value) return 'unknown';
-  const ts = Date.parse(value);
-  if (!Number.isFinite(ts)) return 'unknown';
-  const minutes = Math.max(0, Math.round((Date.now() - ts) / 60000));
-  if (minutes < 60) return `${minutes || 1} min ago`;
-  const hours = Math.round(minutes / 60);
-  if (hours < 48) return `${hours} hr ago`;
-  return new Date(ts).toLocaleDateString();
-}
-
 function incidentMarkerClass(incident) {
   if (incident.status !== 'active') return 'muted';
   if (Number(incident.acres) >= 1000) return 'major';
@@ -98,7 +89,7 @@ function IncidentCard({ incident, selected, onSelect }) {
         <span className="map-list-card-meta">
           <strong>{formatAcres(incident.acres)}</strong>
           <span>{incident.status}</span>
-          <span>{formatRelative(incident.updatedAt)}</span>
+          <span>{timeAgo(incident.updatedAt) ?? 'unknown'}</span>
         </span>
       </span>
     </button>
@@ -118,7 +109,7 @@ function WarningCard({ warning, selected, onSelect }) {
         <span className="map-list-card-subtitle">{warning.areaDesc || warning.headline}</span>
         <span className="map-list-card-meta">
           <strong>{warning.status || 'Alert'}</strong>
-          <span>{formatRelative(warning.updatedAt || warning.effective)}</span>
+          <span>{timeAgo(warning.updatedAt || warning.effective) ?? 'unknown'}</span>
         </span>
       </span>
     </button>
@@ -328,6 +319,7 @@ function IncidentDetailPanel({
             <div><span>Hotspots</span><strong>{incident.hasHotspots ? 'Live context' : 'Sparse'}</strong></div>
             <div><span>Prediction</span><strong>{canPredict ? 'Ready' : 'Limited'}</strong></div>
           </div>
+          <DataFreshness freshness={detail?.freshness} />
           <button
             className="primary-action"
             type="button"
@@ -353,7 +345,7 @@ function IncidentDetailPanel({
           {updates.length ? updates.map((update) => (
             <article key={update.id} className="update-item">
               <strong>{update.title}</strong>
-              <span>{update.source} - {formatRelative(update.createdAt)}</span>
+              <span>{update.source} - {timeAgo(update.createdAt) ?? 'unknown'}</span>
               <p>{update.body}</p>
             </article>
           )) : <EmptyDrawerState label="updates" />}
@@ -363,8 +355,8 @@ function IncidentDetailPanel({
       {activeTab === 'info' && (
         <div className="info-list">
           <div><span>Source</span><strong>{(incident.sourceNames || []).join(', ') || 'WFIGS'}</strong></div>
-          <div><span>Created</span><strong>{incident.createdAt ? new Date(incident.createdAt).toLocaleString() : '-'}</strong></div>
-          <div><span>Updated</span><strong>{incident.updatedAt ? new Date(incident.updatedAt).toLocaleString() : '-'}</strong></div>
+          <div><span>Discovered</span><strong>{incident.createdAt ? new Date(incident.createdAt).toLocaleString() : '-'}</strong></div>
+          <div><span>Feed record updated</span><strong>{incident.updatedAt ? new Date(incident.updatedAt).toLocaleString() : '-'}</strong></div>
           <div><span>Source ID</span><strong>{incident.sourceId || '-'}</strong></div>
           <p className="fine-print">Official incident feeds may lag field activity. Ignis prediction is an advisory model layer and should be interpreted separately from official perimeters and evacuation notices.</p>
         </div>
@@ -607,7 +599,7 @@ const AdvancedFireDashboard = () => {
           />
         </div>
         <button className="status-pill" type="button" onClick={loadMapData}>
-          {isFetching ? 'Refreshing...' : `Updated ${formatRelative(mapData?.updatedAt)}`}
+          {isFetching ? 'Refreshing...' : `Updated ${timeAgo(mapData?.updatedAt) ?? 'unknown'}`}
         </button>
         <button className="icon-btn topbar-icon" type="button" onClick={() => setLegendOpen(true)} aria-label="Open legend">?</button>
         <div className="user-chip">

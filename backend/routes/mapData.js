@@ -2,7 +2,8 @@ const express = require('express');
 const axios = require('axios');
 const { _private: fireDataHelpers } = require('./fireData');
 const { LruTtlCache } = require('../utils/lruCache');
-const { bboxOf, bboxWithinRadius, distanceToPolygonMetres } = require('../utils/geo');
+const { bboxOf, bboxWithinRadius, distanceMetres, distanceToPolygonMetres } = require('../utils/geo');
+const { nextPasses } = require('../utils/satellitePasses');
 
 const router = express.Router();
 
@@ -63,6 +64,10 @@ const PERIMETER_MATCH_RADIUS_M = 1000;
 // perimeter older than that is another fire's, and claiming it would lend a new
 // incident somebody else's acreage.
 const PERIMETER_DISCOVERY_SLACK_MS = 12 * 60 * 60 * 1000;
+
+// A detection is the fire's own when it falls within this distance of the
+// fire's mapped perimeter - or of its reported origin, when nothing is mapped.
+const DETECTION_NEAR_FIRE_M = 2000;
 
 const EVACUATION_STATUS = {
   'evacuation order': 'order',
@@ -342,16 +347,51 @@ function perimetersForIncident(perimeters, incident) {
   };
 }
 
-// The ground a forecast should treat as already burned: every perimeter mapped
-// at the incident's location, merged by the caller. Name matches are left out
-// on purpose. A shared word in a name is enough to say a perimeter exists, not
-// to tell the model where fuel has already gone.
+// The perimeters mapped at the incident's location. Name matches are left out
+// on purpose: a shared word in a name is enough to say a perimeter exists, not
+// to say where the fire is.
+function locatedPerimeters(perimeters, incident) {
+  return matchPerimeters(indexPerimeters(perimeters), incident).byLocation;
+}
+
+// The ground a forecast should treat as already burned: every located
+// perimeter, merged by the caller.
 function burnedAreaFor(perimeters, incident) {
-  const { byLocation } = matchPerimeters(indexPerimeters(perimeters), incident);
-  if (!byLocation.length) return null;
+  const located = locatedPerimeters(perimeters, incident);
+  if (!located.length) return null;
   return {
     type: 'FeatureCollection',
-    features: byLocation.map(({ feature }) => ({ type: 'Feature', properties: {}, geometry: feature.geometry })),
+    features: located.map(({ feature }) => ({ type: 'Feature', properties: {}, geometry: feature.geometry })),
+  };
+}
+
+function detectedNearFire(fire, incident, located) {
+  const lon = Number(fire.longitude);
+  const lat = Number(fire.latitude);
+  if (!located.length) return distanceMetres(incident.lon, incident.lat, lon, lat) <= DETECTION_NEAR_FIRE_M;
+  return located.some(({ bbox, feature }) => bboxWithinRadius(bbox, lon, lat, DETECTION_NEAR_FIRE_M)
+    && distanceToPolygonMetres(lon, lat, feature.geometry) <= DETECTION_NEAR_FIRE_M);
+}
+
+/** The newest detection on or near the fire, as ISO, or null. */
+function lastDetectionAt(hotspots, incident, located) {
+  const times = hotspots
+    .filter((fire) => detectedNearFire(fire, incident, located))
+    .map((fire) => toMillis(fire.timestamp))
+    .filter(Number.isFinite);
+  return times.length ? toIso(Math.max(...times)) : null;
+}
+
+// How old each source behind an incident is, and when satellites next look.
+// Perimeters come from aircraft and detections from satellites, on different
+// clocks, so each is dated on its own rather than summed into one "updated".
+async function freshnessFor(payload, incident) {
+  const located = locatedPerimeters(payload.perimeters, incident);
+  const mappedAt = located.map((entry) => entry.mappedAt).filter(Number.isFinite);
+  return {
+    perimeterMappedAt: mappedAt.length ? toIso(Math.max(...mappedAt)) : null,
+    lastDetectionAt: lastDetectionAt(payload.hotspots, incident, located),
+    nextPasses: await nextPasses(incident.lat, incident.lon),
   };
 }
 
@@ -726,6 +766,7 @@ router.get('/incidents/:id', async (req, res) => {
   const alerts = payload.alerts.slice(0, 8);
   return res.json({
     incident,
+    freshness: await freshnessFor(payload, incident),
     // This sent every perimeter in the bootstrap - 553 across the western US,
     // re-serialised on each incident click - for a field no client reads. The
     // incident's own perimeters, matched the same way annotateIncidents
@@ -787,6 +828,7 @@ module.exports.burnedAreaForIncident = burnedAreaForIncident;
 module.exports._private = {
   annotateIncidents,
   burnedAreaFor,
+  freshnessFor,
   resolveAcreage,
   perimetersForIncident,
   normalizeEvacuationZone,

@@ -16,6 +16,7 @@
 // on the pill reveals the full source name and any error message.
 
 import React from 'react';
+import { timeAgo } from '../utils/relativeTime';
 
 const TIER_LIVE = 'live';
 const TIER_PARTIAL = 'partial';
@@ -40,20 +41,6 @@ function tierLabel(tier) {
   }
 }
 
-// "fetched 4 min ago" — accepts ISO string, falls back to em-dash.
-function formatRelative(iso) {
-  if (!iso) return null;
-  const ts = Date.parse(iso);
-  if (!Number.isFinite(ts)) return null;
-  const seconds = Math.max(0, Math.round((Date.now() - ts) / 1000));
-  if (seconds < 45) return 'just now';
-  const minutes = Math.round(seconds / 60);
-  if (minutes < 60) return `${minutes} min ago`;
-  const hours = Math.round(minutes / 60);
-  if (hours < 36) return `${hours} hr ago`;
-  return `${Math.round(hours / 24)} d ago`;
-}
-
 // Map of layerStatus keys -> short user-facing label. The key list is
 // intentionally fixed: if the backend adds a new key it is rendered with
 // its raw key as the label (better than silently dropping it).
@@ -71,7 +58,7 @@ const ORDER = ['incidents', 'perimeters', 'hotspots', 'alerts', 'evacuations'];
 function StatusPill({ statusKey, status }) {
   const tier = classifyStatus(status);
   const label = LABELS[statusKey] || statusKey;
-  const fetched = formatRelative(status?.lastFetchedAt);
+  const fetched = timeAgo(status?.lastFetchedAt);
   const title = [
     status?.source || label,
     `Status: ${tierLabel(tier)}`,
@@ -129,4 +116,4 @@ export default function SourceHealthPanel({ layerStatus, className = '' }) {
 }
 
 // Exported for unit tests.
-export const _internal = { classifyStatus, tierLabel, formatRelative, LABELS, ORDER };
+export const _internal = { classifyStatus, tierLabel, LABELS, ORDER };
