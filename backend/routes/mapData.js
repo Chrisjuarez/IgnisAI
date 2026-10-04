@@ -2,6 +2,7 @@ const express = require('express');
 const axios = require('axios');
 const { _private: fireDataHelpers } = require('./fireData');
 const { LruTtlCache } = require('../utils/lruCache');
+const { bboxOf, bboxWithinRadius, distanceToPolygonMetres } = require('../utils/geo');
 
 const router = express.Router();
 
@@ -50,6 +51,18 @@ const EVACUATION_GEOMETRY_TOLERANCE_DEG = 0.0002;
 // about 50 m keeps every attribute and takes the download to 2.6 MB. The map
 // draws perimeters from /fire-perimeters at full resolution, not from here.
 const PERIMETER_GEOMETRY_TOLERANCE_DEG = 0.0005;
+
+// A perimeter belongs to an incident when it lies within this distance of the
+// incident's reported origin. Names cannot be relied on - FIRIS perimeters carry
+// none, and the only label on Bouquet's was a mission code that misspelled it -
+// and neither can containment: Bouquet's reported origin sat 112 m outside every
+// perimeter mapped around it.
+const PERIMETER_MATCH_RADIUS_M = 1000;
+
+// ...and was mapped no more than this long before the fire was discovered. A
+// perimeter older than that is another fire's, and claiming it would lend a new
+// incident somebody else's acreage.
+const PERIMETER_DISCOVERY_SLACK_MS = 12 * 60 * 60 * 1000;
 
 const EVACUATION_STATUS = {
   'evacuation order': 'order',
@@ -249,28 +262,92 @@ function perimeterNameMatches(perimeterName, incidentName) {
   ));
 }
 
-function perimetersForIncident(perimeters, incident) {
+function toMillis(value) {
+  if (value == null || value === '') return null;
+  const ms = typeof value === 'number' ? value : Date.parse(value);
+  return Number.isFinite(ms) ? ms : null;
+}
+
+// Each perimeter's matching attributes, computed once per bootstrap rather than
+// once per incident it is compared against.
+function indexPerimeters(perimeters) {
+  return (perimeters?.features || []).map((feature) => {
+    const props = feature?.properties || {};
+    return {
+      feature,
+      name: normalizeName(perimeterIncidentName(feature)),
+      bbox: bboxOf(feature?.geometry),
+      mappedAt: toMillis(firstValue(props, ['poly_DateCurrent', 'poly_PolygonDateTime', 'CreationDate', 'poly_CreateDate'])),
+      acres: toNumber(firstValue(props, ['area_acres', 'poly_GISAcres', 'GISAcres'])),
+      // FIRIS's public view carries USFS heat perimeters as well as its own, and
+      // says which in `source`. WFIGS perimeters have no such field.
+      provider: firstValue(props, ['source']) || (props.poly_IncidentName != null ? 'WFIGS' : 'perimeter'),
+    };
+  });
+}
+
+function mappedNearIncident(entry, incident) {
+  if (!bboxWithinRadius(entry.bbox, incident.lon, incident.lat, PERIMETER_MATCH_RADIUS_M)) return false;
+  const discoveredAt = toMillis(incident.createdAt);
+  if (discoveredAt != null && entry.mappedAt != null && entry.mappedAt < discoveredAt - PERIMETER_DISCOVERY_SLACK_MS) {
+    return false;
+  }
+  return distanceToPolygonMetres(incident.lon, incident.lat, entry.feature.geometry) <= PERIMETER_MATCH_RADIUS_M;
+}
+
+function matchPerimeters(index, incident) {
   const nameKey = normalizeName(incident?.name);
   return {
+    byLocation: index.filter((entry) => mappedNearIncident(entry, incident)),
+    byName: index.filter((entry) => perimeterNameMatches(entry.name, nameKey)),
+  };
+}
+
+// The newest located perimeter with a measured area. Only located matches
+// count: name matching is a substring test, loose enough to say a perimeter
+// exists but not to borrow a number from.
+function latestMeasurement(located) {
+  return located
+    .filter((entry) => Number.isFinite(entry.acres) && entry.acres > 0)
+    .sort((a, b) => (b.mappedAt ?? 0) - (a.mappedAt ?? 0))[0] || null;
+}
+
+function roundAcres(value) {
+  return value >= 100 ? Math.round(value) : Math.round(value * 10) / 10;
+}
+
+// What to show for size, and where it came from. A fire does not shrink, so a
+// reported size below the newest measured perimeter is stale or wrong: Bouquet's
+// was overwritten with its 0.1-acre discovery size hours after FIRIS had mapped
+// 1,048. The measurement wins then, and says so.
+function resolveAcreage(incident, located) {
+  const measured = latestMeasurement(located);
+  if (measured && !(Number(incident.acres) >= measured.acres)) {
+    return {
+      acres: roundAcres(measured.acres),
+      acresSource: { kind: 'perimeter', provider: measured.provider, asOf: toIso(measured.mappedAt) },
+    };
+  }
+  return {
+    acres: incident.acres,
+    acresSource: { kind: 'reported', provider: 'WFIGS', asOf: incident.updatedAt },
+  };
+}
+
+function perimetersForIncident(perimeters, incident) {
+  const { byLocation, byName } = matchPerimeters(indexPerimeters(perimeters), incident);
+  return {
     type: 'FeatureCollection',
-    features: (perimeters?.features || []).filter((feature) => (
-      perimeterNameMatches(normalizeName(perimeterIncidentName(feature)), nameKey)
-    )),
+    features: [...new Set([...byLocation, ...byName].map((entry) => entry.feature))],
   };
 }
 
 function annotateIncidents(incidents, perimeters, hotspots) {
-  const perimeterNames = new Set(
-    (perimeters?.features || [])
-      .map(perimeterIncidentName)
-      .map(normalizeName)
-      .filter(Boolean)
-  );
+  const index = indexPerimeters(perimeters);
 
   return incidents.map((incident) => {
-    const nameKey = normalizeName(incident.name);
-    const hasPerimeter = perimeterNames.has(nameKey) ||
-      Array.from(perimeterNames).some((candidate) => perimeterNameMatches(candidate, nameKey));
+    const { byLocation, byName } = matchPerimeters(index, incident);
+    const hasPerimeter = byLocation.length > 0 || byName.length > 0;
     const hasHotspots = hotspots.some((fire) => {
       const dLat = Math.abs(Number(fire.latitude) - incident.lat);
       const dLon = Math.abs(Number(fire.longitude) - incident.lon);
@@ -279,6 +356,8 @@ function annotateIncidents(incidents, perimeters, hotspots) {
     const predictionEligibility = resolvePredictionEligibility(incident, { hasPerimeter, hasHotspots });
     return {
       ...incident,
+      ...resolveAcreage(incident, byLocation),
+      reportedAcres: incident.acres,
       hasPerimeter,
       hasHotspots,
       sourceNames: [
@@ -685,6 +764,8 @@ router.get('/layers', async (_req, res) => {
 
 module.exports = router;
 module.exports._private = {
+  annotateIncidents,
+  resolveAcreage,
   perimetersForIncident,
   normalizeEvacuationZone,
   shortZoneId,

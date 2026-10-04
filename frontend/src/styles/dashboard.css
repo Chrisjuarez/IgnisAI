@@ -2165,6 +2165,14 @@ body {
   margin-top: 4px;
 }
 
+.incident-stats .incident-stat-source {
+  display: block;
+  margin-top: 4px;
+  color: var(--ignis-muted);
+  font-size: 11px;
+  font-style: normal;
+}
+
 .detail-section,
 .updates-list,
 .info-list {
