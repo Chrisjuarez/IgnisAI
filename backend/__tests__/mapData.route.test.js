@@ -11,7 +11,7 @@ const app = require('../app');
 
 const FIRMS_CSV = [
   'latitude,longitude,bright_ti4,scan,track,acq_date,acq_time,satellite,instrument,confidence,version,bright_ti5,frp,daynight',
-  '34.0522,-118.2437,330.5,0.4,0.4,2026-04-22,1430,N21,VIIRS,high,2.0,328.5,12.3,D',
+  '34.0700,-118.5400,330.5,0.4,0.4,2026-04-22,1430,N21,VIIRS,high,2.0,328.5,12.3,D',
 ].join('\n');
 
 function collection(features = []) {
@@ -259,7 +259,7 @@ describe('GET /api/map/bootstrap', () => {
 
       expect(res.body.freshness).toEqual({
         perimeterMappedAt: null,
-        lastDetectionAt: null,
+        lastDetectionAt: '2026-04-22T14:30:00.000Z',
         nextPasses: [{ satellite: 'NOAA-20', instrument: 'VIIRS', at: '2026-10-04T21:29:00.000Z' }],
       });
       expect(nextPasses).toHaveBeenCalledWith(34.05, -118.55);
@@ -268,7 +268,7 @@ describe('GET /api/map/bootstrap', () => {
 });
 
 describe('matching perimeters to incidents', () => {
-  const { annotateIncidents } = require('../routes/mapData')._private;
+  const { annotateIncidents, matchPerimetersToIncidents } = require('../routes/mapData')._private;
   const DISCOVERED = '2026-10-03T21:16:00.000Z';
   const FLIGHT_2109 = Date.parse('2026-10-04T04:09:00Z');
 
@@ -287,7 +287,13 @@ describe('matching perimeters to incidents', () => {
       properties: { source: 'FIRIS', mission: 'CA-ANF-BOQUET-N50X', incident_name: null, ...props },
     };
   };
-  const annotate = (incident, features) => annotateIncidents([incident], collection(features), [])[0];
+  const annotateAll = (incidents, features, hotspots = []) => (
+    annotateIncidents(incidents, matchPerimetersToIncidents(collection(features), incidents), hotspots)
+  );
+  const annotate = (incident, features) => annotateAll([incident], features)[0];
+  const perimetersOf = (features, incidents = [bouquet()]) => (
+    matchPerimetersToIncidents(collection(features), incidents).get(incidents[0].id)
+  );
 
   it('links a nameless perimeter mapped just outside the reported origin', () => {
     // The Bouquet case: no incident name on the perimeter, a misspelled mission
@@ -334,11 +340,69 @@ describe('matching perimeters to incidents', () => {
     expect(result.hasPerimeter).toBe(true);
   });
 
-  it('still links a named perimeter too far away to locate, without borrowing its acreage', () => {
+  it('does not link a perimeter by a shared name alone', () => {
     const named = square(30000, { source: undefined, poly_IncidentName: 'Bouquet', poly_GISAcres: 50000 });
     const result = annotate(bouquet(), [named]);
-    expect(result.hasPerimeter).toBe(true);
+    expect(result.hasPerimeter).toBe(false);
     expect(result.acres).toBe(0.1);
+  });
+
+  describe('a perimeter that covers several fires', () => {
+    // Crosswhite's WFIGS perimeter covered the origins of nine other fires,
+    // and each of them showed its 355,065 acres.
+    const crosswhite = bouquet({ id: 'wfigs:crosswhite', name: '0445 CROSSWHITE', irwinId: 'CROSSWHITE-ID', acres: 342923 });
+    const twickenham = bouquet({ id: 'wfigs:twickenham', name: '0444 TWICKENHAM', irwinId: 'TWICKENHAM-ID', acres: 254 });
+    const complex = square(0, {
+      source: undefined, poly_IncidentName: 'Crosswhite', attr_IrwinID: '{crosswhite-id}', poly_GISAcres: 355065, poly_DateCurrent: FLIGHT_2109,
+    });
+
+    it('belongs to the incident its IRWIN ID names, and lends the others nothing', () => {
+      const [owner, inside] = annotateAll([crosswhite, twickenham], [complex]);
+
+      expect(owner).toMatchObject({ acres: 355065, hasPerimeter: true });
+      expect(owner.acresSource.kind).toBe('perimeter');
+      expect(inside).toMatchObject({ acres: 254, hasPerimeter: false });
+      expect(inside.acresSource.kind).toBe('reported');
+    });
+
+    it('is still burned ground for a forecast of a fire inside it', () => {
+      const { burnedAreaFor } = require('../routes/mapData')._private;
+      const burned = burnedAreaFor(perimetersOf([complex], [twickenham, crosswhite]));
+      expect(burned.features).toHaveLength(1);
+    });
+
+    it('goes to the fire it is named for when it carries no IRWIN ID', () => {
+      const plaskett = bouquet({ id: 'wfigs:plaskett', name: 'Plaskett', acres: 29993 });
+      const timber = bouquet({ id: 'wfigs:timber', name: 'Timber', acres: 25350 });
+      const flight = square(0, { source: 'USFS', mission: 'PLASKETT', incident_name: 'PLASKETT', area_acres: 30124, poly_DateCurrent: FLIGHT_2109 });
+
+      const [named, neighbour] = annotateAll([plaskett, timber], [flight]);
+
+      expect(named.acres).toBe(30124);
+      expect(neighbour).toMatchObject({ acres: 25350, hasPerimeter: false });
+    });
+
+    it('goes to neither of two fires when it names neither', () => {
+      const [a, b] = annotateAll([bouquet(), bouquet({ id: 'wfigs:other', name: 'OTHER' })], [square(112, { area_acres: 1048.26, poly_DateCurrent: FLIGHT_2109 })]);
+      expect([a.hasPerimeter, b.hasPerimeter]).toEqual([false, false]);
+    });
+  });
+
+  describe('hotspots', () => {
+    const KM_LON = 1 / (111.32 * Math.cos((34.561835 * Math.PI) / 180));
+    const detectionWest = (km) => ({ longitude: -118.40183 - km * KM_LON, latitude: 34.561835, timestamp: new Date('2026-10-04T20:33:00Z') });
+
+    it('counts a detection within 2 km of the fire', () => {
+      expect(annotateAll([bouquet()], [], [detectionWest(1.5)])[0].hasHotspots).toBe(true);
+    });
+
+    it('does not count another fire 20 km away', () => {
+      // The 35 km box this replaced called these live while freshness said
+      // no detection had fallen near the fire.
+      const [result] = annotateAll([bouquet()], [], [detectionWest(20)]);
+      expect(result.hasHotspots).toBe(false);
+      expect(result.predictionEligibility.eligible).toBe(false);
+    });
   });
 
   it('rounds measured acreage the way the panel displays it', () => {
@@ -348,6 +412,11 @@ describe('matching perimeters to incidents', () => {
 
   describe('freshness', () => {
     const { freshnessFor } = require('../routes/mapData')._private;
+    const payloadFor = (features, hotspots, incidents = [bouquet()]) => ({
+      perimeters: collection(features),
+      hotspots,
+      incidentPerimeters: matchPerimetersToIncidents(collection(features), incidents),
+    });
     const detection = (lon, lat, iso) => ({ longitude: lon, latitude: lat, timestamp: new Date(iso) });
     // 1 km of longitude at Bouquet's latitude, in degrees.
     const KM_LON = 1 / (111.32 * Math.cos((34.561835 * Math.PI) / 180));
@@ -355,17 +424,14 @@ describe('matching perimeters to incidents', () => {
     it('dates the newest perimeter and the newest detection on or near it', async () => {
       const mapped = square(112, { area_acres: 1048.26, poly_DateCurrent: FLIGHT_2109 });
       const westEdge = mapped.geometry.coordinates[0][0][0];
-      const payload = {
-        perimeters: collection([
-          square(112, { source: 'USFS', area_acres: 709.7, poly_DateCurrent: Date.parse('2026-10-03T23:49:00Z') }),
-          mapped,
-        ]),
-        hotspots: [
-          detection(westEdge + 0.01, 34.56, '2026-10-04T09:13:00Z'),        // inside the perimeter
-          detection(westEdge - 1.5 * KM_LON, 34.56, '2026-10-04T20:33:00Z'), // 1.5 km off its edge
-          detection(westEdge - 5 * KM_LON, 34.56, '2026-10-04T21:48:00Z'),   // another fire, 5 km off
-        ],
-      };
+      const payload = payloadFor([
+        square(112, { source: 'USFS', area_acres: 709.7, poly_DateCurrent: Date.parse('2026-10-03T23:49:00Z') }),
+        mapped,
+      ], [
+        detection(westEdge + 0.01, 34.56, '2026-10-04T09:13:00Z'),        // inside the perimeter
+        detection(westEdge - 1.5 * KM_LON, 34.56, '2026-10-04T20:33:00Z'), // 1.5 km off its edge
+        detection(westEdge - 5 * KM_LON, 34.56, '2026-10-04T21:48:00Z'),   // another fire, 5 km off
+      ]);
 
       const freshness = await freshnessFor(payload, bouquet());
 
@@ -375,13 +441,10 @@ describe('matching perimeters to incidents', () => {
     });
 
     it('measures from the reported origin when nothing is mapped', async () => {
-      const payload = {
-        perimeters: collection([]),
-        hotspots: [
-          detection(-118.40183 - 1 * KM_LON, 34.561835, '2026-10-04T09:13:00Z'),
-          detection(-118.40183 - 3 * KM_LON, 34.561835, '2026-10-04T20:33:00Z'),
-        ],
-      };
+      const payload = payloadFor([], [
+        detection(-118.40183 - 1 * KM_LON, 34.561835, '2026-10-04T09:13:00Z'),
+        detection(-118.40183 - 3 * KM_LON, 34.561835, '2026-10-04T20:33:00Z'),
+      ]);
 
       const freshness = await freshnessFor(payload, bouquet());
 
@@ -389,8 +452,20 @@ describe('matching perimeters to incidents', () => {
       expect(freshness.lastDetectionAt).toBe('2026-10-04T09:13:00.000Z');
     });
 
+    it('measures a fire inside another fire\'s perimeter from its own origin', async () => {
+      // The other fire's edge is 3 km off; a detection on it is not this fire's.
+      const other = square(0, { attr_IrwinID: 'OTHER-ID', poly_GISAcres: 9000, poly_DateCurrent: FLIGHT_2109 });
+      const westEdge = other.geometry.coordinates[0][0][0];
+      const payload = payloadFor([other], [detection(westEdge - 0.5 * KM_LON, 34.56, '2026-10-04T20:33:00Z')]);
+
+      const freshness = await freshnessFor(payload, bouquet());
+
+      expect(freshness.perimeterMappedAt).toBeNull();
+      expect(freshness.lastDetectionAt).toBeNull();
+    });
+
     it('has no last detection when none fall near the fire', async () => {
-      const payload = { perimeters: collection([]), hotspots: [detection(-117.0, 34.0, '2026-10-04T20:33:00Z')] };
+      const payload = payloadFor([], [detection(-117.0, 34.0, '2026-10-04T20:33:00Z')]);
 
       expect((await freshnessFor(payload, bouquet())).lastDetectionAt).toBeNull();
     });
@@ -404,7 +479,7 @@ describe('matching perimeters to incidents', () => {
         square(112, { source: 'USFS', area_acres: 709.7, poly_DateCurrent: Date.parse('2026-10-03T23:49:00Z') }),
         square(112, { area_acres: 1048.26, poly_DateCurrent: FLIGHT_2109 }),
       ];
-      const burned = burnedAreaFor(collection(flights), bouquet());
+      const burned = burnedAreaFor(perimetersOf(flights));
 
       expect(burned.features).toHaveLength(2);
       expect(burned.features.map((f) => f.geometry)).toEqual(flights.map((f) => f.geometry));
@@ -414,11 +489,11 @@ describe('matching perimeters to incidents', () => {
     it('leaves out a perimeter linked only by name', () => {
       // Enough to say a perimeter exists, not to tell the model where fuel is gone.
       const named = square(30000, { source: undefined, poly_IncidentName: 'Bouquet', poly_GISAcres: 50000 });
-      expect(burnedAreaFor(collection([named]), bouquet())).toBeNull();
+      expect(burnedAreaFor(perimetersOf([named]))).toBeNull();
     });
 
     it('is null for a fire with nothing mapped', () => {
-      expect(burnedAreaFor(collection([]), bouquet())).toBeNull();
+      expect(burnedAreaFor(perimetersOf([]))).toBeNull();
     });
   });
 });
