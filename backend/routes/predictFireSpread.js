@@ -293,16 +293,13 @@ router.get("/multistep", async (req, res) => {
       throw new Error(`tilesvc multistep missing bounds/steps: ${JSON.stringify(forecast)?.slice(0, 200)}`);
     }
 
-    return res.json({
-      bounds: forecast.bounds,
-      coordinates: Array.isArray(forecast?.coordinates) ? forecast.coordinates : undefined,
-      threshold: forecast?.threshold,
-      display_floor: forecast?.display_floor,
-      step_hours: forecast?.step_hours,
-      steps: forecast.steps,
-      ...pickModelFields(forecast),
-      ...(forecast?.debug ? { debug: forecast.debug } : {}),
-    });
+    // Forward the forecast whole, as /bands does. This route used to rebuild
+    // the response from a field whitelist, so every field tilesvc added later
+    // was dropped without a trace - `scene` among them. The arrival-band view,
+    // its labels and the hybrid layer all shipped in tilesvc and never reached
+    // a browser. The route adds nothing to the payload: validate the shape,
+    // pass it on, and a new field needs one change instead of two.
+    return res.json(forecast);
   } catch (err) {
     console.error("multistep error:", err?.response?.data || err.message);
     return res.status(502).json({ error: "tilesvc_multistep_failed", detail: err.message });

@@ -208,6 +208,49 @@ describe('GET /api/predict-fire-spread routes', () => {
     );
   });
 
+  it('forwards every field tilesvc returns on a multistep forecast', async () => {
+    // The route used to rebuild this response from a whitelist, which dropped
+    // `scene` - the arrival bands - on every request. The band view, its labels
+    // and the hybrid layer shipped in tilesvc and never reached the browser.
+    // Asserting on a field no list could have anticipated is the point: the
+    // route must forward what it receives, not what it was told to expect.
+    const forecast = {
+      bounds: [-118.6, 34.0, -118.1, 34.4],
+      steps: [{ index: 0, lead_hours: 24, label: '1 day', image_base64: 'frame-1' }],
+      scene: {
+        ignition: { type: 'Feature', geometry: { type: 'Point', coordinates: [-118.4, 34.56] }, properties: {} },
+        observed: { type: 'FeatureCollection', features: [] },
+        forecast: {
+          type: 'FeatureCollection',
+          features: [{ type: 'Feature', properties: { day: 1, color: '#bd0026' }, geometry: null }],
+        },
+      },
+      hybrid: { available: true, engines: ['learned', 'rothermel'], units: 'percentile_rank' },
+      calibration: { ok: true, method: 'isotonic' },
+      model: 'learned',
+      field_added_next_quarter: { anything: true },
+    };
+    axios.get.mockResolvedValue({ data: forecast });
+
+    const res = await request(app)
+      .get('/api/predict-fire-spread/multistep')
+      .query({ lat: 34.56, lon: -118.4 })
+      .expect(200);
+
+    expect(res.body).toEqual(forecast);
+  });
+
+  it('still refuses a forecast without bounds or steps', async () => {
+    axios.get.mockResolvedValue({ data: { scene: {}, steps: [] } });
+
+    const res = await request(app)
+      .get('/api/predict-fire-spread/multistep')
+      .query({ lat: 34.56, lon: -118.4 })
+      .expect(502);
+
+    expect(res.body.error).toBe('tilesvc_multistep_failed');
+  });
+
   it('always sends ignition=true on live multistep requests (no date)', async () => {
     axios.get.mockResolvedValue({
       data: {
