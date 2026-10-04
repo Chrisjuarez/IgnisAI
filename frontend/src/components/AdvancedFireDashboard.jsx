@@ -5,6 +5,7 @@ import { useAuth } from './auth/AuthContext';
 import SourceHealthPanel from './SourceHealthPanel';
 import SiteExposurePanel from './SiteExposurePanel';
 import { parseViewState, serializeViewState, viewStateChanged } from '../utils/viewState';
+import { HOTSPOT_AGE_BANDS } from '../utils/hotspotAge';
 import '../styles/dashboard.css';
 
 const WESTERN_CONUS_BBOX = '-125.1,31.0,-101.8,49.5';
@@ -17,6 +18,7 @@ const DEFAULT_LAYERS = {
   warnings: true,
   evacuations: true,
   prediction: true,
+  forecastStart: true,
   ndvi: false,
 };
 
@@ -241,6 +243,7 @@ function Drawer({
           <LayerToggle id="warnings" label="Fire weather warnings" source="NWS Alerts API" enabled={layerVisibility.warnings} status={layerStatus.alerts} onToggle={onToggleLayer} />
           <LayerToggle id="evacuations" label="Evacuation zones" source="CalOES / Genasys" enabled={layerVisibility.evacuations} status={layerStatus.evacuations} onToggle={onToggleLayer} />
           <LayerToggle id="prediction" label="Ignis prediction" source="Advisory model output" enabled={layerVisibility.prediction} onToggle={onToggleLayer} />
+          <LayerToggle id="forecastStart" label="Model's starting fire" source="Hotspots the forecast grew from" enabled={layerVisibility.forecastStart} onToggle={onToggleLayer} />
           <LayerToggle id="ndvi" label="NDVI overlay" source="Vegetation context" enabled={layerVisibility.ndvi} onToggle={onToggleLayer} />
         </div>
       )}
@@ -405,7 +408,14 @@ function LegendPanel({ open, onClose }) {
       </div>
       <div className="legend-row"><span className="legend-symbol incident" /> Active incident</div>
       <div className="legend-row"><span className="legend-symbol perimeter" /> Official perimeter</div>
-      <div className="legend-row"><span className="legend-symbol hotspot" /> FIRMS hotspot</div>
+      <div className="legend-group">
+        <span className="legend-group-title">Satellite hotspot, by age</span>
+        {HOTSPOT_AGE_BANDS.map((band) => (
+          <div key={band.label} className="legend-row">
+            <span className="legend-symbol hotspot" style={{ background: band.color }} /> {band.label}
+          </div>
+        ))}
+      </div>
       <div className="legend-row"><span className="legend-symbol warning" /> Fire weather warning</div>
       <div className="legend-row"><span className="legend-ramp" /> Ignis advisory risk</div>
     </div>
@@ -623,6 +633,7 @@ const AdvancedFireDashboard = () => {
           alerts={warnings}
           evacuations={mapData?.evacuations}
           layerVisibility={layerVisibility}
+          onToggleLayer={handleToggleLayer}
           selectedIncident={selectedIncident}
           selectedAlert={selectedWarning}
           onIncidentSelect={handleIncidentSelect}

@@ -80,6 +80,7 @@ jest.mock('mapbox-gl', () => {
       this.controls = [];
       this.setLayoutProperty = jest.fn();
       this.setPaintProperty = jest.fn();
+      this.moveLayer = jest.fn();
       this.setCenter = jest.fn();
       this.getCenter = jest.fn(() => ({ lat: 38, lng: -98 }));
       this.setZoom = jest.fn(z => { this._zoom = z; });

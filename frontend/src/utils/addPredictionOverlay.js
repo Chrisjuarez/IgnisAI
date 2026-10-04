@@ -327,7 +327,7 @@ function isFeatureCollection(geojson) {
   return geojson?.type === 'FeatureCollection' && Array.isArray(geojson.features);
 }
 
-function upsertLineGeoJSON(map, sourceId, layerId, geojson, paint) {
+function upsertLineGeoJSON(map, sourceId, layerId, geojson, paint, visibility = 'visible') {
   if (!isFeatureCollection(geojson) || !geojson.features.length) {
     removeIfExists(map, layerId, sourceId);
     return;
@@ -339,21 +339,31 @@ function upsertLineGeoJSON(map, sourceId, layerId, geojson, paint) {
     map.addSource(sourceId, { type: 'geojson', data: geojson });
   }
 
-  if (!map.getLayer(layerId)) {
+  if (map.getLayer(layerId)) {
+    map.setLayoutProperty(layerId, 'visibility', visibility);
+  } else {
     map.addLayer({
       id: layerId,
       type: 'line',
       source: sourceId,
+      layout: { visibility },
       paint,
     });
   }
 }
 
+/**
+ * Draw one heat frame. Each frame replaces the last layer outright, so the
+ * caller passes the forecast's current visibility and opacity rather than
+ * having a hidden or faded forecast reappear at full strength on the next tick.
+ */
 export async function renderPredictionRasterFrame(map, frame, opts = {}) {
   await waitForMapLoad(map);
 
   const bounds = frame?.bounds;
   const layerMode = opts.layerMode || 'new_burn';
+  const visibility = opts.visible === false ? 'none' : 'visible';
+  const opacity = clamp01(Number.isFinite(opts.opacity) ? opts.opacity : 1);
   const imageUrl = frame?.layerHeatmapUrls?.[layerMode] || frame?.heatmapUrl;
   const coordinates = resolveRasterCoordinates(frame);
   if (!Array.isArray(bounds) || bounds.length !== 4) {
@@ -373,8 +383,9 @@ export async function renderPredictionRasterFrame(map, frame, opts = {}) {
     id: IDS.rasterLayer,
     type: 'raster',
     source: IDS.rasterSource,
+    layout: { visibility },
     paint: {
-      'raster-opacity': 1.0,
+      'raster-opacity': opacity,
       'raster-resampling': 'linear',
     },
   });
@@ -383,13 +394,13 @@ export async function renderPredictionRasterFrame(map, frame, opts = {}) {
     'line-color': '#fff2a8',
     'line-width': 2,
     'line-opacity': 0.95,
-  });
+  }, visibility);
   upsertLineGeoJSON(map, IDS.contour50Source, IDS.contour50Line, frame?.contour_50, {
     'line-color': '#ffffff',
     'line-width': 1.2,
     'line-dasharray': [2, 1.4],
     'line-opacity': 0.75,
-  });
+  }, visibility);
 
   if (opts.showBounds) {
     const boundsGeo = boundsToPolygonGeoJSON(bounds);
@@ -920,6 +931,12 @@ export async function renderPredictionScene(map, scene, opts = {}) {
   }
 
   return { kind: 'scene', bands: bands.features.length, activeLeadHours };
+}
+
+/** Fade the heat frame in place, without reloading its image. */
+export function setPredictionRasterOpacity(map, opacity) {
+  if (!map?.getLayer?.(IDS.rasterLayer)) return;
+  map.setPaintProperty(IDS.rasterLayer, 'raster-opacity', clamp01(opacity));
 }
 
 export function removePredictionRaster(map) {

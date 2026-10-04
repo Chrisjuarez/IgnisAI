@@ -12,7 +12,9 @@ import {
   prepareMultistepRasterFrames,
   renderPredictionRasterFrame,
   removePredictionOverlays,
+  setPredictionRasterOpacity,
 } from '../../utils/addPredictionOverlay';
+import { HOTSPOT_AGE_COLOR } from '../../utils/hotspotAge';
 
 jest.mock('../../api', () => ({
   getWildfireData: jest.fn(() => Promise.resolve({ data: { data: [] } })),
@@ -67,6 +69,7 @@ jest.mock('../../utils/addPredictionOverlay', () => ({
   removePredictionOverlays: jest.fn(),
   removePredictionRaster: jest.fn(),
   removePredictionScene: jest.fn(),
+  setPredictionRasterOpacity: jest.fn(),
 }));
 
 describe('Dashboard controls', () => {
@@ -407,9 +410,12 @@ describe('Dashboard controls', () => {
     expect(screen.getByText('6 hours')).toBeInTheDocument();
     expect(screen.getByText(/Fire-spread risk/i)).toBeInTheDocument();
     expect(screen.getByText(/not an observed or predicted official perimeter/i)).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: /Observed/i })).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: /New Burn Risk/i })).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: /Next Fire/i })).toBeInTheDocument();
+    // Only the view switch sits above the timeline. The heat layer choice and
+    // the diagnostics are under Model details, and nothing does nothing.
+    expect(screen.getByRole('button', { name: /Arrival bands/i })).toBeInTheDocument();
+    expect(screen.getByText(/Model details/i)).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /Observed/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole('radio', { name: /Chance of new fire/i })).not.toBeInTheDocument();
 
     fireEvent.change(screen.getByLabelText(/forecast timeline slider/i), { target: { value: '1' } });
 
@@ -542,6 +548,155 @@ describe('Dashboard controls', () => {
       expect(calls.some(([layer, prop]) => layer === 'satellite' && prop === 'raster-saturation'))
         .toBe(true);
       expect(calls.some(([layer]) => layer === 'spread-bands-label')).toBe(true);
+    });
+  });
+  describe('forecast panel controls', () => {
+    const baseProps = {
+      brightnessFilter: '',
+      confidenceFilter: '',
+      onFiresUpdated: jest.fn(),
+      setIsFetching: jest.fn(),
+      mapStyle: 'mapbox://styles/mapbox/streets-v12',
+      userLocation: null,
+      range: 0,
+      onNearbyFiresUpdate: jest.fn(),
+    };
+    const allLayersOn = {
+      prediction: true, perimeters: true, hotspots: true, evacuations: true, forecastStart: true,
+    };
+
+    async function openCampForecast() {
+      fireEvent.click(await screen.findByRole('button', { name: /history/i }));
+      fireEvent.click(screen.getByRole('button', { name: /camp\/paradise fire/i }));
+      expect(await screen.findByTestId('forecast-panel')).toBeInTheDocument();
+      return mapboxgl.__mockMaps[mapboxgl.__mockMaps.length - 1];
+    }
+
+    test('the heat layer choice appears only in the heat view and drives the heatmap', async () => {
+      const MapComponent = require('../MapComponent').default;
+      render(<MapComponent {...baseProps} />);
+      await openCampForecast();
+
+      expect(screen.queryByRole('radio', { name: /chance of any fire/i })).not.toBeInTheDocument();
+
+      fireEvent.click(screen.getByRole('button', { name: /probability heat/i }));
+      fireEvent.click(await screen.findByRole('radio', { name: /chance of any fire/i }));
+
+      await waitFor(() => {
+        expect(renderPredictionRasterFrame).toHaveBeenLastCalledWith(
+          expect.anything(), expect.anything(), expect.objectContaining({ layerMode: 'next_fire' }),
+        );
+      });
+    });
+
+    test('show on map switches the same layers as the Layers drawer', async () => {
+      const MapComponent = require('../MapComponent').default;
+      const onToggleLayer = jest.fn();
+      render(<MapComponent {...baseProps} layerVisibility={allLayersOn} onToggleLayer={onToggleLayer} />);
+      await openCampForecast();
+
+      fireEvent.click(screen.getByRole('checkbox', { name: /official perimeter/i }));
+      fireEvent.click(screen.getByRole('checkbox', { name: /model's starting fire/i }));
+
+      expect(onToggleLayer).toHaveBeenNthCalledWith(1, 'perimeters');
+      expect(onToggleLayer).toHaveBeenNthCalledWith(2, 'forecastStart');
+    });
+
+    test('hiding the forecast hides the arrival bands; the starting fire has its own switch', async () => {
+      const MapComponent = require('../MapComponent').default;
+      const { rerender } = render(<MapComponent {...baseProps} layerVisibility={allLayersOn} />);
+      const map = mapboxgl.__mockMaps[mapboxgl.__mockMaps.length - 1];
+      await waitFor(() => expect(map.getLayer('spread-bands-fill')).toBeTruthy());
+
+      // The Layers drawer's prediction switch used to leave every band drawn.
+      rerender(<MapComponent {...baseProps} layerVisibility={{ ...allLayersOn, prediction: false }} />);
+      await waitFor(() => {
+        ['spread-bands-fill', 'spread-bands-outline', 'spread-bands-label'].forEach((layerId) => {
+          expect(map.setLayoutProperty).toHaveBeenCalledWith(layerId, 'visibility', 'none');
+        });
+      });
+      expect(map.setLayoutProperty).not.toHaveBeenCalledWith('spread-observed-fill', 'visibility', 'none');
+
+      rerender(<MapComponent {...baseProps} layerVisibility={{ ...allLayersOn, forecastStart: false }} />);
+      await waitFor(() => {
+        expect(map.setLayoutProperty).toHaveBeenCalledWith('spread-observed-fill', 'visibility', 'none');
+      });
+    });
+
+    test('a hidden forecast stays hidden as the heat timeline advances', async () => {
+      const MapComponent = require('../MapComponent').default;
+      render(<MapComponent {...baseProps} layerVisibility={{ ...allLayersOn, prediction: false }} />);
+      await openCampForecast();
+
+      fireEvent.click(screen.getByRole('button', { name: /probability heat/i }));
+      fireEvent.change(screen.getByLabelText(/forecast timeline slider/i), { target: { value: '1' } });
+
+      await waitFor(() => {
+        expect(renderPredictionRasterFrame).toHaveBeenLastCalledWith(
+          expect.anything(),
+          expect.objectContaining({ label: '12 hours' }),
+          expect.objectContaining({ visible: false }),
+        );
+      });
+    });
+
+    test('forecast opacity fades the bands and heatmap in place', async () => {
+      const MapComponent = require('../MapComponent').default;
+      render(<MapComponent {...baseProps} layerVisibility={allLayersOn} onToggleLayer={jest.fn()} />);
+      const map = await openCampForecast();
+      fireEvent.click(screen.getByRole('button', { name: /probability heat/i }));
+      await waitFor(() => expect(renderPredictionRasterFrame).toHaveBeenCalled());
+      const framesDrawn = renderPredictionRasterFrame.mock.calls.length;
+
+      fireEvent.change(screen.getByRole('slider', { name: /forecast opacity/i }), { target: { value: '0.4' } });
+
+      await waitFor(() => expect(setPredictionRasterOpacity).toHaveBeenCalledWith(map, 0.4));
+      const bandFill = map.setPaintProperty.mock.calls
+        .filter(([layerId, property]) => layerId === 'spread-bands-fill' && property === 'fill-opacity')
+        .pop();
+      expect(bandFill[2][2]).toBeCloseTo(0.62 * 0.4);
+      // Fading must not reload the heat image.
+      expect(renderPredictionRasterFrame.mock.calls.length).toBe(framesDrawn);
+    });
+
+    test('the basemap is not dimmed for a forecast that is switched off', async () => {
+      const MapComponent = require('../MapComponent').default;
+      render(<MapComponent {...baseProps} layerVisibility={{ ...allLayersOn, prediction: false }} />);
+      const map = mapboxgl.__mockMaps[mapboxgl.__mockMaps.length - 1];
+      map.addLayer({ id: 'satellite', type: 'raster' });
+
+      await openCampForecast();
+
+      await waitFor(() => expect(renderPredictionRasterFrame).toHaveBeenCalled());
+      expect(map.setPaintProperty.mock.calls.some(([layerId]) => layerId === 'satellite')).toBe(false);
+    });
+
+    test('the official perimeter is lifted back over each heat frame', async () => {
+      const MapComponent = require('../MapComponent').default;
+      render(<MapComponent {...baseProps} layerVisibility={allLayersOn} />);
+      const map = await openCampForecast();
+      map.moveLayer.mockClear();
+
+      fireEvent.click(screen.getByRole('button', { name: /probability heat/i }));
+
+      await waitFor(() => expect(map.moveLayer).toHaveBeenCalledWith('fire-perimeters-outline'));
+    });
+
+    test('hotspots carry their age and are coloured by it', async () => {
+      const MapComponent = require('../MapComponent').default;
+      const twoHoursAgo = new Date(Date.now() - 2 * 3_600_000).toISOString();
+      getWildfireData.mockResolvedValueOnce({
+        data: { data: [{ latitude: 34.56, longitude: -118.4, brightness: 340, confidence: 'n', timestamp: twoHoursAgo }] },
+      });
+      render(<MapComponent {...baseProps} />);
+      const map = mapboxgl.__mockMaps[mapboxgl.__mockMaps.length - 1];
+
+      await waitFor(() => {
+        const [hotspot] = map.getSource('wildfires-source').config.data.features;
+        expect(hotspot.properties.ageHours).toBeCloseTo(2, 1);
+      });
+      expect(map.getLayer('wildfires-layer').paint['circle-color']).toEqual(HOTSPOT_AGE_COLOR);
+      expect(map.getLayer('observed-fire-cells-fill').paint['fill-color']).toEqual(HOTSPOT_AGE_COLOR);
     });
   });
 });
