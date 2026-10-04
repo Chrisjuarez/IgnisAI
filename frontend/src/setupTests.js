@@ -95,6 +95,7 @@ jest.mock('mapbox-gl', () => {
       this.zoomIn = jest.fn(() => { this._zoom += 1; });
       this.zoomOut = jest.fn(() => { this._zoom -= 1; });
       this.loaded = jest.fn(() => true);
+      this.queryRenderedFeatures = jest.fn(() => []);
       this.remove = jest.fn();
     }
 
@@ -121,8 +122,10 @@ jest.mock('mapbox-gl', () => {
       }
     }
 
-    off(event, layerId, handler) {
+    off(event, layerOrHandler, maybeHandler) {
       if (!this.eventHandlers[event]) return;
+      const layerId = typeof layerOrHandler === 'string' ? layerOrHandler : null;
+      const handler = layerId ? maybeHandler : layerOrHandler;
       this.eventHandlers[event] = this.eventHandlers[event].filter(h => !(h.layerId === layerId && h.handler === handler));
     }
 
@@ -135,6 +138,7 @@ jest.mock('mapbox-gl', () => {
     }
 
     addSource(id, config) {
+      if (this.sources[id]) throw new Error(`There is already a source with ID "${id}".`);
       this.sources[id] = new MockSource(config);
     }
 
@@ -143,10 +147,13 @@ jest.mock('mapbox-gl', () => {
     }
 
     removeSource(id) {
+      // Mapbox refuses, with an error event, while a layer still draws from it.
+      if (Object.values(this.layers).some(layer => layer.source === id)) return;
       delete this.sources[id];
     }
 
     addLayer(layer) {
+      if (this.layers[layer.id]) throw new Error(`Layer with id "${layer.id}" already exists on this map`);
       this.layers[layer.id] = layer;
     }
 
@@ -158,13 +165,16 @@ jest.mock('mapbox-gl', () => {
       delete this.layers[id];
     }
 
+    // Like Mapbox, styledata arrives after setStyle returns, so a handler
+    // registered just after the call still receives it.
     setStyle(style) {
       this._style = style;
-      if (this.onceHandlers.styledata) {
+      setTimeout(() => {
         const cb = this.onceHandlers.styledata;
+        if (!cb) return;
         delete this.onceHandlers.styledata;
-        setTimeout(() => cb({ target: this }), 0);
-      }
+        cb({ target: this });
+      }, 0);
     }
 
     getStyle() {
