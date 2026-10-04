@@ -666,6 +666,11 @@ def fetch_weather_grids(lat: float, lon: float, ref_time: dt.datetime = None):
 DEFAULT_DYNAMIC_ORDER = ["fire_t", "u", "v", "gust", "tempC", "q", "precip"]
 
 
+def _utcnow() -> dt.datetime:
+    """The current time, read in one place so tests can pin it."""
+    return dt.datetime.now(dt.timezone.utc)
+
+
 def build_dynamic_for_tile(
     lat: float,
     lon: float,
@@ -688,23 +693,27 @@ def build_dynamic_for_tile(
     tile = lonlat_to_tile(lon, lat)
     A    = tile_affine(tile)
     bbox = tile_bounds_lonlat(tile)
-    now = ref_time or dt.datetime.now(dt.timezone.utc).replace(minute=0, second=0, microsecond=0)
+    # Two clocks, on purpose. Detections count up to the moment of the request:
+    # a satellite pass at 1:33 belongs in a forecast run at 1:50, and rounding
+    # down to the hour was dropping it. Weather is hourly, so its timestamps
+    # stay on the hour. A dated request uses its own time for both.
+    observed_until = ref_time or _utcnow()
+    weather_time = ref_time or observed_until.replace(minute=0, second=0, microsecond=0)
     if ref_time:
         print(f"[tilesvc] Using historical ref_time: {ref_time.isoformat()}")
 
     # FIRMS points over the full [T_seq * hours_step] window
     window_hours = T_seq * hours_step
-    window_start = now - dt.timedelta(hours=window_hours)
+    window_start = observed_until - dt.timedelta(hours=window_hours)
     days = math.ceil(window_hours / 24.0)
-    points = _load_firms_points_from_snapshots(bbox, window_start, now)
+    points = _load_firms_points_from_snapshots(bbox, window_start, observed_until)
 
     # The live FIRMS NRT API only covers ~5 days. Falling through silently
     # for older windows produces an empty fire channel — the model then has
     # no idea where the fire is and predicts on weather/fuel climatology
     # only. Make the gap loud so the caller can decide whether to seed via
     # `ignition=True` or go fix the snapshot directory.
-    nowish = dt.datetime.now(dt.timezone.utc)
-    window_age_days = max(0, (nowish - now).days)
+    window_age_days = max(0, (_utcnow() - observed_until).days)
     FIRMS_LIVE_API_MAX_DAYS = 5
 
     if points is None:
@@ -719,7 +728,7 @@ def build_dynamic_for_tile(
         points = _parse_firms_points(csv_text)
         if not points and window_age_days > FIRMS_LIVE_API_MAX_DAYS:
             print(
-                f"⚠️  [tilesvc] FIRMS empty for {window_start.isoformat()}..{now.isoformat()} "
+                f"⚠️  [tilesvc] FIRMS empty for {window_start.isoformat()}..{observed_until.isoformat()} "
                 "(historical window, no snapshot, live API empty). The fire channel will be "
                 "all-zeros unless the caller passes ignition=True or a seeded perimeter."
             )
@@ -731,7 +740,7 @@ def build_dynamic_for_tile(
     fire_stack = []
     frp_stack = []
     for k in range(T_seq, 0, -1):
-        t_end = now - dt.timedelta(hours=(k - 1) * hours_step)
+        t_end = observed_until - dt.timedelta(hours=(k - 1) * hours_step)
         t_sta = t_end - dt.timedelta(hours=hours_step)
         m = _rasterize_fire(points, t_sta, t_end, A)
         frp_m = _rasterize_frp(points, t_sta, t_end, A)
@@ -755,7 +764,7 @@ def build_dynamic_for_tile(
     order = list(channel_order or DEFAULT_DYNAMIC_ORDER)
     for t in range(T_seq):
         # Use the end of each slice as the weather timestamp for that timestep.
-        step_ref_time = now - dt.timedelta(hours=(T_seq - 1 - t) * hours_step)
+        step_ref_time = weather_time - dt.timedelta(hours=(T_seq - 1 - t) * hours_step)
         wx = fetch_weather_grids(lat, lon, ref_time=step_ref_time)
         channels = {
             "fire_t": fire_stack[t],
