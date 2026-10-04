@@ -385,6 +385,21 @@ describe('GET /api/predict-fire-spread routes', () => {
       expect(axios.post.mock.calls[0][1]).toEqual({ burned_area: null });
     });
 
+    it('cannot forge log lines through the incident id', async () => {
+      jest.spyOn(mapData, 'burnedAreaForIncident').mockRejectedValue(new Error('ArcGIS down'));
+      const warn = jest.spyOn(console, 'warn').mockImplementation(() => {});
+      axios.post.mockResolvedValue({ data: forecast });
+
+      await request(app)
+        .get('/api/predict-fire-spread/multistep')
+        .query({ lat: 34.56, lon: -118.4, incident_id: 'IRWIN-1\r\n[admin] login ok' })
+        .expect(200);
+
+      const [line] = warn.mock.calls.find(([message]) => message.startsWith('burned area lookup failed'));
+      expect(line).not.toMatch(/[\r\n]/);
+      expect(line).toContain('IRWIN-1[admin] login ok');
+    });
+
     it('does not look anything up for a forecast that is not tied to an incident', async () => {
       const lookup = jest.spyOn(mapData, 'burnedAreaForIncident');
       axios.post.mockResolvedValue({ data: forecast });

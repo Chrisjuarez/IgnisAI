@@ -263,7 +263,10 @@ async function burnedAreaOrNull(incidentId) {
   try {
     return await mapData.burnedAreaForIncident(String(incidentId));
   } catch (err) {
-    console.warn(`burned area lookup failed for ${incidentId}: ${err.message}`);
+    // The id comes from the query string. Line breaks are stripped so a
+    // crafted id cannot forge extra entries in the log.
+    const loggableId = String(incidentId).replace(/[\r\n]/g, "");
+    console.warn(`burned area lookup failed for ${loggableId}: ${err.message}`);
     return null;
   }
 }
