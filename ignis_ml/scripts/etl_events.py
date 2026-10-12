@@ -60,6 +60,7 @@ def use_profile(profile: str) -> bool:
     os.environ["FIRMS_SNAPSHOT_DIR"] = str(firms)
     os.environ["FIRMS_SNAPSHOT_REQUIRED"] = "1"
     os.environ["NOAA_GRID_CACHE_DIR"] = str(noaa)
+    os.environ["NOAA_GRID_CACHE_REQUIRED"] = "1"
     return True
 
 
@@ -73,13 +74,21 @@ def available_days(profile: str) -> int:
     return min(firms, noaa)
 
 
-def latest_cached_day(profile: str) -> Optional[str]:
-    """Newest FIRMS snapshot date for this fire, as an ISO timestamp."""
-    firms = CACHE_ROOT_FN() / profile / "firms_snapshots"
-    if not firms.is_dir():
-        return None
-    days = sorted(p.stem for p in firms.glob("*.csv") if not p.name.startswith("._"))
-    return f"{days[-1]}T18:00:00Z" if days else None
+def latest_cached_time(profile: str) -> Optional[str]:
+    """Newest hour with this fire's weather and that day's detections cached, as ISO.
+
+    The weather cache holds one hour a day - the hour it was built for, which
+    differs from fire to fire. Any other hour misses it.
+    """
+    base = CACHE_ROOT_FN() / profile
+    days = {p.stem for p in (base / "firms_snapshots").glob("*.csv") if not p.name.startswith("._")}
+    hours = sorted(
+        dt.datetime.strptime(p.name[:11], "%Y%m%dT%H")
+        for p in (base / "noaa_grid_cache").glob("*.npz")
+        if not p.name.startswith("._")
+    )
+    paired = [hour for hour in hours if hour.date().isoformat() in days]
+    return f"{paired[-1]:%Y-%m-%dT%H}:00:00Z" if paired else None
 
 
 def build_event_samples(profile: str, lat: float, lon: float, ref_iso: str,
@@ -97,8 +106,9 @@ def build_event_samples(profile: str, lat: float, lon: float, ref_iso: str,
     # Take the reference time from the cache, not the caller. A fixed offset
     # asks every fire for the same date, and fires whose caches were built at
     # different times do not have it - 226 of 322 failed with InputUnavailable
-    # for exactly that reason. The cache knows which days it holds.
-    latest = latest_cached_day(profile)
+    # for exactly that reason. The cache knows which days, and which hour, it
+    # holds.
+    latest = latest_cached_time(profile)
     if latest is not None:
         ref_iso = latest
     from services.tilesvc.dynamic_builder import build_dynamic_for_tile
@@ -180,6 +190,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         "stat_order": list(STAT_NAMES),
         "seq_len": SEQ_LEN,
         "window_days": args.window,
+        # Every frame reads the fire's own weather cache; a missing hour fails
+        # the fire rather than falling back (NOAA_GRID_CACHE_REQUIRED).
+        "weather_source": "noaa_grid_cache",
         "tiles": len(all_rows),
         "fires": len({r["fire_id"] for r in all_rows}),
         "samples": all_rows,
