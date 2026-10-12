@@ -26,10 +26,8 @@ export default function DataFreshness({
   newDetectionsSinceForecast = false,
   onRerunForecast,
   rerunning = false,
-  now: nowOverride,
 }) {
-  const ticking = useNow();
-  const now = nowOverride ?? ticking;
+  const now = useNow();
   if (!freshness) return null;
   const { lastDetectionAt, perimeterMappedAt } = freshness;
   const [nextPass] = freshness.nextPasses || [];

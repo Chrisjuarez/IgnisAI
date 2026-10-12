@@ -3,6 +3,8 @@ const express = require('express');
 const cors = require('cors');
 const dotenv = require('dotenv');
 const connectDB = require('./db');
+const { logSafe } = require('./utils/logSafe');
+const { respondNotFound, respondWithError } = require('./middleware/errorResponses');
 
 if (process.env.NODE_ENV !== 'test') {
   dotenv.config({ quiet: true });
@@ -38,6 +40,8 @@ app.use(cors({
     if (!origin || CORS_ORIGINS.includes(origin)) {
       return callback(null, true);
     }
+    // Logged so a new frontend URL missing from CORS_ORIGIN is easy to spot.
+    console.warn('Refused request from an origin not in CORS_ORIGIN:', logSafe(origin));
     return callback(Object.assign(new Error('Origin not allowed'), { status: 403, expose: true }));
   },
   methods: ['GET','POST','PUT','DELETE','OPTIONS'],
@@ -73,20 +77,8 @@ mountRoute('/api/ndvi', './routes/ndvi');
 mountRoute('/api/fire-perimeters', './routes/firePerimeters');
 mountRoute('/api/predict-fire-spread', './routes/predictFireSpread');
 
-// Whatever no route answered, and whatever a route threw, as JSON. Express's
-// defaults are HTML pages, and a thrown error's message can name internals.
-app.use((req, res) => {
-  res.status(404).json({ error: 'not_found' });
-});
-
-app.use((err, req, res, _next) => {
-  const status = err.status || err.statusCode || 500;
-  if (status >= 500) {
-    console.error(`${req.method} ${req.originalUrl} failed:`, err);
-    return res.status(status).json({ error: 'internal_error' });
-  }
-  return res.status(status).json({ error: 'request_rejected', message: err.expose ? err.message : undefined });
-});
+app.use(respondNotFound);
+app.use(respondWithError);
 
 module.exports = app;
 

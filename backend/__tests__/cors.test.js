@@ -46,8 +46,9 @@ describe('CORS configuration', () => {
     expect(response.headers['access-control-allow-origin']).toBe('https://two.example');
   });
 
-  it('refuses an unlisted origin with a JSON 403', async () => {
+  it('refuses an unlisted origin with a JSON 403 and logs which origin it was', async () => {
     const app = loadAppWithCors(null);
+    const warn = jest.spyOn(console, 'warn').mockImplementation(() => {});
 
     const response = await request(app)
       .get('/api/map/bootstrap')
@@ -55,6 +56,8 @@ describe('CORS configuration', () => {
       .expect(403);
 
     expect(response.body).toEqual({ error: 'request_rejected', message: 'Origin not allowed' });
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('CORS_ORIGIN'), 'https://elsewhere.example');
+    warn.mockRestore();
   });
 });
 

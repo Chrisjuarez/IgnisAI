@@ -180,7 +180,7 @@ function Drawer({
   activeTab,
   setActiveTab,
   incidents,
-  incidentsUnavailable,
+  incidentFeedDown,
   warnings,
   selectedIncident,
   selectedWarning,
@@ -236,7 +236,7 @@ function Drawer({
                 selected={selectedIncident?.id === incident.id}
                 onSelect={onIncidentSelect}
               />
-            )) : <EmptyDrawerState label="incidents" unavailable={incidentsUnavailable} />}
+            )) : <EmptyDrawerState label="incidents" unavailable={incidentFeedDown} />}
           </div>
         </div>
       )}
@@ -460,7 +460,7 @@ const AdvancedFireDashboard = () => {
   const [mapData, setMapData] = useState(null);
   const [loadingMapData, setLoadingMapData] = useState(false);
   const [mapDataFailed, setMapDataFailed] = useState(false);
-  const [isFetching, setIsFetching] = useState(false);
+  const [loadingMapLayers, setLoadingMapLayers] = useState(false);
   const [drawerOpen, setDrawerOpen] = useState(true);
   const [activeDrawerTab, setActiveDrawerTab] = useState('incidents');
   const [layerVisibility, setLayerVisibility] = useState(DEFAULT_LAYERS);
@@ -556,6 +556,9 @@ const AdvancedFireDashboard = () => {
 
   const warnings = mapData?.alerts || [];
   const layerStatus = mapData?.layerStatus || {};
+  // Down when the incident source failed inside a load that otherwise worked,
+  // or when no load has worked yet.
+  const incidentFeedDown = layerStatus.incidents?.ok === false || (mapDataFailed && !mapData);
 
   useEffect(() => {
     selectedIncidentIdRef.current = selectedIncident?.id ?? null;
@@ -674,7 +677,7 @@ const AdvancedFireDashboard = () => {
         </div>
         <MapDataStatus
           updatedAt={mapData?.updatedAt}
-          refreshing={loadingMapData || isFetching}
+          refreshing={loadingMapData || loadingMapLayers}
           failed={mapDataFailed}
           onRefresh={refreshMap}
         />
@@ -694,7 +697,7 @@ const AdvancedFireDashboard = () => {
           confidenceFilter={confidence}
           mapStyle={mapStyle}
           onFiresUpdated={() => {}}
-          setIsFetching={setIsFetching}
+          setIsFetching={setLoadingMapLayers}
           range={range}
           incidents={mapData?.incidents || []}
           alerts={warnings}
@@ -722,7 +725,7 @@ const AdvancedFireDashboard = () => {
           activeTab={activeDrawerTab}
           setActiveTab={setActiveDrawerTab}
           incidents={incidents}
-          incidentsUnavailable={layerStatus.incidents?.ok === false || (mapDataFailed && !mapData)}
+          incidentFeedDown={incidentFeedDown}
           warnings={warnings}
           selectedIncident={selectedIncident}
           selectedWarning={selectedWarning}

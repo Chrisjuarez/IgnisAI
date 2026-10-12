@@ -731,7 +731,10 @@ async function buildBootstrap(query = {}) {
   };
   // Without incidents the map has nothing to show; asking again on the next
   // request beats serving an empty list for the life of the cache entry.
-  return incidentResult.status === 'fulfilled' ? setCached(cacheKey, payload) : payload;
+  if (incidentResult.status === 'fulfilled') {
+    setCached(cacheKey, payload);
+  }
+  return payload;
 }
 
 function filterIncidents(incidents, query = {}) {

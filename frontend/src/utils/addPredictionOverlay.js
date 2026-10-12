@@ -1,22 +1,13 @@
 // frontend/src/utils/addPredictionOverlay.js
 //
-// Adds either:
-// - Raster overlay (recommended): Mapbox image source using bounds + PNG (base64),
-//   colorized to a heatmap so it looks like a probability field (not a grid).
-// - Vector overlay (optional): GeoJSON source + fill/line layers
-//
-// IMPORTANT: Backwards compatible with BOTH call styles:
-//   A) addPredictionOverlay(map, apiBase, lat, lon, opts)
-//   B) addPredictionOverlay(map, { apiBase, lat, lon, mode, thr, Tseq })
-//
-// Also exports removePredictionOverlays(map) so you can add a “Clear overlay” UI later.
+// Draws a multistep forecast on the map: each step's probability PNG,
+// colorized to a heatmap (prepareMultistepRasterFrames, renderPredictionRasterFrame),
+// and the arrival-band scene (renderPredictionScene). removePredictionOverlays
+// clears both.
 
 // Gamma controls the contrast curve applied to the probability heatmap.
 // Values < 1 brighten (lift faint signals), > 1 darken.
-// Multistep forecast frames use a slightly lighter touch than single-step
-// raster overlays because the timeline is already animated and easier to read.
-const GAMMA_RASTER = 0.85;     // single-step raster overlay
-const GAMMA_MULTISTEP = 0.7;   // multistep forecast timeline frames
+const GAMMA_MULTISTEP = 0.7;
 
 const IDS = {
   rasterSource: 'ignis-pred-raster-src',
@@ -121,19 +112,6 @@ function waitForMapLoad(map) {
   });
 }
 
-function sniffContentType(resp) {
-  return (resp?.headers?.get('content-type') || '').toLowerCase();
-}
-
-async function safeReadBodyForDebug(resp, limit = 600) {
-  try {
-    const txt = await resp.text();
-    return txt.slice(0, limit);
-  } catch {
-    return '';
-  }
-}
-
 function removeIfExists(map, layerId, sourceId) {
   if (!map) return;
   if (layerId && map.getLayer(layerId)) {
@@ -183,7 +161,7 @@ function clamp01(x) {
  */
 async function colorizeGrayscalePngToHeatmapDataUrl(base64Png, opts = {}) {
   const {
-    gamma = GAMMA_RASTER,
+    gamma = GAMMA_MULTISTEP,
     opacity = 0.80,
     smooth = true,
   } = opts;
@@ -518,225 +496,6 @@ export async function prepareMultistepRasterFrames(payload, opts = {}) {
     dataSources: payload?.data_sources,
     frames,
   };
-}
-
-/**
- * Raster overlay: calls backend raster endpoint and draws heatmap image layer.
- * Expects backend JSON:
- *   { bounds:[w,s,e,n], image_base64, threshold, prob_min/max/mean, area_fraction }
- */
-export async function addRasterOverlay(map, apiBase, lat, lon, opts = {}) {
-  await waitForMapLoad(map);
-
-  const qs = new URLSearchParams({
-    lat: String(lat),
-    lon: String(lon),
-    ...(opts.Tseq != null ? { Tseq: String(opts.Tseq) } : {}),
-    ...(opts.thr != null ? { thr: String(opts.thr) } : {}),
-    ...(opts.displayFloor != null ? { display_floor: String(opts.displayFloor) } : {}),
-    ...(opts.date ? { date: opts.date } : {}),
-  });
-
-  const url = `${apiBase}/predict-fire-spread/raster?${qs.toString()}`;
-
-  // Retry up to 3 times for cold-start timeouts (Render spins down idle services)
-  let resp = null;
-  let lastErr = null;
-  for (let attempt = 0; attempt < 3; attempt++) {
-    try {
-      resp = await fetch(url);
-      if (resp.ok) break;
-      // 502/504 often means tilesvc is still waking up — retry
-      if (resp.status === 502 || resp.status === 504) {
-        console.warn(`Raster attempt ${attempt + 1} got ${resp.status}, retrying...`);
-        resp = null;
-        continue;
-      }
-      break; // other errors, don't retry
-    } catch (err) {
-      lastErr = err;
-      console.warn(`Raster attempt ${attempt + 1} failed:`, err.message);
-    }
-  }
-  if (!resp) {
-    throw lastErr || new Error('Raster endpoint unreachable after retries');
-  }
-
-  const ct = sniffContentType(resp);
-
-  if (ct.includes('text/html')) {
-    const body = await safeReadBodyForDebug(resp);
-    throw new Error(
-      `Raster returned text/html (likely /api proxy issue). Body: ${body}`
-    );
-  }
-
-  if (!resp.ok) {
-    const body = await safeReadBodyForDebug(resp);
-    throw new Error(`Raster endpoint failed (${resp.status}). Body: ${body}`);
-  }
-
-  if (!ct.includes('application/json')) {
-    const body = await safeReadBodyForDebug(resp);
-    throw new Error(`Unexpected raster content-type: ${ct}. Body: ${body}`);
-  }
-
-  const payload = await resp.json();
-
-  if (typeof payload === 'string') {
-    throw new Error(
-      'Raster endpoint returned JSON string (binary PNG). Backend must return {bounds,image_base64}.'
-    );
-  }
-
-  const bounds = payload?.bounds;
-  const b64 = payload?.image_base64;
-
-  if (!Array.isArray(bounds) || bounds.length !== 4) {
-    throw new Error(`Bad raster bounds: ${JSON.stringify(bounds)}`);
-  }
-  if (!b64 || typeof b64 !== 'string') {
-    throw new Error('Missing image_base64 from raster endpoint');
-  }
-
-  // Colorize grayscale to heatmap
-  const heatmapUrl = await colorizeGrayscalePngToHeatmapDataUrl(b64, {
-    gamma: opts.gamma ?? GAMMA_RASTER,
-    floor: opts.floor ?? 0.02,
-    opacity: opts.opacity ?? 0.85,
-    smooth: opts.smooth ?? true,
-    alphaThreshold: (opts.thr != null ? Number(opts.thr) : null),
-  });
-
-  await renderPredictionRasterFrame(map, {
-    bounds,
-    coordinates: payload?.coordinates,
-    heatmapUrl,
-    meta: payload,
-  }, opts);
-
-  return {
-    kind: 'raster',
-    bounds,
-    coordinates: payload?.coordinates,
-    meta: payload
-  };
-}
-
-/**
- * Vector overlay: calls backend vector endpoint.
- * WARNING: vector can be huge (thousands of polygons) and looks "grid-like".
- * We keep it, but we auto-block insanely large feature counts.
- */
-export async function addVectorOverlay(map, apiBase, lat, lon, opts = {}) {
-  await waitForMapLoad(map);
-
-  const qs = new URLSearchParams({
-    lat: String(lat),
-    lon: String(lon),
-    ...(opts.Tseq != null ? { Tseq: String(opts.Tseq) } : {}),
-    ...(opts.thr != null ? { thr: String(opts.thr) } : {}),
-    ...(opts.date ? { date: opts.date } : {}),
-  });
-
-  const url = `${apiBase}/predict-fire-spread/vector?${qs.toString()}`;
-  const resp = await fetch(url);
-  const ct = sniffContentType(resp);
-
-  if (ct.includes('text/html')) {
-    const body = await safeReadBodyForDebug(resp);
-    throw new Error(`Vector returned text/html (/api proxy issue). Body: ${body}`);
-  }
-
-  if (!resp.ok) {
-    const body = await safeReadBodyForDebug(resp);
-    throw new Error(`Vector endpoint failed (${resp.status}). Body: ${body}`);
-  }
-
-  const data = await resp.json();
-  const geojson =
-    data?.type === 'FeatureCollection' ? data :
-    data?.geojson?.type === 'FeatureCollection' ? data.geojson :
-    null;
-
-  if (!geojson) {
-    throw new Error(
-      `Vector endpoint did not return FeatureCollection. Got: ${JSON.stringify(data).slice(0, 400)}`
-    );
-  }
-
-  const count = geojson.features?.length ?? 0;
-  if (count > (opts.maxFeatures ?? 2000)) {
-    throw new Error(
-      `Vector has ${count} polygons (too many). Use raster mode for a clean overlay.`
-    );
-  }
-
-  // Remove existing vector overlay (stable IDs)
-  removeIfExists(map, IDS.vectorFill, null);
-  removeIfExists(map, IDS.vectorLine, null);
-  if (map.getSource(IDS.vectorSource)) {
-    try { map.removeSource(IDS.vectorSource); } catch (_) {}
-  }
-
-  map.addSource(IDS.vectorSource, { type: 'geojson', data: geojson });
-
-  map.addLayer({
-    id: IDS.vectorFill,
-    type: 'fill',
-    source: IDS.vectorSource,
-    paint: {
-      'fill-opacity': 0.25,
-      // You can pick a nicer fill color later; leaving color default is okay for correctness.
-      // If you want explicit:
-      // 'fill-color': 'rgba(255, 80, 0, 0.7)'
-    },
-  });
-
-  map.addLayer({
-    id: IDS.vectorLine,
-    type: 'line',
-    source: IDS.vectorSource,
-    paint: {
-      'line-width': 2,
-      'line-opacity': 0.9,
-    },
-  });
-
-  return { kind: 'vector', featureCount: count, meta: data };
-}
-
-/**
- * BACKWARDS COMPAT EXPORT:
- * - old style: addPredictionOverlay(map, apiBase, lat, lon, opts)
- * - new style: addPredictionOverlay(map, { apiBase, lat, lon, mode, thr, Tseq })
- */
-export async function addPredictionOverlay(map, apiBaseOrParams, latMaybe, lonMaybe, optsMaybe = {}) {
-  // New style: addPredictionOverlay(map, { apiBase, lat, lon, mode, thr, ... })
-  if (typeof apiBaseOrParams === 'object' && apiBaseOrParams) {
-    const p = apiBaseOrParams;
-    const apiBase = p.apiBase || p.baseURL || p.baseUrl || '/api';
-    const lat = p.lat ?? p.latitude;
-    const lon = p.lon ?? p.lng ?? p.longitude;
-    const mode = (p.mode || 'raster').toLowerCase();
-
-    if (lat == null || lon == null) throw new Error(`lat/lon missing (lat=${lat}, lon=${lon})`);
-
-    if (mode === 'vector') return addVectorOverlay(map, apiBase, lat, lon, p);
-    return addRasterOverlay(map, apiBase, lat, lon, p);
-  }
-
-  // Old style: addPredictionOverlay(map, apiBase, lat, lon, opts)
-  const apiBase = apiBaseOrParams || '/api';
-  const lat = latMaybe;
-  const lon = lonMaybe;
-  const opts = optsMaybe || {};
-  const mode = (opts.mode || 'raster').toLowerCase();
-
-  if (lat == null || lon == null) throw new Error(`lat/lon missing (lat=${lat}, lon=${lon})`);
-
-  if (mode === 'vector') return addVectorOverlay(map, apiBase, lat, lon, opts);
-  return addRasterOverlay(map, apiBase, lat, lon, opts);
 }
 
 // ---------------------------------------------------------------------------
