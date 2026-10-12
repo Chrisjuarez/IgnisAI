@@ -27,7 +27,7 @@ import json
 import os
 import sys
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence
+from typing import Any, Dict, Iterator, List, Optional, Sequence, Tuple
 
 import numpy as np
 
@@ -131,15 +131,7 @@ def build_event_samples(profile: str, lat: float, lon: float, ref_iso: str,
         )
 
     written: List[Dict[str, Any]] = []
-    # Sample i uses frames[i : i+SEQ_LEN] and targets frames[i+SEQ_LEN].
-    for i in range(0, window - SEQ_LEN):
-        x_dyn = frames[i:i + SEQ_LEN]
-        y = (frames[i + SEQ_LEN, 0] > 0.5).astype(np.float32)
-        prior = x_dyn[-1, 0] > 0.5
-        # A sample with no fire to grow from, or no growth to predict, teaches
-        # nothing and would dominate a corpus this size.
-        if not prior.any() or not (y > 0.5)[~prior].any():
-            continue
+    for i, x_dyn, y in training_days(frames):
         path = out_dir / f"{profile}_t{i:03d}.npz"
         np.savez_compressed(
             path, x_dyn=x_dyn, x_stat=stat, y=y,
@@ -147,8 +139,31 @@ def build_event_samples(profile: str, lat: float, lon: float, ref_iso: str,
             fire_id=np.array(profile), day_index=np.array(i),
         )
         written.append({"path": path.name, "fire_id": profile, "day_index": i,
-                        "prior_cells": int(prior.sum()), "new_cells": int((y > 0.5).sum() - prior.sum())})
+                        "prior_cells": int((x_dyn[-1, 0] > 0.5).sum()),
+                        "grown_cells": grown_cells(x_dyn, y)})
     return written
+
+
+def training_days(frames: np.ndarray) -> Iterator[Tuple[int, np.ndarray, np.ndarray]]:
+    """(day index, input history, next-day target) for each day worth training on.
+
+    Day i uses frames[i : i+SEQ_LEN] and targets frames[i+SEQ_LEN].
+
+    Days when the fire did not spread are kept. A corpus of growth days only
+    teaches the model that every fire grows tomorrow, and it then forecasts
+    growth for fires that have stopped. Only a history with no detection at all
+    is skipped: there is no fire to forecast from.
+    """
+    for i in range(len(frames) - SEQ_LEN):
+        x_dyn = frames[i:i + SEQ_LEN]
+        if not (x_dyn[:, 0] > 0.5).any():
+            continue
+        yield i, x_dyn, (frames[i + SEQ_LEN, 0] > 0.5).astype(np.float32)
+
+
+def grown_cells(x_dyn: np.ndarray, y: np.ndarray) -> int:
+    """Cells burning in the target that were not burning on the last input day."""
+    return int(((y > 0.5) & ~(x_dyn[-1, 0] > 0.5)).sum())
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
@@ -182,6 +197,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         "window_days": args.window,
         "tiles": len(all_rows),
         "fires": len({r["fire_id"] for r in all_rows}),
+        "no_growth_samples": sum(1 for r in all_rows if r["grown_cells"] == 0),
         "samples": all_rows,
         "note": ("Weather varies frame to frame because it did; fire evolves because "
                  "it did. Samples from one fire are consecutive days and carry "
