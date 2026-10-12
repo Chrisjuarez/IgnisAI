@@ -138,11 +138,29 @@ def _noaa_cache_path(lat: float, lon: float, ref_time: dt.datetime | None) -> Pa
     return primary
 
 
+def _noaa_cache_required() -> bool:
+    """Whether a missing or unreadable weather cache hour is an error.
+
+    Off for serving, where a fallback forecast beats none. Training builds turn
+    it on: the fallback puts one Open-Meteo value across the whole tile, or
+    fixed defaults when that request fails too, and nothing in the output says
+    which frames got it.
+    """
+    return os.getenv("NOAA_GRID_CACHE_REQUIRED", "0").strip().lower() in {"1", "true", "yes", "on"}
+
+
 def _fetch_noaa_cached_weather_grids(lat: float, lon: float, ref_time: dt.datetime | None):
-    if os.getenv("NOAA_GRIB_ENABLED", "0").strip().lower() not in {"1", "true", "yes", "on"}:
+    required = _noaa_cache_required()
+    if not required and os.getenv("NOAA_GRIB_ENABLED", "0").strip().lower() not in {"1", "true", "yes", "on"}:
         return None
     path = _noaa_cache_path(lat, lon, ref_time)
     if not path or not path.exists():
+        if required:
+            raise InputUnavailable(
+                "NOAA weather cache has no file for the requested hour",
+                reason="noaa_cache_missing",
+                details={"path": str(path), "ref_time": ref_time.isoformat() if ref_time else None},
+            )
         _set_weather_source("open_meteo_fallback", f"noaa_cache_missing:{path}")
         return None
     try:
@@ -172,6 +190,12 @@ def _fetch_noaa_cached_weather_grids(lat: float, lon: float, ref_time: dt.dateti
         _set_weather_source(source_tag, str(path))
         return grids
     except Exception as exc:
+        if required:
+            raise InputUnavailable(
+                "NOAA weather cache file could not be read",
+                reason="noaa_cache_invalid",
+                details={"path": str(path), "error": str(exc)},
+            ) from exc
         _set_weather_source("open_meteo_fallback", f"noaa_cache_invalid:{exc}")
         print(f"⚠️  NOAA weather cache failed ({path}): {exc}")
         return None
