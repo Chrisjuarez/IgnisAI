@@ -22,6 +22,23 @@ const api = axios.create({
   timeout: DEFAULT_TIMEOUT_MS,
 });
 
+// A failed request carries a message a person can read, so callers show
+// `error.message` as is: the API's own message when it sent one, otherwise
+// what went wrong on the way there.
+const NETWORK_MESSAGES = {
+  ECONNABORTED: 'The request took too long. Try again in a minute.',
+  ETIMEDOUT: 'The request took too long. Try again in a minute.',
+  ERR_NETWORK: 'Ignis could not be reached. Check your connection.',
+};
+
+export function readableError(error) {
+  const message = error?.response?.data?.message || NETWORK_MESSAGES[error?.code];
+  if (message) error.message = message;
+  return error;
+}
+
+api.interceptors.response.use(undefined, (error) => Promise.reject(readableError(error)));
+
 // -----------------------------
 // Existing calls
 // -----------------------------

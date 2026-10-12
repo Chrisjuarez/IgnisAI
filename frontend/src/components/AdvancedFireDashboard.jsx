@@ -7,6 +7,7 @@ import SiteExposurePanel from './SiteExposurePanel';
 import { parseViewState, serializeViewState, viewStateChanged } from '../utils/viewState';
 import { timeAgo } from '../utils/relativeTime';
 import useRecheckAfterNextPass from '../hooks/useRecheckAfterNextPass';
+import useNow from '../hooks/useNow';
 import DataFreshness, { hasNewDetectionsSince } from './DataFreshness';
 import { HOTSPOT_AGE_BANDS } from '../utils/hotspotAge';
 import '../styles/dashboard.css';
@@ -139,12 +140,36 @@ function LayerToggle({ id, label, source, enabled, status, onToggle }) {
   );
 }
 
-function EmptyDrawerState({ label }) {
+function EmptyDrawerState({ label, unavailable = false }) {
+  if (unavailable) {
+    return (
+      <div className="empty-state" role="status">
+        <strong>The {label} feed is not responding</strong>
+        <span>Refresh in a minute to try again.</span>
+      </div>
+    );
+  }
   return (
     <div className="empty-state">
       <strong>No {label} in this view</strong>
       <span>Try refreshing the map or widening the search.</span>
     </div>
+  );
+}
+
+function mapDataStatusLabel({ refreshing, failed, updatedAt, now }) {
+  if (refreshing) return 'Refreshing...';
+  if (failed) return 'Update failed · Retry';
+  return `Updated ${timeAgo(updatedAt, now) ?? 'unknown'}`;
+}
+
+// Its own component so the once-a-minute tick re-renders the label, not the map.
+function MapDataStatus({ updatedAt, refreshing, failed, onRefresh }) {
+  const now = useNow();
+  return (
+    <button className={`status-pill${failed ? ' failed' : ''}`} type="button" onClick={onRefresh}>
+      {mapDataStatusLabel({ refreshing, failed, updatedAt, now })}
+    </button>
   );
 }
 
@@ -155,6 +180,7 @@ function Drawer({
   activeTab,
   setActiveTab,
   incidents,
+  incidentsUnavailable,
   warnings,
   selectedIncident,
   selectedWarning,
@@ -210,7 +236,7 @@ function Drawer({
                 selected={selectedIncident?.id === incident.id}
                 onSelect={onIncidentSelect}
               />
-            )) : <EmptyDrawerState label="incidents" />}
+            )) : <EmptyDrawerState label="incidents" unavailable={incidentsUnavailable} />}
           </div>
         </div>
       )}
@@ -432,6 +458,8 @@ const AdvancedFireDashboard = () => {
   const { user } = useAuth();
   const mapRef = useRef(null);
   const [mapData, setMapData] = useState(null);
+  const [loadingMapData, setLoadingMapData] = useState(false);
+  const [mapDataFailed, setMapDataFailed] = useState(false);
   const [isFetching, setIsFetching] = useState(false);
   const [drawerOpen, setDrawerOpen] = useState(true);
   const [activeDrawerTab, setActiveDrawerTab] = useState('incidents');
@@ -450,7 +478,6 @@ const AdvancedFireDashboard = () => {
   const [legendOpen, setLegendOpen] = useState(false);
   const [brightness] = useState('');
   const [confidence] = useState('');
-  const [userLocation, setUserLocation] = useState(null);
   const [range] = useState(20);
 
 
@@ -472,29 +499,29 @@ const AdvancedFireDashboard = () => {
     window.history.replaceState(null, '', `${window.location.pathname}${serializeViewState(view)}`);
   }, []);
 
+  // A failed load keeps what is already on screen and says the update failed,
+  // rather than replacing it with an empty map stamped "just now".
   const loadMapData = useCallback(async () => {
-    setIsFetching(true);
+    setLoadingMapData(true);
     try {
       const response = await getMapBootstrap({ bbox: WESTERN_CONUS_BBOX });
-      const payload = response?.data ?? response;
-      setMapData(payload);
+      setMapData(response?.data ?? response);
+      setMapDataFailed(false);
     } catch (error) {
       console.error('map bootstrap failed', error);
-      setMapData({
-        updatedAt: new Date().toISOString(),
-        incidents: [],
-        alerts: [],
-        perimeters: { type: 'FeatureCollection', features: [] },
-        hotspotFootprints: { type: 'FeatureCollection', features: [] },
-        layerStatus: { partial: true, error: error?.message || 'unavailable' },
-      });
+      setMapDataFailed(true);
     } finally {
-      setIsFetching(false);
+      setLoadingMapData(false);
     }
   }, []);
 
   useEffect(() => {
     loadMapData();
+  }, [loadMapData]);
+
+  const refreshMap = useCallback(() => {
+    loadMapData();
+    mapRef.current?.refreshWildfires?.();
   }, [loadMapData]);
 
   useEffect(() => {
@@ -645,10 +672,12 @@ const AdvancedFireDashboard = () => {
             aria-label="Search fires or counties"
           />
         </div>
-        <button className="status-pill" type="button" onClick={loadMapData}>
-          {isFetching ? 'Refreshing...' : `Updated ${timeAgo(mapData?.updatedAt) ?? 'unknown'}`}
-        </button>
-        <button className="icon-btn topbar-icon" type="button" onClick={() => setLegendOpen(true)} aria-label="Open legend">?</button>
+        <MapDataStatus
+          updatedAt={mapData?.updatedAt}
+          refreshing={loadingMapData || isFetching}
+          failed={mapDataFailed}
+          onRefresh={refreshMap}
+        />
         <div className="user-chip">
           <div>
             <strong>{user?.fullName || user?.name || 'Guest'}</strong>
@@ -666,7 +695,6 @@ const AdvancedFireDashboard = () => {
           mapStyle={mapStyle}
           onFiresUpdated={() => {}}
           setIsFetching={setIsFetching}
-          userLocation={userLocation}
           range={range}
           incidents={mapData?.incidents || []}
           alerts={warnings}
@@ -694,6 +722,7 @@ const AdvancedFireDashboard = () => {
           activeTab={activeDrawerTab}
           setActiveTab={setActiveDrawerTab}
           incidents={incidents}
+          incidentsUnavailable={layerStatus.incidents?.ok === false || (mapDataFailed && !mapData)}
           warnings={warnings}
           selectedIncident={selectedIncident}
           selectedWarning={selectedWarning}
@@ -725,8 +754,7 @@ const AdvancedFireDashboard = () => {
         </div>
 
         <div className="floating-map-controls left">
-          <button type="button" onClick={() => mapRef.current?.refreshWildfires?.()}>Refresh</button>
-          <button type="button" onClick={() => setUserLocation(null)}>Clear Loc</button>
+          <button type="button" onClick={refreshMap}>Refresh</button>
         </div>
 
         <LegendPanel open={legendOpen} onClose={() => setLegendOpen(false)} />

@@ -31,7 +31,8 @@ jest.mock('axios', () => {
     post: jest.fn(() => Promise.resolve(resolvedPayload)),
     get: jest.fn(() => Promise.resolve(resolvedPayload)),
     put: jest.fn(() => Promise.resolve(resolvedPayload)),
-    delete: jest.fn(() => Promise.resolve(resolvedPayload))
+    delete: jest.fn(() => Promise.resolve(resolvedPayload)),
+    interceptors: { request: { use: jest.fn() }, response: { use: jest.fn() } }
   });
 
   const defaultInstance = createInstance();

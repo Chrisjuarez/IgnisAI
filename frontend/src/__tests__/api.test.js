@@ -4,7 +4,7 @@ describe('prediction API client', () => {
 
   beforeEach(() => {
     jest.resetModules();
-    client = { get: jest.fn() };
+    client = { get: jest.fn(), interceptors: { response: { use: jest.fn() } } };
     jest.doMock('axios', () => ({
       __esModule: true,
       default: {
@@ -69,5 +69,47 @@ describe('prediction API client', () => {
         params: expect.objectContaining({ ignition: false }),
       }),
     );
+  });
+});
+
+describe('failed requests', () => {
+  let client;
+  let readableError;
+
+  beforeEach(() => {
+    jest.resetModules();
+    client = { get: jest.fn(), interceptors: { response: { use: jest.fn() } } };
+    jest.doMock('axios', () => ({ __esModule: true, default: { create: jest.fn(() => client) } }));
+    ({ readableError } = require('../api'));
+  });
+
+  afterEach(() => {
+    jest.dontMock('axios');
+  });
+
+  const failed = (props) => Object.assign(new Error('Request failed with status code 502'), props);
+
+  test('carry the message the API sent', () => {
+    const error = failed({ response: { status: 422, data: { message: 'Terrain and fuel data for this area could not be loaded.' } } });
+    expect(readableError(error).message).toBe('Terrain and fuel data for this area could not be loaded.');
+  });
+
+  test('say a timeout took too long', () => {
+    expect(readableError(failed({ code: 'ECONNABORTED' })).message).toMatch(/took too long/);
+  });
+
+  test('say when Ignis could not be reached', () => {
+    expect(readableError(failed({ code: 'ERR_NETWORK' })).message).toMatch(/could not be reached/);
+  });
+
+  test('keep their own message when there is nothing better', () => {
+    expect(readableError(failed({ response: { status: 500, data: 'oops' } })).message).toBe('Request failed with status code 502');
+  });
+
+  test('pass through the client for every request', async () => {
+    const [, onRejected] = client.interceptors.response.use.mock.calls[0];
+    const error = failed({ response: { data: { message: 'The forecast took too long. Try again in a minute.' } } });
+
+    await expect(onRejected(error)).rejects.toThrow('The forecast took too long. Try again in a minute.');
   });
 });

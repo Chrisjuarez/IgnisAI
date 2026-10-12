@@ -1686,7 +1686,7 @@ body {
 .watch-topbar {
   height: 58px;
   display: grid;
-  grid-template-columns: auto auto minmax(260px, 520px) auto auto auto;
+  grid-template-columns: auto auto minmax(260px, 520px) auto auto;
   align-items: center;
   gap: 16px;
   padding: 0 22px;
@@ -1782,6 +1782,11 @@ body {
   font-weight: 800;
   cursor: pointer;
   white-space: nowrap;
+}
+
+.status-pill.failed {
+  border-color: rgba(255, 176, 150, 0.7);
+  background: rgba(176, 42, 18, 0.55);
 }
 
 .user-chip {
@@ -2619,11 +2624,11 @@ body {
 
 @media (max-width: 1200px) {
   .watch-topbar {
-    grid-template-columns: auto auto minmax(180px, 1fr) auto;
+    grid-template-columns: auto auto minmax(180px, 1fr) auto auto;
   }
 
-  .status-pill,
-  .topbar-icon {
+  /* No room for "Updated 3 min ago" here, but a failed update still shows. */
+  .status-pill:not(.failed) {
     display: none;
   }
 
@@ -2639,7 +2644,7 @@ body {
 @media (max-width: 760px) {
   .watch-topbar {
     height: 58px;
-    grid-template-columns: auto auto 1fr auto;
+    grid-template-columns: auto auto 1fr auto auto;
     gap: 10px;
     padding: 0 12px;
   }
