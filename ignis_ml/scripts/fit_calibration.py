@@ -45,6 +45,20 @@ EXCLUDE_PRIOR_FIRE = True
 #: Below this many labelled cells the fit is reported but marked provisional.
 MIN_SAMPLES_FOR_TRUST = 200_000
 
+#: Serving smooths each forecast with a Gaussian of this sigma before it
+#: calibrates it (PRED_SMOOTH_SIGMA in render.yaml). A curve fitted on raw
+#: sigmoids maps scores that serving never produces.
+SERVING_SMOOTH_SIGMA = 0.5
+
+
+def serving_scores(prob: np.ndarray, sigma: float) -> np.ndarray:
+    """One tile's sigmoid, smoothed and clipped as tilesvc does before calibrating."""
+    if sigma > 0:
+        from scipy.ndimage import gaussian_filter
+
+        prob = gaussian_filter(prob, sigma=sigma)
+    return np.clip(prob, 0.0, 1.0)
+
 
 def isotonic_fit(x: np.ndarray, y: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
     """Pool-adjacent-violators isotonic regression, weighted by bin count.
@@ -149,7 +163,7 @@ def _event_env(event: str) -> None:
 
 
 def collect_pairs(ckpt_path: Path, event: str, *, seq_len: Optional[int],
-                  days: int) -> Tuple[np.ndarray, np.ndarray, Dict[str, Any]]:
+                  days: int, smooth_sigma: float) -> Tuple[np.ndarray, np.ndarray, Dict[str, Any]]:
     """Predicted probability against what actually burned, one pair per cell.
 
     The label for a forecast made at day D is the observed fire mask at D+1,
@@ -220,7 +234,7 @@ def collect_pairs(ckpt_path: Path, event: str, *, seq_len: Optional[int],
         with torch.no_grad():
             logits = model(torch.from_numpy(xn[None]).float(),
                            torch.from_numpy(stat[None]).float())
-            prob = torch.sigmoid(logits)[0, 0].numpy()
+            prob = serving_scores(torch.sigmoid(logits)[0, 0].numpy(), smooth_sigma)
 
         keep = ~prior if EXCLUDE_PRIOR_FIRE else np.ones_like(prior)
         probs.append(prob[keep].ravel())
@@ -237,6 +251,7 @@ def collect_pairs(ckpt_path: Path, event: str, *, seq_len: Optional[int],
         "days": used,
         "seq_len": T,
         "excluded_prior_fire": EXCLUDE_PRIOR_FIRE,
+        "smooth_sigma": smooth_sigma,
         "model_sha256": hashlib.sha256(Path(ckpt_path).read_bytes()).hexdigest(),
     }
     return np.concatenate(probs), np.concatenate(labels), meta
@@ -278,7 +293,8 @@ def print_reliability(title: str, bins: Sequence[Dict[str, Any]]) -> None:
 
 
 def collect_pairs_from_tiles(ckpt_path: Path, tiles: Path, *, seq_len: Optional[int],
-                             limit: int, holdout: float) -> Tuple[np.ndarray, np.ndarray, Dict[str, Any]]:
+                             limit: int, holdout: float,
+                             smooth_sigma: float) -> Tuple[np.ndarray, np.ndarray, Dict[str, Any]]:
     """Predicted probability against the tile's own next-day mask.
 
     This is the source calibration should normally use. Each ETL tile already
@@ -331,7 +347,8 @@ def collect_pairs_from_tiles(ckpt_path: Path, tiles: Path, *, seq_len: Optional[
     with torch.no_grad():
         for batch in DataLoader(subset, batch_size=8):
             x_dyn, x_stat, y = batch[0], batch[1], batch[2]
-            prob = torch.sigmoid(model(x_dyn.float(), x_stat.float()))[:, 0].numpy()
+            raw = torch.sigmoid(model(x_dyn.float(), x_stat.float()))[:, 0].numpy()
+            prob = np.stack([serving_scores(tile_prob, smooth_sigma) for tile_prob in raw])
             label = y[:, 0].numpy()
             if EXCLUDE_PRIOR_FIRE:
                 prior = x_dyn[:, -1, 0].numpy() >= 0.5
@@ -351,6 +368,7 @@ def collect_pairs_from_tiles(ckpt_path: Path, tiles: Path, *, seq_len: Optional[
         "seq_len": T,
         "target_mode": target_mode,
         "excluded_prior_fire": EXCLUDE_PRIOR_FIRE,
+        "smooth_sigma": smooth_sigma,
         # Hash the file, do not read a key from it. Checkpoints written by
         # training do not carry their own sha, so this was writing null - and
         # a calibration with a null sha passes the serving guard for ANY
@@ -376,6 +394,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                     help="Tail fraction of tiles to fit on, disjoint from training")
     ap.add_argument("--limit", type=int, default=2000,
                     help="Cap on held-out tiles scored")
+    ap.add_argument("--smooth-sigma", type=float, default=SERVING_SMOOTH_SIGMA,
+                    help="Gaussian sigma applied before fitting; match tilesvc's "
+                         "PRED_SMOOTH_SIGMA. 0 fits the raw sigmoid.")
     ap.add_argument("--out", type=Path, default=Path("config/calibration.json"))
     args = ap.parse_args(argv)
 
@@ -383,11 +404,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         print(f"collecting labelled pairs from held-out tiles in {args.tiles}")
         prob, label, meta = collect_pairs_from_tiles(
             args.ckpt, args.tiles, seq_len=args.seq_len,
-            limit=args.limit, holdout=args.holdout)
+            limit=args.limit, holdout=args.holdout, smooth_sigma=args.smooth_sigma)
     else:
         print(f"collecting labelled pairs for {args.event} from {args.ckpt.name}")
         prob, label, meta = collect_pairs(args.ckpt, args.event,
-                                          seq_len=args.seq_len, days=args.days)
+                                          seq_len=args.seq_len, days=args.days,
+                                          smooth_sigma=args.smooth_sigma)
 
     points = curve_from_pairs(prob, label)
     raw = np.array([p[0] for p in points])
