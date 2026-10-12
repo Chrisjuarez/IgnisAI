@@ -132,7 +132,7 @@ describe('GET /api/map/bootstrap', () => {
       status: 'active',
       hasPerimeter: true,
       hasHotspots: true,
-      hasPrediction: true,
+      predictionEligibility: { eligible: true, reasons: [] },
     });
     // Geometry is counted, not shipped. The map fetches /wildfires and
     // /fire-perimeters directly; serialising both at full extent was
