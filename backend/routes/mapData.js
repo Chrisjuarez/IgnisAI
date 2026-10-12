@@ -266,7 +266,6 @@ function normalizeIncident(feature) {
     hasPrediction: true,
     quality: { status: 'ok', reasons: [] },
     geometry: { type: 'Point', coordinates: [lon, lat] },
-    rawProperties: props,
   };
 }
 
