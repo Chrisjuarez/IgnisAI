@@ -14,6 +14,10 @@
 //   2. Render a number when the site is outside the forecast tile. A rollout
 //      covers 32 km around the ignition; beyond that there is no forecast, and
 //      the panel says so rather than implying safety.
+//
+// Values are shown as a 0-100 exposure score, not a percent chance. The
+// cumulative figure is a running maximum of daily scores, and nothing yet
+// validates it as the probability of fire reaching the site.
 
 import React, { useCallback, useState } from 'react';
 
@@ -32,9 +36,9 @@ function tierOf(risk) {
   return RISK_TIERS[String(risk || '').toLowerCase()] || { label: '—', tone: 'unknown' };
 }
 
-function asPercent(probability) {
-  if (probability == null || Number.isNaN(Number(probability))) return '—';
-  return `${(Number(probability) * 100).toFixed(1)}%`;
+function asScore(value) {
+  if (value == null || Number.isNaN(Number(value))) return '—';
+  return String(Math.round(Number(value) * 100));
 }
 
 function ArrivalSummary({ arrival }) {
@@ -48,8 +52,8 @@ function ArrivalSummary({ arrival }) {
   }
   return (
     <p className="site-exposure__arrival">
-      Reaches the site on <strong>day {arrival.day}</strong> (+{arrival.lead_hours}h), at a{' '}
-      {asPercent(arrival.threshold)} probability threshold.
+      Projected to reach the site on <strong>day {arrival.day}</strong> (+{arrival.lead_hours}h), when the
+      score passes {asScore(arrival.threshold)}.
     </p>
   );
 }
@@ -60,9 +64,9 @@ function ExposureTable({ series }) {
       <thead>
         <tr>
           <th scope="col">Day</th>
-          <th scope="col">Cumulative</th>
+          <th scope="col" title="Highest score up to this day.">Exposure</th>
           <th scope="col">Risk</th>
-          <th scope="col" title="The model's own per-day output. Falls once the site has burned.">
+          <th scope="col" title="The model's own score for this day. Falls once the site has burned.">
             Daily
           </th>
         </tr>
@@ -73,11 +77,11 @@ function ExposureTable({ series }) {
           return (
             <tr key={entry.day}>
               <th scope="row">Day {entry.day}</th>
-              <td className="site-exposure__cumulative">{asPercent(entry.cumulative_probability)}</td>
+              <td className="site-exposure__cumulative">{asScore(entry.cumulative_probability)}</td>
               <td>
                 <span className={`site-exposure__tier site-exposure__tier--${tier.tone}`}>{tier.label}</span>
               </td>
-              <td className="site-exposure__daily">{asPercent(entry.daily_probability)}</td>
+              <td className="site-exposure__daily">{asScore(entry.daily_probability)}</td>
             </tr>
           );
         })}
@@ -109,15 +113,16 @@ function Result({ exposure }) {
         role="group"
         aria-label="Exposure within horizon"
       >
-        <span className="site-exposure__headline-value">{asPercent(exposure.probability_within_horizon)}</span>
+        <span className="site-exposure__headline-value">{asScore(exposure.probability_within_horizon)}</span>
         <span className="site-exposure__headline-label">
-          chance of fire reaching the site &middot; {tier.label}
+          exposure score out of 100 &middot; {tier.label}
         </span>
       </div>
       <ArrivalSummary arrival={exposure.arrival} />
       <ExposureTable series={exposure.series || []} />
       <p className="site-exposure__meta">
-        Ignition {exposure.separation_km} km away.
+        Ignition {exposure.separation_km} km away. Scores rank exposure; they are not yet validated as
+        probabilities.
         {exposure.quality?.degraded ? ' Weather inputs degraded — treat as indicative.' : ''}
       </p>
     </div>
