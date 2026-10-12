@@ -567,6 +567,9 @@ const MapComponent = forwardRef(({
   const mapContainerRef = useRef();
   const mapRef          = useRef();
   const mapClickHandlerRef = useRef();
+  // Numbers forecast runs. A run stops changing the map and the timeline once a
+  // newer run, a clear or an unmount retires it; its request cannot be recalled.
+  const forecastRunRef = useRef(0);
   const incidentsRef = useRef([]);
   const alertsRef = useRef([]);
   const evacuationsRef = useRef(NO_EVACUATIONS);
@@ -908,6 +911,8 @@ const MapComponent = forwardRef(({
   }, [ndviOn]);
 
   const clearForecastTimeline = useCallback(() => {
+    forecastRunRef.current += 1;
+    setIsForecastLoading(false);
     setIsForecastPlaying(false);
     setForecastVisible(false);
     setForecastFrames([]);
@@ -1003,6 +1008,11 @@ const MapComponent = forwardRef(({
     incidentId,
     fitBounds = true,
   }) => {
+    const run = ++forecastRunRef.current;
+    // Set when this run times out or fails, so nothing it finishes later is
+    // drawn over whatever the user is looking at by then.
+    let abandoned = false;
+    const isCurrentRun = () => !abandoned && forecastRunRef.current === run;
     setIsForecastLoading(true);
     setForecastError(null);
 
@@ -1013,6 +1023,7 @@ const MapComponent = forwardRef(({
     let timeoutHandle = null;
     const timeoutPromise = new Promise((_, reject) => {
       timeoutHandle = setTimeout(() => {
+        abandoned = true;
         console.warn('[forecast] safety-net timeout fired — pipeline stalled past FORECAST_TIMEOUT_MS');
         reject(new Error(`Forecast timed out after ${Math.round(FORECAST_TIMEOUT_MS / 1000)}s`));
       }, FORECAST_TIMEOUT_MS);
@@ -1034,6 +1045,7 @@ const MapComponent = forwardRef(({
         ...(ignition != null ? { ignition } : {}),
         ...(incidentId ? { incidentId } : {}),
       });
+      if (!isCurrentRun()) return null;
       const payload = response?.data ?? response;
       console.info('[forecast] 2/5 HTTP response received', {
         stepCount: payload?.steps?.length,
@@ -1051,6 +1063,7 @@ const MapComponent = forwardRef(({
         opacity: 0.75,
         smooth: true,
       });
+      if (!isCurrentRun()) return null;
       console.info('[forecast] 3/5 frames prepared', {
         frames: prepared?.frames?.length,
         firstHeatmapUrlLen: prepared?.frames?.[0]?.heatmapUrl?.length,
@@ -1065,14 +1078,16 @@ const MapComponent = forwardRef(({
         bounds: firstFrame?.bounds,
         coordinateCount: Array.isArray(firstFrame?.coordinates) ? firstFrame.coordinates.length : 0,
       });
-      await withTimeout(
+      const drawn = await withTimeout(
         renderPredictionRasterFrame(mapRef.current, firstFrame, {
           layerMode: forecastLayerMode,
           opacity: forecastOpacityRef.current,
+          isCurrent: isCurrentRun,
         }),
         FORECAST_RENDER_TIMEOUT_MS,
         `Forecast map render timed out after ${Math.round(FORECAST_RENDER_TIMEOUT_MS / 1000)}s`,
       );
+      if (!drawn || !isCurrentRun()) return null;
       console.info('[forecast] 4/5 first frame rendered on map');
       if (fitBounds && firstFrame?.bounds) {
         const [w, s, e, n] = firstFrame.bounds;
@@ -1093,9 +1108,12 @@ const MapComponent = forwardRef(({
 
     try {
       return await Promise.race([work, timeoutPromise]);
+    } catch (error) {
+      abandoned = true;
+      throw error;
     } finally {
       if (timeoutHandle) clearTimeout(timeoutHandle);
-      setIsForecastLoading(false);
+      if (forecastRunRef.current === run) setIsForecastLoading(false);
     }
   }, [paintSpreadScene]);
 
@@ -1967,7 +1985,11 @@ const MapComponent = forwardRef(({
       applyLayerVisibility();
       updateUserSource();
     });
-    return () => m.remove();
+    return () => {
+      // A forecast still loading must not draw on the map being removed.
+      forecastRunRef.current += 1;
+      m.remove();
+    };
   }, []);
 
   useEffect(() => {

@@ -335,8 +335,14 @@ function upsertLineGeoJSON(map, sourceId, layerId, geojson, paint, visibility = 
  * caller passes the forecast's current visibility and opacity rather than
  * having a hidden or faded forecast reappear at full strength on the next tick.
  */
+/**
+ * Draws one forecast frame. `opts.isCurrent`, when given, is asked once the map
+ * is ready: a caller whose run has been abandoned in the meantime gets null
+ * back and nothing is drawn.
+ */
 export async function renderPredictionRasterFrame(map, frame, opts = {}) {
   await waitForMapLoad(map);
+  if (opts.isCurrent && !opts.isCurrent()) return null;
 
   const bounds = frame?.bounds;
   const layerMode = opts.layerMode || 'new_burn';
