@@ -25,6 +25,19 @@ describe('GET /api/fire-perimeters', () => {
     });
   });
 
+  it('marks the result partial when one source answers with an ArcGIS error', async () => {
+    axios.get
+      .mockResolvedValueOnce({ data: { type: 'FeatureCollection', features: [] } })
+      .mockResolvedValueOnce({ data: { error: { code: 498, message: 'Invalid token' } } });
+
+    const res = await request(app)
+      .get('/api/fire-perimeters')
+      .query({ bbox: '-119,33,-117,35' })
+      .expect(200);
+
+    expect(res.body.partial).toBe(true);
+  });
+
   it('merges available perimeter FeatureCollections', async () => {
     axios.get
       .mockResolvedValueOnce({

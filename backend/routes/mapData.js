@@ -4,6 +4,7 @@ const { _private: fireDataHelpers } = require('./fireData');
 const { LruTtlCache } = require('../utils/lruCache');
 const { bboxOf, bboxWithinRadius, distanceMetres, distanceToPolygonMetres } = require('../utils/geo');
 const { nextPasses } = require('../utils/satellitePasses');
+const { fetchArcgisGeoJson } = require('../utils/arcgis');
 
 const router = express.Router();
 
@@ -150,16 +151,6 @@ function arcgisParams({ bbox, recordCount = 1000 }) {
     params.spatialRel = 'esriSpatialRelIntersects';
   }
   return params;
-}
-
-async function fetchArcgisGeoJson(url, params) {
-  const { data } = await axios.get(url, {
-    params,
-    timeout: 25000,
-    headers: { 'User-Agent': USER_AGENT },
-  });
-  if (data?.type === 'FeatureCollection') return data;
-  return { type: 'FeatureCollection', features: [] };
 }
 
 function toIso(value) {
