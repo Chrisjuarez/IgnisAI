@@ -53,6 +53,19 @@ test('a failed refresh keeps the incidents on screen and says the update failed'
   expect(screen.getByRole('button', { name: /BOUQUET/ })).toBeInTheDocument();
 });
 
+test('a refresh whose incident feed failed keeps the fires already listed', async () => {
+  getMapBootstrap
+    .mockResolvedValueOnce(bootstrap())
+    .mockResolvedValueOnce(bootstrap({ incidents: [], layerStatus: { incidents: { ok: false, error: 'ArcGIS query failed (400)' } } }));
+  render(<AdvancedFireDashboard />);
+  await screen.findByRole('button', { name: /BOUQUET/ });
+
+  fireEvent.click(screen.getByRole('button', { name: /^Updated/ }));
+
+  expect(await screen.findByRole('button', { name: 'Update failed · Retry' })).toBeInTheDocument();
+  expect(screen.getByRole('button', { name: /BOUQUET/ })).toBeInTheDocument();
+});
+
 test('both refresh controls reload the incidents and the map', async () => {
   getMapBootstrap.mockResolvedValue(bootstrap());
   render(<AdvancedFireDashboard />);

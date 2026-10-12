@@ -1,6 +1,6 @@
 // backend/routes/firePerimeters.js
 const express = require('express');
-const axios = require('axios');
+const { fetchArcgisGeoJson } = require('../utils/arcgis');
 
 const router = express.Router();
 
@@ -119,12 +119,6 @@ function filterByIncidentName(features, incidentName) {
   });
 }
 
-async function fetchPerimetersFrom(url, params) {
-  const { data } = await axios.get(url, { params, timeout: 20000 });
-  if (data?.type === 'FeatureCollection') return data;
-  return emptyFeatureCollection();
-}
-
 function mergeFeatureCollections(collections) {
   const seen = new Set();
   const features = [];
@@ -147,8 +141,8 @@ router.get('/', async (req, res) => {
 
   try {
     const results = await Promise.allSettled([
-      fetchPerimetersFrom(WFIGS_CURRENT_URL, params),
-      fetchPerimetersFrom(FIRIS_PUBLIC_URL, params),
+      fetchArcgisGeoJson(WFIGS_CURRENT_URL, params),
+      fetchArcgisGeoJson(FIRIS_PUBLIC_URL, params),
     ]);
 
     const collections = results

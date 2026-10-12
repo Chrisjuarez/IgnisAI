@@ -99,6 +99,39 @@ describe('GET /api/map/bootstrap', () => {
     });
   });
 
+  it('reports an ArcGIS error reply as a failed incident feed, not an empty one', async () => {
+    // ArcGIS answers a failed query with HTTP 200 and an error body. Read as
+    // data, that was a healthy feed with no fires in it.
+    const base = axios.get.getMockImplementation();
+    axios.get.mockImplementation((url, config = {}) => (
+      String(url).includes('WFIGS_Incident_Locations_Current')
+        ? Promise.resolve({ data: { error: { code: 400, message: 'Invalid query parameters' } } })
+        : base(url, config)
+    ));
+    const bbox = '-118.95,34.1,-118.3,34.6';
+    const incidentCalls = () => axios.get.mock.calls.filter(([url]) => String(url).includes('WFIGS_Incident_Locations_Current')).length;
+
+    const res = await request(app).get('/api/map/bootstrap').query({ bbox }).expect(200);
+    await request(app).get('/api/map/bootstrap').query({ bbox }).expect(200);
+
+    expect(res.body.layerStatus.incidents).toMatchObject({ ok: false, error: expect.stringContaining('Invalid query parameters') });
+    expect(res.body.incidents).toEqual([]);
+    expect(incidentCalls()).toBe(2);
+  });
+
+  it('treats a FeatureCollection with no incidents as a healthy, empty feed', async () => {
+    const base = axios.get.getMockImplementation();
+    axios.get.mockImplementation((url, config = {}) => (
+      String(url).includes('WFIGS_Incident_Locations_Current')
+        ? Promise.resolve({ data: collection([]) })
+        : base(url, config)
+    ));
+
+    const res = await request(app).get('/api/map/bootstrap').query({ bbox: '-118.97,34.1,-118.3,34.6' }).expect(200);
+
+    expect(res.body.layerStatus.incidents).toMatchObject({ ok: true, count: 0 });
+  });
+
   it('does not cache a bootstrap whose incident feed failed', async () => {
     const base = axios.get.getMockImplementation();
     axios.get.mockImplementation((url, config = {}) => (

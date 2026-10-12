@@ -157,6 +157,15 @@ function EmptyDrawerState({ label, unavailable = false }) {
   );
 }
 
+// A refresh whose incident feed failed keeps the incidents already on screen
+// instead of emptying the list; the feed's status and the status pill say they
+// are not current.
+function keepIncidentsWhenFeedDown(previous, next) {
+  const feedDown = next?.layerStatus?.incidents?.ok === false;
+  if (!feedDown || !previous?.incidents?.length) return next;
+  return { ...next, incidents: previous.incidents };
+}
+
 function mapDataStatusLabel({ refreshing, failed, updatedAt, now }) {
   if (refreshing) return 'Refreshing...';
   if (failed) return 'Update failed · Retry';
@@ -503,7 +512,7 @@ const AdvancedFireDashboard = () => {
     setLoadingMapData(true);
     try {
       const response = await getMapBootstrap({ bbox: WESTERN_CONUS_BBOX });
-      setMapData(response?.data ?? response);
+      setMapData((previous) => keepIncidentsWhenFeedDown(previous, response.data));
       setMapDataFailed(false);
     } catch (error) {
       console.error('map bootstrap failed', error);
@@ -676,7 +685,7 @@ const AdvancedFireDashboard = () => {
         <MapDataStatus
           updatedAt={mapData?.updatedAt}
           refreshing={loadingMapData || loadingMapLayers}
-          failed={mapDataFailed}
+          failed={mapDataFailed || layerStatus.incidents?.ok === false}
           onRefresh={refreshMap}
         />
         <div className="user-chip">
