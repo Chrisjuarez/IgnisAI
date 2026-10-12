@@ -38,24 +38,36 @@ beforeEach(() => jest.clearAllMocks());
 test('headline reports cumulative exposure, not the final day delta', async () => {
   await runPanel(BURNED_ON_DAY_TWO);
 
-  // 58.9% is cumulative. 2.2% is day 3's delta and must not be the headline.
+  // 59 is cumulative. 2 is day 3's delta and must not be the headline.
   const headline = await screen.findByRole('group', { name: /exposure within horizon/i });
-  expect(within(headline).getByText('58.9%')).toBeInTheDocument();
-  expect(within(headline).queryByText('2.2%')).not.toBeInTheDocument();
+  expect(within(headline).getByText('59')).toBeInTheDocument();
+  expect(within(headline).queryByText('2')).not.toBeInTheDocument();
 });
 
 test('day 3 still reads extreme for a site that burned on day 2', async () => {
   await runPanel(BURNED_ON_DAY_TWO);
 
   const dayThree = (await screen.findByText('Day 3')).closest('tr');
-  expect(dayThree).toHaveTextContent('58.9%');
+  expect(dayThree).toHaveTextContent('59');
   expect(dayThree).toHaveTextContent('Extreme');
+});
+
+test('presents an exposure score, not a percent chance of arrival', async () => {
+  await runPanel(BURNED_ON_DAY_TWO);
+
+  // The cumulative value is a running maximum of daily scores; nothing yet
+  // validates it as the probability that fire reaches the site.
+  const headline = await screen.findByRole('group', { name: /exposure within horizon/i });
+  expect(headline).toHaveTextContent(/exposure score out of 100/i);
+  expect(screen.queryByText(/chance/i)).not.toBeInTheDocument();
+  expect(screen.queryByText(/%/)).not.toBeInTheDocument();
+  expect(screen.getByText(/not yet validated as\s+probabilities/i)).toBeInTheDocument();
 });
 
 test('arrival day is surfaced so the user knows when to act', async () => {
   await runPanel(BURNED_ON_DAY_TWO);
 
-  const arrival = await screen.findByText(/reaches the site on/i);
+  const arrival = await screen.findByText(/reach the site on/i);
   expect(arrival).toHaveTextContent('day 2');
   expect(arrival).toHaveTextContent('+48h');
 });
@@ -73,7 +85,7 @@ test('a site outside the tile shows no forecast rather than a low number', async
 
   expect(await screen.findByText(/no forecast for this site/i)).toBeInTheDocument();
   expect(screen.getByText(/68.24 km from the ignition/i)).toBeInTheDocument();
-  expect(screen.queryByText(/chance of fire reaching the site/i)).not.toBeInTheDocument();
+  expect(screen.queryByText(/exposure score/i)).not.toBeInTheDocument();
 });
 
 test('a fire that never arrives says so explicitly', async () => {
