@@ -14,7 +14,6 @@ import {
   getWildfireData,
   getWildfireFootprints,
   getFirePerimeters,
-  getSpreadBands,
   predictFireSpreadMultistep
 } from '../api';
 import {
@@ -1414,25 +1413,8 @@ const MapComponent = forwardRef(({
 
   // ---------- Expose actions to parent ----------
 
-  // Fetch spread bands for a point and paint them. Returns the band collection
-  // so a caller can drive a legend from the same data the map drew.
-  const showSpreadBands = useCallback(async ({ lat, lon, days = 3, date } = {}) => {
-    const payload = await getSpreadBands({ lat, lon, days, date });
-    paintSpreadScene(payload);
-    return payload;
-  }, [paintSpreadScene]);
-
-  const clearSpreadBands = useCallback(() => {
-    ['spread-observed-source', 'spread-bands-source', 'spread-ignition-source'].forEach((id) => {
-      const src = mapRef.current?.getSource?.(id);
-      if (src) src.setData(emptyFeatureCollection());
-    });
-  }, []);
-
   useImperativeHandle(ref, () => ({
     refreshWildfires: fetchWildfires,
-    showSpreadBands,
-    clearSpreadBands,
     toggleNdvi,
     toggleHistoryPanel: () => setShowHistPanel(v => !v),
     runPredictionForIncident,

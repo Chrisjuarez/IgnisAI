@@ -146,7 +146,7 @@ export default function SiteExposurePanel({ site, ignition, date, className = ''
       setExposure(data);
     } catch (err) {
       setExposure(null);
-      setError(err?.response?.data?.detail || err.message || 'Exposure request failed');
+      setError(err.message || 'Exposure request failed');
     } finally {
       setRunning(false);
     }

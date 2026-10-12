@@ -20,7 +20,6 @@ jest.mock('../../api', () => ({
   getWildfireData: jest.fn(() => Promise.resolve({ data: { data: [] } })),
   getWildfireFootprints: jest.fn(() => Promise.resolve({ data: { geojson: { type: 'FeatureCollection', features: [] } } })),
   getFirePerimeters: jest.fn(() => Promise.resolve({ data: { geojson: { type: 'FeatureCollection', features: [] } } })),
-  predictFireSpread: jest.fn(() => Promise.resolve({})),
   predictFireSpreadMultistep: jest.fn(() => Promise.resolve({
     bounds: [-118.6, 34.0, -118.1, 34.4],
     threshold: 0.85,
@@ -45,7 +44,6 @@ jest.mock('../../api', () => ({
 }));
 
 jest.mock('../../utils/addPredictionOverlay', () => ({
-  addPredictionOverlay: jest.fn(() => Promise.resolve({ bounds: [-118.6, 34.0, -118.1, 34.4] })),
   prepareMultistepRasterFrames: jest.fn(async payload => ({
     bounds: payload.bounds,
     scene: payload.scene || null,

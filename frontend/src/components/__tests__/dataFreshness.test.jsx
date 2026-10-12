@@ -4,11 +4,19 @@ import DataFreshness, { hasNewDetectionsSince } from '../DataFreshness';
 
 const NOW = Date.parse('2026-10-04T20:54:00Z');
 
+beforeEach(() => {
+  jest.useFakeTimers();
+  jest.setSystemTime(NOW);
+});
+
+afterEach(() => {
+  jest.useRealTimers();
+});
+
 describe('DataFreshness', () => {
   test('dates each source on its own clock and says when satellites next look', () => {
     render(
       <DataFreshness
-        now={NOW}
         freshness={{
           lastDetectionAt: '2026-10-04T20:33:00.000Z',
           perimeterMappedAt: '2026-10-04T04:09:00.000Z',
@@ -27,7 +35,7 @@ describe('DataFreshness', () => {
   });
 
   test('says plainly when a source has nothing to show', () => {
-    render(<DataFreshness now={NOW} freshness={{ lastDetectionAt: null, perimeterMappedAt: null, nextPasses: [] }} />);
+    render(<DataFreshness freshness={{ lastDetectionAt: null, perimeterMappedAt: null, nextPasses: [] }} />);
 
     expect(screen.getByText('None in the last 2 days')).toBeInTheDocument();
     expect(screen.getByText('Unavailable')).toBeInTheDocument();
@@ -35,7 +43,7 @@ describe('DataFreshness', () => {
   });
 
   test('renders nothing before the incident detail arrives', () => {
-    const { container } = render(<DataFreshness now={NOW} freshness={undefined} />);
+    const { container } = render(<DataFreshness freshness={undefined} />);
     expect(container).toBeEmptyDOMElement();
   });
 });
@@ -59,7 +67,7 @@ describe('re-run notice', () => {
 
   test('offers a re-run when satellites have seen the fire since the forecast', () => {
     const onRerunForecast = jest.fn();
-    render(<DataFreshness now={NOW} freshness={freshness} newDetectionsSinceForecast onRerunForecast={onRerunForecast} />);
+    render(<DataFreshness freshness={freshness} newDetectionsSinceForecast onRerunForecast={onRerunForecast} />);
 
     expect(screen.getByRole('status')).toHaveTextContent('New satellite detection since your forecast');
     fireEvent.click(screen.getByRole('button', { name: 'Re-run' }));
@@ -67,13 +75,13 @@ describe('re-run notice', () => {
   });
 
   test('cannot be pressed twice while the forecast is running', () => {
-    render(<DataFreshness now={NOW} freshness={freshness} newDetectionsSinceForecast rerunning onRerunForecast={jest.fn()} />);
+    render(<DataFreshness freshness={freshness} newDetectionsSinceForecast rerunning onRerunForecast={jest.fn()} />);
 
     expect(screen.getByRole('button', { name: 'Running...' })).toBeDisabled();
   });
 
   test('stays quiet otherwise', () => {
-    render(<DataFreshness now={NOW} freshness={freshness} />);
+    render(<DataFreshness freshness={freshness} />);
 
     expect(screen.queryByRole('status')).not.toBeInTheDocument();
   });

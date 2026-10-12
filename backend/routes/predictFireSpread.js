@@ -2,6 +2,8 @@
 const express = require("express");
 const axios = require("axios");
 const mapData = require("./mapData");
+const { forecastErrorResponse } = require("../utils/forecastErrorResponse");
+const { logSafe } = require("../utils/logSafe");
 
 const router = express.Router();
 
@@ -9,80 +11,10 @@ const router = express.Router();
 // but keep default for local dev.
 const TILE_SVC = process.env.TILE_SVC || "http://localhost:8008";
 
-const SELF_BASE =
-  process.env.INTERNAL_SELF_BASE ||
-  `http://127.0.0.1:${process.env.PORT || 5000}`;
-
-const PREDICT_RETRY_BACKOFF_MS = Number(
-  process.env.PREDICT_RETRY_BACKOFF_MS || (process.env.NODE_ENV === "test" ? 0 : 750)
-);
-const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-
-/**
- * Fetch a tilesvc JSON endpoint with optional retry on cold-start 5xx.
- *
- * IMPORTANT: the default is `retries=0`. The previous default was 2, which
- * is dangerous: a /predict_multistep retry restarts the entire 6-step
- * rollout on tilesvc and almost always re-times out, burning minutes of
- * compute on every attempt. Short, cheap endpoints (raster, vector meta,
- * weather) opt in by passing `retries: 2`.
- *
- * Signature accepts both legacy positional args and a single options object:
- *   getJSON(url, params, timeoutMs, retries)
- *   getJSON(url, params, { timeoutMs, retries })
- */
-async function getJSON(url, params = {}, timeoutOrOpts = 80000, retriesArg) {
-  const opts =
-    typeof timeoutOrOpts === "object" && timeoutOrOpts !== null
-      ? timeoutOrOpts
-      : { timeoutMs: Number(timeoutOrOpts) || 80000, retries: retriesArg };
-  const timeout = Number.isFinite(opts.timeoutMs) ? opts.timeoutMs : 80000;
-  const retries = Number.isFinite(opts.retries) ? Math.max(0, Math.floor(opts.retries)) : 0;
-
-  let lastErr;
-  for (let i = 0; i <= retries; i++) {
-    try {
-      const r = await axios.get(url, { params, timeout });
-      return r.data;
-    } catch (err) {
-      lastErr = err;
-      const status = err?.response?.status;
-      // Retry only on connection errors or 502/504 (tilesvc cold start).
-      if (i < retries && (!status || status === 502 || status === 504)) {
-        console.warn(`getJSON attempt ${i + 1} failed (${status || err.code}), retrying...`);
-        if (PREDICT_RETRY_BACKOFF_MS > 0) {
-          await sleep(PREDICT_RETRY_BACKOFF_MS * (i + 1));
-        }
-        continue;
-      }
-      throw err;
-    }
-  }
-  throw lastErr;
-}
-
 // tilesvc cold-start (boot + FIRMS + weather + model load) + 6-step rollout
 // can take 3-4 minutes. A shorter timeout aborts the client before the model
 // finishes and forces a full restart from step 1.
 const MULTISTEP_TIMEOUT_MS = Number(process.env.MULTISTEP_TIMEOUT_MS || 240000);
-
-function pickModelFields(payload = {}) {
-  return {
-    ...(payload?.model_meta ? { model_meta: payload.model_meta } : {}),
-    ...(payload?.input_summary ? { input_summary: payload.input_summary } : {}),
-    ...(payload?.probability_scale ? { probability_scale: payload.probability_scale } : {}),
-    ...(payload?.quality ? { quality: payload.quality } : {}),
-    ...(payload?.data_sources ? { data_sources: payload.data_sources } : {}),
-    ...(payload?.p_new_burn ? { p_new_burn: payload.p_new_burn } : {}),
-    ...(payload?.p_next_fire ? { p_next_fire: payload.p_next_fire } : {}),
-    ...(payload?.observed_fire ? { observed_fire: payload.observed_fire } : {}),
-    ...(payload?.display_score ? { display_score: payload.display_score } : {}),
-    ...(payload?.risk_class ? { risk_class: payload.risk_class } : {}),
-    ...(payload?.layer_images ? { layer_images: payload.layer_images } : {}),
-    ...(payload?.display_mask ? { display_mask: payload.display_mask } : {}),
-    ...(payload?.threshold_override != null ? { threshold_override: payload.threshold_override } : {}),
-  };
-}
 
 function predictionsEnabled() {
   return !["0", "false", "no", "off"].includes(String(process.env.PREDICTIONS_ENABLED ?? "true").trim().toLowerCase());
@@ -111,162 +43,12 @@ function resolveIgnition(raw) {
   return true;
 }
 
-// GET /api/predict-fire-spread/raster?lat=&lon=&Tseq=&thr=&date=
-router.get("/raster", async (req, res) => {
-  try {
-    if (!predictionsEnabled()) return sendPredictionsDisabled(res);
-    const { lat, lon, Tseq, thr, display_floor, crop_frac, date, ignition } = req.query;
-    if (lat == null || lon == null) {
-      return res.status(400).json({ error: "lat and lon are required" });
-    }
-
-    const params = {
-      lat,
-      lon,
-      ...(Tseq ? { Tseq } : {}),
-      ...(thr ? { thr } : {}),
-      ...(display_floor ? { display_floor } : {}),
-      crop_frac: crop_frac != null ? crop_frac : 0.5,
-      ...(date ? { date } : {}),
-      ignition: resolveIgnition(ignition),
-    };
-
-    // tilesvc returns base64 PNG + bounds; crop centers the output on the fire point.
-    // Short, cheap call — opt into 2 retries to absorb tilesvc cold-start 502s.
-    const raster = await getJSON(
-      `${TILE_SVC}/predict_raster_json`,
-      params,
-      { timeoutMs: 80000, retries: 2 },
-    );
-
-    const bounds = raster?.bounds;
-    const image_base64 = raster?.image_base64;
-    if (!Array.isArray(bounds) || bounds.length !== 4 || !image_base64) {
-      throw new Error(`tilesvc raster missing bounds/image: ${JSON.stringify(raster)?.slice(0, 200)}`);
-    }
-
-    return res.json({
-      bounds,
-      coordinates: Array.isArray(raster?.coordinates) ? raster.coordinates : undefined,
-      image_base64,
-      threshold: raster?.threshold,
-      display_floor: raster?.display_floor,
-      prob_min: raster?.prob_min,
-      prob_max: raster?.prob_max,
-      prob_mean: raster?.prob_mean,
-      area_fraction: raster?.area_fraction,
-      display_area_fraction: raster?.display_area_fraction,
-      ...pickModelFields(raster),
-    });
-  } catch (err) {
-    console.error("raster error:", err?.response?.data || err.message);
-    return res.status(502).json({ error: "tilesvc_raster_failed", detail: err.message });
-  }
-});
-
-// GET /api/predict-fire-spread/vector?lat=&lon=&Tseq=&thr=&date=
-router.get("/vector", async (req, res) => {
-  try {
-    if (!predictionsEnabled()) return sendPredictionsDisabled(res);
-    const { lat, lon, Tseq, thr, crop_frac, date, ignition } = req.query;
-    if (lat == null || lon == null) {
-      return res.status(400).json({ error: "lat and lon are required" });
-    }
-
-    const crop = crop_frac != null ? crop_frac : 0.5;
-    const sharedParams = {
-      ...(date ? { date } : {}),
-      ignition: resolveIgnition(ignition),
-    };
-
-    // 1) GeoJSON polygons from tilesvc (honor thr!) — short call, retry safe.
-    const geojson = await getJSON(
-      `${TILE_SVC}/predict_geojson`,
-      { lat, lon, ...(Tseq ? { Tseq } : {}), ...(thr ? { thr } : {}), crop_frac: crop, ...sharedParams },
-      { timeoutMs: 20000, retries: 2 },
-    );
-
-    // 2) Meta (area_fraction + threshold + bounds) from tilesvc — short, retry safe.
-    const meta = await getJSON(
-      `${TILE_SVC}/predict`,
-      { lat, lon, ...(Tseq ? { Tseq } : {}), png: false, ...(thr ? { thr } : {}), crop_frac: crop, ...sharedParams },
-      { timeoutMs: 80000, retries: 2 },
-    );
-
-    const area_fraction =
-      typeof meta?.area_fraction === "number" ? meta.area_fraction : 0.0;
-
-    const best_thr =
-      typeof meta?.threshold === "number"
-        ? meta.threshold
-        : (thr ? Number(thr) : 0.1);
-
-    // 3) Weather (reuse backend route for consistency)
-    let wx = null;
-    try {
-      const wr = await getJSON(
-        new URL("/api/weather/current", SELF_BASE).toString(),
-        { lat, lon },
-        { timeoutMs: 15000, retries: 2 },
-      );
-      wx = wr?.data?.current || null;
-    } catch (_) {
-      wx = null;
-    }
-
-    const wind_kmh = wx?.wind_speed_10m != null ? wx.wind_speed_10m * 3.6 : null; // m/s -> km/h
-
-    const env = {
-      wind_speed: wind_kmh,
-      wind_direction: wx?.wind_direction_10m ?? null,
-      temperature: wx?.temperature_2m ?? null,
-      humidity: wx?.relative_humidity_2m ?? null,
-      data_source: wx ? "weather_api" : "unknown",
-    };
-
-    // simple distance proxy based on area_fraction
-    const spread_distance_km = Math.max(0, 64 * Math.sqrt(Math.max(0, area_fraction)));
-
-    // Enrich features with direction so frontend can render it easily
-    if (geojson?.features?.length) {
-      geojson.features = geojson.features.map((f) => {
-        const props = { ...(f.properties || {}) };
-        props.direction = env.wind_direction; // simple proxy; replace with model-derived direction if available
-        props.spread_probability = area_fraction;
-        return { ...f, properties: props };
-      });
-    }
-
-    return res.json({
-      geojson,
-      spread_probability: area_fraction, // 0..1
-      spread_direction: env.wind_direction,
-      spread_distance_km,
-      environmental_data: env,
-      threshold: best_thr,
-      bounds: meta?.bounds ?? null,
-      prob_min: meta?.prob_min,
-      prob_max: meta?.prob_max,
-      prob_mean: meta?.prob_mean,
-      ...pickModelFields(meta),
-    });
-  } catch (err) {
-    console.error("vector error:", err?.response?.data || err.message);
-    return res.status(502).json({ error: "tilesvc_vector_failed", detail: err.message });
-  }
-});
-
-// An incident's official burned area, or null. A lookup failure costs the
-// forecast its perimeter, not the forecast itself.
 async function burnedAreaOrNull(incidentId) {
   if (!incidentId) return null;
   try {
     return await mapData.burnedAreaForIncident(String(incidentId));
   } catch (err) {
-    // The id comes from the query string. Line breaks are stripped so a
-    // crafted id cannot forge extra entries in the log.
-    const loggableId = String(incidentId).replace(/[\r\n]/g, "");
-    console.warn(`burned area lookup failed for ${loggableId}: ${err.message}`);
+    console.warn(`burned area lookup failed for ${logSafe(incidentId)}: ${err.message}`);
     return null;
   }
 }
@@ -315,46 +97,17 @@ router.get("/multistep", async (req, res) => {
       throw new Error(`tilesvc multistep missing bounds/steps: ${JSON.stringify(forecast)?.slice(0, 200)}`);
     }
 
-    // Forward the forecast whole, as /bands does. This route used to rebuild
-    // the response from a field whitelist, so every field tilesvc added later
-    // was dropped without a trace - `scene` among them. The arrival-band view,
-    // its labels and the hybrid layer all shipped in tilesvc and never reached
-    // a browser. The route adds nothing to the payload: validate the shape,
-    // pass it on, and a new field needs one change instead of two.
+    // Forward the forecast whole. This route used to rebuild the response from
+    // a field whitelist, so every field tilesvc added later was dropped without
+    // a trace - `scene` among them. The arrival-band view, its labels and the
+    // hybrid layer all shipped in tilesvc and never reached a browser. The
+    // route adds nothing to the payload: validate the shape, pass it on, and a
+    // new field needs one change instead of two.
     return res.json(forecast);
   } catch (err) {
     console.error("multistep error:", err?.response?.data || err.message);
-    return res.status(502).json({ error: "tilesvc_multistep_failed", detail: err.message });
-  }
-});
-
-// GET /api/predict-fire-spread/input-audit?lat=&lon=&date=&Tseq=&step_hours=
-router.get("/input-audit", async (req, res) => {
-  try {
-    if (!predictionsEnabled()) return sendPredictionsDisabled(res);
-    const { lat, lon, Tseq, date, step_hours, ignition, include_npz } = req.query;
-    if (lat == null || lon == null) {
-      return res.status(400).json({ error: "lat and lon are required" });
-    }
-
-    const audit = await getJSON(
-      `${TILE_SVC}/input_audit`,
-      {
-        lat,
-        lon,
-        ...(Tseq ? { Tseq } : {}),
-        ...(date ? { date } : {}),
-        ignition: resolveIgnition(ignition),
-        ...(step_hours ? { step_hours } : {}),
-        ...(include_npz ? { include_npz } : {}),
-      },
-      { timeoutMs: 80000, retries: 2 },
-    );
-
-    return res.json(audit);
-  } catch (err) {
-    console.error("input-audit error:", err?.response?.data || err.message);
-    return res.status(502).json({ error: "tilesvc_input_audit_failed", detail: err.message });
+    const { status, body } = forecastErrorResponse(err);
+    return res.status(status).json(body);
   }
 });
 
@@ -383,66 +136,14 @@ router.get("/site-exposure", async (req, res) => {
       ...(date ? { date } : {}),
     };
 
-    // A rollout per request, so this carries the multistep timeout rather than
-    // the short-endpoint one, and does not retry: a retry restarts the whole
-    // rollout and re-spends the same minutes.
-    const payload = await getJSON(
-      `${TILE_SVC}/site_exposure`,
-      params,
-      { timeoutMs: MULTISTEP_TIMEOUT_MS, retries: 0 },
-    );
-
-    return res.json(payload);
-  } catch (err) {
-    const status = err?.response?.status;
-    const detail = err?.response?.data ?? err.message;
-    console.error("site-exposure failed:", status || err.code, detail);
-    return res.status(status === 422 ? 422 : 502).json({
-      error: "site_exposure_failed",
-      detail,
-    });
-  }
-});
-
-// GET /api/predict-fire-spread/bands?lat=&lon=&days=&band_threshold=
-//
-// Spread as dated polygons rather than a heat raster. Thin proxy: the
-// polygonisation and reprojection live in tilesvc, which owns the grid.
-router.get("/bands", async (req, res) => {
-  try {
-    if (!predictionsEnabled()) return sendPredictionsDisabled(res);
-    const { lat, lon, days, band_threshold, Tseq, thr, ignition, date } = req.query;
-    if (lat == null || lon == null) {
-      return res.status(400).json({ error: "lat and lon are required" });
-    }
-
-    const params = {
-      lat,
-      lon,
-      ...(days != null ? { days } : {}),
-      ...(band_threshold != null ? { band_threshold } : {}),
-      ...(Tseq ? { Tseq } : {}),
-      ...(thr ? { thr } : {}),
-      ...(date ? { date } : {}),
-      ignition: resolveIgnition(ignition),
-    };
-
-    // A rollout per request, so this carries the multistep budget and does not
+    // A rollout per request, so this carries the multistep timeout and does not
     // retry: a retry restarts the whole rollout and re-spends the same minutes.
-    const payload = await getJSON(
-      `${TILE_SVC}/spread_bands`,
-      params,
-      { timeoutMs: MULTISTEP_TIMEOUT_MS, retries: 0 },
-    );
-
-    return res.json(payload);
+    const { data: exposure } = await axios.get(`${TILE_SVC}/site_exposure`, { params, timeout: MULTISTEP_TIMEOUT_MS });
+    return res.json(exposure);
   } catch (err) {
-    const status = err?.response?.status;
-    console.error("spread bands failed:", status || err.code, err?.response?.data ?? err.message);
-    return res.status(status === 422 ? 422 : 502).json({
-      error: "spread_bands_failed",
-      detail: err?.response?.data ?? err.message,
-    });
+    console.error("site-exposure error:", err?.response?.data || err.message);
+    const { status, body } = forecastErrorResponse(err);
+    return res.status(status).json(body);
   }
 });
 

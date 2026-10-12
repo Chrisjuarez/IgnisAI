@@ -22,6 +22,36 @@ const api = axios.create({
   timeout: DEFAULT_TIMEOUT_MS,
 });
 
+// A failed request carries a message a person can read, so callers show
+// `error.message` as is.
+const NETWORK_MESSAGES = {
+  ECONNABORTED: 'The request took too long. Try again in a minute.',
+  ETIMEDOUT: 'The request took too long. Try again in a minute.',
+  ERR_NETWORK: 'Ignis could not be reached. Check your connection.',
+};
+
+/**
+ * What to tell a person about a failed request: the API's own message when it
+ * sent one, a general one when the server failed without one - Render's own
+ * error page while the backend restarts carries none - or what went wrong on
+ * the way there. Undefined when there is nothing better than axios's text.
+ */
+export function readableMessage(error) {
+  const apiMessage = error.response?.data?.message;
+  if (apiMessage) return apiMessage;
+  if (error.response?.status >= 500) return 'Ignis is having trouble right now. Try again shortly.';
+  return NETWORK_MESSAGES[error.code];
+}
+
+/** Replaces the failed request's `message` with the readable one, in place. */
+export function attachReadableMessage(error) {
+  const message = readableMessage(error);
+  if (message) error.message = message;
+  return error;
+}
+
+api.interceptors.response.use(undefined, (error) => Promise.reject(attachReadableMessage(error)));
+
 // -----------------------------
 // Existing calls
 // -----------------------------
@@ -38,65 +68,6 @@ export const getLayers = () => api.get("/layers");
 // -----------------------------
 // Prediction endpoints
 // -----------------------------
-
-/**
- * Vector prediction (GeoJSON + spread_probability + environmental_data)
- * Backend expects: /predict-fire-spread/vector?lat=&lon=&thr=
- */
-export const predictFireSpreadVector = async ({ lat, lng, lon, thr, Tseq, date } = {}) => {
-  const latitude = lat != null ? Number(lat) : null;
-
-  // accept either lng or lon
-  const longitude =
-    lon != null ? Number(lon) : (lng != null ? Number(lng) : null);
-
-  if (latitude == null || Number.isNaN(latitude) || longitude == null || Number.isNaN(longitude)) {
-    throw new Error(`predictFireSpreadVector missing lat/lon (lat=${lat}, lng=${lng}, lon=${lon})`);
-  }
-
-  const threshold = thr == null ? null : Number(thr);
-
-  const { data } = await api.get("/predict-fire-spread/vector", {
-    params: {
-      lat: latitude,
-      lon: longitude,
-      ...(threshold != null && !Number.isNaN(threshold) ? { thr: threshold } : {}),
-      ...(Tseq ? { Tseq } : {}),
-      ...(date ? { date } : {}),
-    },
-  });
-
-  return data;
-};
-
-/**
- * Raster overlay (bounds + image_base64)
- * Backend expects: /predict-fire-spread/raster?lat=&lon=
- */
-export const predictFireSpreadRaster = async ({ lat, lng, lon, thr, displayFloor, Tseq, date } = {}) => {
-  const latitude = lat != null ? Number(lat) : null;
-  const longitude =
-    lon != null ? Number(lon) : (lng != null ? Number(lng) : null);
-
-  if (latitude == null || Number.isNaN(latitude) || longitude == null || Number.isNaN(longitude)) {
-    throw new Error(`predictFireSpreadRaster missing lat/lon (lat=${lat}, lng=${lng}, lon=${lon})`);
-  }
-
-  const threshold = thr == null ? null : Number(thr);
-
-  const { data } = await api.get("/predict-fire-spread/raster", {
-    params: {
-      lat: latitude,
-      lon: longitude,
-      ...(Tseq ? { Tseq } : {}),
-      ...(threshold != null && !Number.isNaN(threshold) ? { thr: threshold } : {}),
-      ...(displayFloor != null && !Number.isNaN(Number(displayFloor)) ? { display_floor: Number(displayFloor) } : {}),
-      ...(date ? { date } : {}),
-    },
-  });
-
-  return data; // { bounds, image_base64, ... }
-};
 
 /**
  * Multistep raster forecast timeline.
@@ -188,39 +159,5 @@ export const getSiteExposure = async ({
 
   return data;
 };
-
-/**
- * Fire spread as dated, non-overlapping day bands.
- * Backend expects: /predict-fire-spread/bands?lat=&lon=&days=
- *
- * Each cell belongs to the day it first burned, so the bands can be drawn at
- * full opacity without colours stacking.
- */
-export const getSpreadBands = async ({ lat, lng, lon, days, bandThreshold, Tseq, date, ignition } = {}) => {
-  const latitude = lat != null ? Number(lat) : null;
-  const longitude = lon != null ? Number(lon) : (lng != null ? Number(lng) : null);
-  if (latitude == null || Number.isNaN(latitude) || longitude == null || Number.isNaN(longitude)) {
-    throw new Error(`getSpreadBands missing lat/lon (lat=${lat}, lng=${lng}, lon=${lon})`);
-  }
-
-  const { data } = await api.get("/predict-fire-spread/bands", {
-    timeout: MULTISTEP_TIMEOUT_MS,
-    params: {
-      lat: latitude,
-      lon: longitude,
-      ...(days ? { days } : {}),
-      ...(bandThreshold != null ? { band_threshold: Number(bandThreshold) } : {}),
-      ...(Tseq ? { Tseq } : {}),
-      ...(date ? { date } : {}),
-      ...(ignition != null ? { ignition } : {}),
-    },
-  });
-
-  return data;
-};
-
-// Keep your old name if the UI calls it:
-export const predictFireSpread = async ({ lat, lng, thr, date } = {}) =>
-  predictFireSpreadVector({ lat, lng, thr, date });
 
 export default api;

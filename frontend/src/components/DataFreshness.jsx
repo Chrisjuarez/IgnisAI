@@ -5,6 +5,7 @@
 // and the next satellite pass says when the picture can next change.
 
 import React from 'react';
+import useNow from '../hooks/useNow';
 import { clockTime, timeAgo, timeUntil } from '../utils/relativeTime';
 
 /**
@@ -25,8 +26,8 @@ export default function DataFreshness({
   newDetectionsSinceForecast = false,
   onRerunForecast,
   rerunning = false,
-  now = Date.now(),
 }) {
+  const now = useNow();
   if (!freshness) return null;
   const { lastDetectionAt, perimeterMappedAt } = freshness;
   const [nextPass] = freshness.nextPasses || [];

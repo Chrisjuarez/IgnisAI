@@ -3,6 +3,8 @@ const express = require('express');
 const cors = require('cors');
 const dotenv = require('dotenv');
 const connectDB = require('./db');
+const { logSafe } = require('./utils/logSafe');
+const { respondNotFound, respondWithError } = require('./middleware/errorResponses');
 
 if (process.env.NODE_ENV !== 'test') {
   dotenv.config({ quiet: true });
@@ -38,7 +40,9 @@ app.use(cors({
     if (!origin || CORS_ORIGINS.includes(origin)) {
       return callback(null, true);
     }
-    return callback(new Error(`CORS origin not allowed: ${origin}`));
+    // Logged so a new frontend URL missing from CORS_ORIGIN is easy to spot.
+    console.warn('Refused request from an origin not in CORS_ORIGIN:', logSafe(origin));
+    return callback(Object.assign(new Error('Origin not allowed'), { status: 403, expose: true }));
   },
   methods: ['GET','POST','PUT','DELETE','OPTIONS'],
   allowedHeaders: ['Content-Type','Authorization'],
@@ -73,7 +77,9 @@ mountRoute('/api/ndvi', './routes/ndvi');
 mountRoute('/api/fire-perimeters', './routes/firePerimeters');
 mountRoute('/api/predict-fire-spread', './routes/predictFireSpread');
 
-// Export app for tests (your existing code - unchanged)
+app.use(respondNotFound);
+app.use(respondWithError);
+
 module.exports = app;
 
 // ---- Run server directly (not in tests) ----
