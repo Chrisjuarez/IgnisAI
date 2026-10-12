@@ -106,6 +106,9 @@ describe('GET /api/map/bootstrap', () => {
       .expect(200);
 
     expect(res.body.incidents).toHaveLength(1);
+    // The feed's raw attributes (97 per incident, three quarters of the
+    // payload) stay server-side; the map reads only the normalized fields.
+    expect(res.body.incidents[0]).not.toHaveProperty('rawProperties');
     expect(res.body.incidents[0]).toMatchObject({
       id: 'wfigs:abc-123',
       name: 'Palisades Fire',
