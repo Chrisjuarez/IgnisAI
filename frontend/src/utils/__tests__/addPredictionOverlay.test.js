@@ -18,6 +18,17 @@ function makeMap(overrides = {}) {
 }
 
 describe('prediction raster overlay rendering', () => {
+  test('draws nothing for a run that is no longer current once the map is ready', async () => {
+    const map = makeMap();
+    const frame = { bounds: [-118.58, 33.97, -118.36, 34.15], heatmapUrl: 'data:image/png;base64,abc123' };
+
+    const drawn = await renderPredictionRasterFrame(map, frame, { isCurrent: () => false });
+
+    expect(drawn).toBeNull();
+    expect(map.addSource).not.toHaveBeenCalled();
+    expect(map.addLayer).not.toHaveBeenCalled();
+  });
+
   test('does not wait forever when the style is ready but map.loaded() is false', async () => {
     const map = makeMap();
     const frame = {
