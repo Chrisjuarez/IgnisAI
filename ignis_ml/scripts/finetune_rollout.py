@@ -58,20 +58,26 @@ def npz_files(tiles: Path) -> List[Path]:
     return sorted(p for p in tiles.glob("*.npz") if not p.name.startswith("._"))
 
 
-def load_corpus(tiles: Path) -> Dict[str, List[Path]]:
-    """Sample paths grouped by fire, ordered by day."""
+def load_corpus(tiles: Path) -> Dict[str, List[Tuple[int, Path]]]:
+    """(day index, path) pairs grouped by fire, ordered by day."""
     by_fire: Dict[str, List[Tuple[int, Path]]] = defaultdict(list)
     for path in npz_files(tiles):
         with np.load(path, allow_pickle=True) as d:
             by_fire[str(d["fire_id"])].append((int(d["day_index"]), path))
-    return {fire: [p for _, p in sorted(days)] for fire, days in by_fire.items()}
+    return {fire: sorted(days) for fire, days in by_fire.items()}
 
 
-def rollout_groups(paths: Sequence[Path], steps: int) -> List[List[Path]]:
-    """Consecutive runs of `steps` samples, for supervising an autoregression."""
+def rollout_groups(days: Sequence[Tuple[int, Path]], steps: int) -> List[List[Path]]:
+    """Runs of `steps` samples on consecutive days, for supervising an autoregression.
+
+    The ETL does not write every day, so a fire's samples can have gaps. A run
+    across a gap would train day 0 -> day 2 as one step.
+    """
     groups = []
-    for i in range(len(paths) - steps + 1):
-        groups.append(list(paths[i:i + steps]))
+    for i in range(len(days) - steps + 1):
+        run = days[i:i + steps]
+        if run[-1][0] - run[0][0] == steps - 1:
+            groups.append([path for _, path in run])
     return groups
 
 
