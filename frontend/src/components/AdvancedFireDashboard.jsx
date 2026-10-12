@@ -473,6 +473,7 @@ const AdvancedFireDashboard = () => {
   // The selected incident's freshness as it stood when its forecast was run.
   const [forecastBasis, setForecastBasis] = useState(null);
   const selectedIncidentIdRef = useRef(null);
+  const detailRequestRef = useRef(0);
   const [legendOpen, setLegendOpen] = useState(false);
   const [brightness] = useState('');
   const [confidence] = useState('');
@@ -562,19 +563,22 @@ const AdvancedFireDashboard = () => {
     selectedIncidentIdRef.current = selectedIncident?.id ?? null;
   }, [selectedIncident]);
 
-  // Detail and updates for one incident. A response that lands after the user
-  // has moved to another incident is dropped rather than shown under its name.
+  // Detail and updates for one incident. Only the newest request may change
+  // what the panel shows: an older one belongs to an incident the user has
+  // left, or was overtaken by a later refresh of the same one. The caller still
+  // gets its own result.
   const loadIncidentDetail = useCallback(async (incident) => {
+    const request = ++detailRequestRef.current;
     const [detailResponse, updatesResponse] = await Promise.allSettled([
       getIncident(incident.id, { bbox: WESTERN_CONUS_BBOX }),
       getIncidentUpdates(incident.id, { bbox: WESTERN_CONUS_BBOX }),
     ]);
-    if (selectedIncidentIdRef.current !== incident.id) return null;
-    const detail = detailResponse.status === 'fulfilled' ? (detailResponse.value?.data ?? detailResponse.value) : null;
+    const detail = detailResponse.status === 'fulfilled' ? detailResponse.value.data : null;
+    const isNewest = request === detailRequestRef.current && selectedIncidentIdRef.current === incident.id;
+    if (!isNewest) return detail;
     if (detail) setSelectedIncidentDetail(detail);
     if (updatesResponse.status === 'fulfilled') {
-      const payload = updatesResponse.value?.data ?? updatesResponse.value;
-      setSelectedIncidentUpdates(payload?.updates || []);
+      setSelectedIncidentUpdates(updatesResponse.value.data?.updates || []);
     }
     return detail;
   }, []);
@@ -582,6 +586,8 @@ const AdvancedFireDashboard = () => {
   const handleIncidentSelect = useCallback((incident) => {
     selectedIncidentIdRef.current = incident.id;
     setSelectedIncident(incident);
+    setSelectedIncidentDetail(null);
+    setSelectedIncidentUpdates([]);
     setSelectedWarning(null);
     setDetailTab('prediction');
     setDrawerOpen(false);
@@ -593,6 +599,7 @@ const AdvancedFireDashboard = () => {
     setSelectedWarning(warning);
     setSelectedIncident(null);
     setSelectedIncidentDetail(null);
+    setSelectedIncidentUpdates([]);
     setDrawerOpen(false);
     mapRef.current?.flyToAlert?.(warning);
   }, []);
