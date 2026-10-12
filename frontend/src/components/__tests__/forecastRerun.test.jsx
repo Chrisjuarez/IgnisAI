@@ -24,7 +24,7 @@ jest.mock('../auth/AuthContext', () => ({ useAuth: () => ({ user: { name: 'Crew 
 
 const mockBouquet = {
   id: 'wfigs:bouquet', name: 'BOUQUET', county: 'Los Angeles', state: 'US-CA', status: 'active',
-  acres: 1048, lat: 34.561835, lon: -118.40183, hasPrediction: true,
+  acres: 1048, lat: 34.561835, lon: -118.40183,
   predictionEligibility: { eligible: true, reasons: [] },
 };
 const mockDome = { ...mockBouquet, id: 'wfigs:dome', name: 'DOME', county: 'Mariposa' };

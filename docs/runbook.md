@@ -194,7 +194,7 @@ docker logs ignisai-backend
 docker logs ignisai-frontend
 
 # Local development
-# Backend: Console output + winston logs
+# Backend: console output
 # Frontend: Browser console + network tab
 
 # Production: Container orchestrator logs

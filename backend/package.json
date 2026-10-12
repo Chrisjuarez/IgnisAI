@@ -23,8 +23,6 @@
     "bcryptjs": "^3.0.3",
     "cors": "^2.8.6",
     "crypto": "^1.0.1",
-    "csv-parser": "^3.2.1",
-    "density-clustering": "^1.3.0",
     "dotenv": "^17.4.2",
     "express": "^5.2.1",
     "express-rate-limit": "^8.5.2",
@@ -32,8 +30,7 @@
     "mongoose": "^8.24.0",
     "prom-client": "^15.1.3",
     "satellite.js": "^6.0.2",
-    "validator": "^13.15.35",
-    "winston": "^3.19.0"
+    "validator": "^13.15.35"
   },
   "devDependencies": {
     "@babel/preset-env": "^7.28.5",

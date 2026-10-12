@@ -406,7 +406,6 @@ function incidentFeatureCollection(incidents = []) {
           county: incident.county || '',
           state: incident.state || '',
           updatedAt: incident.updatedAt || '',
-          hasPrediction: Boolean(incident.hasPrediction),
           hasPerimeter: Boolean(incident.hasPerimeter),
           hasHotspots: Boolean(incident.hasHotspots),
           lat: Number(incident.lat),

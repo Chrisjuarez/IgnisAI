@@ -7,7 +7,7 @@ const baseIncident = {
   county: 'Los Angeles',
   state: 'US-CA',
   containmentPct: 0,
-  hasPrediction: true,
+  predictionEligibility: { eligible: true, reasons: [] },
 };
 
 // The caption element itself. Matching on the word "perimeter" would also hit
@@ -76,7 +76,7 @@ describe('incident dates', () => {
 describe('re-running a stale forecast', () => {
   test('the notice re-runs the forecast for the incident on screen', () => {
     const onRunPrediction = jest.fn();
-    const incident = { ...baseIncident, hasPrediction: true };
+    const incident = { ...baseIncident };
     render(
       <IncidentDetailPanel
         incident={incident}

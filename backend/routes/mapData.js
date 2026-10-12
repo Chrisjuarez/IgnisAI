@@ -263,8 +263,6 @@ function normalizeIncident(feature) {
     sourceNames: ['WFIGS', 'NIFC'],
     hasPerimeter: false,
     hasHotspots: false,
-    hasPrediction: true,
-    quality: { status: 'ok', reasons: [] },
     geometry: { type: 'Point', coordinates: [lon, lat] },
   };
 }
@@ -466,7 +464,6 @@ function annotateIncidents(incidents, incidentPerimeters, hotspots) {
         ...(hasPerimeter ? ['Perimeters'] : []),
         ...(hasHotspots ? ['FIRMS'] : []),
       ],
-      hasPrediction: predictionEligibility.eligible,
       predictionEligibility,
     };
   });
@@ -736,21 +733,6 @@ async function buildBootstrap(query = {}) {
   return payload;
 }
 
-function filterIncidents(incidents, query = {}) {
-  const status = String(query.status || '').toLowerCase();
-  const type = String(query.type || '').toLowerCase();
-  const q = String(query.q || '').trim().toLowerCase();
-  return incidents.filter((incident) => {
-    if (status && status !== 'all' && incident.status !== status) return false;
-    if (type && type !== 'all' && incident.type !== type) return false;
-    if (q) {
-      const haystack = [incident.name, incident.county, incident.state].filter(Boolean).join(' ').toLowerCase();
-      if (!haystack.includes(q)) return false;
-    }
-    return true;
-  });
-}
-
 /**
  * What the map actually needs from a bootstrap.
  *
@@ -785,12 +767,6 @@ router.get('/map/bootstrap', async (req, res) => {
   }
 });
 
-router.get('/incidents', async (req, res) => {
-  const payload = await buildBootstrap(req.query);
-  const incidents = filterIncidents(payload.incidents, req.query);
-  res.json({ updatedAt: payload.updatedAt, count: incidents.length, incidents, layerStatus: payload.layerStatus });
-});
-
 router.get('/incidents/:id', async (req, res) => {
   const payload = await buildBootstrap(req.query);
   const decodedId = decodeURIComponent(req.params.id);
@@ -814,10 +790,7 @@ router.get('/incidents/:id', async (req, res) => {
     }).slice(0, 100),
     alerts,
     evacuations: [],
-    predictionEligibility: {
-      eligible: incident.predictionEligibility?.eligible ?? incident.hasPrediction,
-      reasons: incident.predictionEligibility?.reasons || [],
-    },
+    predictionEligibility: incident.predictionEligibility,
     updates: buildUpdates(incident, alerts),
   });
 });
@@ -830,32 +803,6 @@ router.get('/incidents/:id/updates', async (req, res) => {
     return res.status(404).json({ error: 'incident not found' });
   }
   res.json({ incidentId: incident.id, updates: buildUpdates(incident, payload.alerts) });
-});
-
-router.get('/alerts', async (req, res) => {
-  const payload = await buildBootstrap(req.query);
-  res.json({
-    updatedAt: payload.updatedAt,
-    count: payload.alerts.length,
-    alerts: payload.alerts,
-    geojson: payload.alertsGeojson,
-    layerStatus: payload.layerStatus.alerts,
-  });
-});
-
-router.get('/layers', async (_req, res) => {
-  res.json({
-    updatedAt: nowIso(),
-    layers: [
-      { id: 'incidents', label: 'Incidents', source: 'WFIGS Incident Locations Current', defaultVisible: true },
-      { id: 'perimeters', label: 'Official perimeters', source: 'WFIGS/FIRIS', defaultVisible: true },
-      { id: 'hotspots', label: 'FIRMS hotspots', source: 'NASA FIRMS VIIRS/MODIS', defaultVisible: true },
-      { id: 'warnings', label: 'Fire weather warnings', source: 'NWS Alerts API', defaultVisible: true },
-      { id: 'evacuations', label: 'Evacuations', source: 'Official county/provider registry', defaultVisible: false },
-      { id: 'prediction', label: 'Ignis prediction', source: 'IgnisAI tilesvc', defaultVisible: true },
-      { id: 'ndvi', label: 'NDVI', source: 'NASA/GIBS NDVI tile service', defaultVisible: false },
-    ],
-  });
 });
 
 module.exports = router;

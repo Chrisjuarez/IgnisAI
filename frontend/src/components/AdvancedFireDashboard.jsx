@@ -301,9 +301,7 @@ function IncidentDetailPanel({
 }) {
   if (!incident) return null;
   const updates = detail?.updates || [];
-  const predictionEligibility = detail?.predictionEligibility
-    || incident.predictionEligibility
-    || { eligible: incident.hasPrediction !== false, reasons: [] };
+  const predictionEligibility = detail?.predictionEligibility || incident.predictionEligibility;
   const canPredict = Boolean(predictionEligibility?.eligible);
   const predictionReason = predictionEligibility?.reasons?.[0]
     || 'Prediction is only enabled when Ignis has enough hotspot or perimeter context.';
