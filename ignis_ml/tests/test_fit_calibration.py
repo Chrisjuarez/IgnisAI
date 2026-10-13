@@ -13,6 +13,7 @@ from ignis_ml.scripts.fit_calibration import (
     expected_calibration_error,
     isotonic_fit,
     reliability_bins,
+    serving_scores,
 )
 
 
@@ -94,3 +95,21 @@ def test_curve_spans_the_whole_range_and_never_decreases():
     assert xs[0] == 0.0 and xs[-1] == 1.0, "curve must cover the full input range"
     assert all(b >= a - 1e-9 for a, b in zip(ys, ys[1:])), "curve must be monotone"
     assert all(0.0 <= y <= 1.0 for y in ys)
+
+
+def test_serving_scores_smooth_like_tilesvc():
+    from scipy.ndimage import gaussian_filter
+
+    prob = np.zeros((9, 9), np.float32)
+    prob[4, 4] = 0.9
+
+    scores = serving_scores(prob, 0.5)
+
+    assert np.allclose(scores, gaussian_filter(prob, sigma=0.5))
+    assert scores[4, 4] < 0.9 and scores[4, 5] > 0.0, "a lone hot cell spreads to its neighbours"
+
+
+def test_serving_scores_without_smoothing_are_the_raw_sigmoid():
+    prob = np.array([[0.0, 0.3], [0.7, 1.0]], np.float32)
+
+    assert np.array_equal(serving_scores(prob, 0.0), prob)
