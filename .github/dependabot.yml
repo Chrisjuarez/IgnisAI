@@ -7,6 +7,12 @@ updates:
       day: "monday"
       time: "08:00"
       timezone: "America/Los_Angeles"
+    # Minor and patch updates arrive as one PR; majors stay separate.
+    groups:
+      backend-minor-and-patch:
+        update-types:
+          - "minor"
+          - "patch"
   - package-ecosystem: "npm"
     directory: "/frontend"
     schedule:
@@ -14,3 +20,20 @@ updates:
       day: "monday"
       time: "08:00"
       timezone: "America/Los_Angeles"
+    groups:
+      frontend-minor-and-patch:
+        update-types:
+          - "minor"
+          - "patch"
+  - package-ecosystem: "pip"
+    directory: "/services/tilesvc"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "08:00"
+      timezone: "America/Los_Angeles"
+    groups:
+      tilesvc-minor-and-patch:
+        update-types:
+          - "minor"
+          - "patch"
