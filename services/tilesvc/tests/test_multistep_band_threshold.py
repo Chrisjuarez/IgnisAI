@@ -11,8 +11,6 @@ import pytest
 
 pytest.importorskip("fastapi")
 
-from fastapi.testclient import TestClient  # noqa: E402
-
 from services.tilesvc import app  # noqa: E402
 from services.tilesvc.grid import SIZE, lonlat_to_tile, tile_bounds_lonlat  # noqa: E402
 
@@ -41,10 +39,13 @@ def forecast_bands(monkeypatch):
             return bounds, app._build_crop_window(prob.shape, bounds, lat, lon, crop_frac), steps
 
         monkeypatch.setattr(app, "_rollout_multistep_predictions", rollout)
-        response = TestClient(app.app).get(
-            "/predict_multistep", params={"lat": LAT, "lon": LON, "steps": 2, "thr": thr})
-        assert response.status_code == 200, response.text
-        return response.json()["scene"]["forecast"]["features"]
+        # Called directly, so every Query default is passed explicitly.
+        response = app.predict_multistep(
+            lat=LAT, lon=LON, model="ignis", Tseq=3, steps=2, step_hours=24, thr=thr,
+            display_floor=None, crop_frac=0.5, ignition=True, date=None, debug=None,
+            burned_area=None,
+        )
+        return response["scene"]["forecast"]["features"]
 
     return run
 
