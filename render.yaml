@@ -173,6 +173,10 @@ services:
         value: "0.10"
       - key: PRED_SMOOTH_SIGMA
         value: "0.5"
+      - key: MODEL_AR_FEEDBACK_MODE
+        value: threshold
+      - key: MODEL_AR_FEEDBACK_THRESHOLD
+        value: "0.5"
       - key: PRED_UPSCALE
         value: "8"
       - key: TORCH_DEVICE

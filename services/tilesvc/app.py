@@ -185,6 +185,12 @@ MODEL_THRESHOLD = float(os.getenv("MODEL_THRESHOLD", "0.01"))
 #                                Defaults to 0.10 — much lower than the
 #                                classification threshold by design.
 #
+# Production runs "threshold" at 0.5 (render.yaml). On held-out fires, soft
+# feedback let faint probability far from any detection grow into fire within
+# a few steps. Feeding back only cells at 0.5 or above did not freeze the
+# footprint for the deployed checkpoint, and raised CSI on every day after the
+# first.
+#
 # Don't change MODEL_THRESHOLD to fix rollout behavior — that breaks the
 # user-visible "decision threshold" semantics. Tune these instead.
 # ---------------------------------------------------------------------------
@@ -2186,20 +2192,20 @@ def predict_multistep(
     # response rather than behind its own endpoint so a client gets both
     # representations from one prediction - asking separately would run the
     # model twice for one answer.
-    calibrated_rollout = []
+    #
+    # Bands are drawn at the decision threshold, the line the contour and the
+    # next-fire layer already use. Drawn at a calibrated 0.10 they covered 5x
+    # the area that burned by day 1 on held-out fires, and 14x by day 3.
     _sha = file_sha256(MODEL_PATH)
-    for step in rollout:
-        _score, _risk, _meta = calibrate_probability(step["prob"], model_sha256=_sha)
-        calibrated_rollout.append({**step, "prob": _score})
-
     response: Dict[str, Any] = {
         "scene": spread_scene(
-            calibrated_rollout,
+            rollout,
             observed_fire_full,
             lonlat_to_tile(lon, lat),
             _TO_WGS84.transform,
             ignition_lon=lon,
             ignition_lat=lat,
+            threshold=threshold,
             burned_area=burned_geometry,
         ),
         # Whether the official burned area shaped this forecast, so a client
