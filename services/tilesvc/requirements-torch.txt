@@ -12,4 +12,4 @@
 #
 # /healthz reports torch.build; it must read "cpu".
 --index-url https://download.pytorch.org/whl/cpu
-torch==2.12.0
+torch==2.12.1+cpu
