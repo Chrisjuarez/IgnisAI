@@ -9,7 +9,7 @@ fastapi==0.115.5
 uvicorn[standard]==0.38.0
 requests
 numpy<2
-Pillow==12.2.0
+Pillow==12.3.0
 affine
 rasterio
 shapely
