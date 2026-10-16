@@ -8,7 +8,7 @@
 fastapi==0.115.5
 uvicorn[standard]==0.38.0
 requests
-numpy<2
+numpy<3
 Pillow==12.3.0
 affine
 rasterio
