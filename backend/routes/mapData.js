@@ -70,6 +70,11 @@ const PERIMETER_DISCOVERY_SLACK_MS = 12 * 60 * 60 * 1000;
 // fire's mapped perimeter - or of its reported origin, when nothing is mapped.
 const DETECTION_NEAR_FIRE_M = 2000;
 
+// A forecast grows from the fire's latest day of detections, so a fire no
+// satellite has seen in that day has nothing current to grow from.
+const FORECASTABLE_WITHIN_MS = 24 * 60 * 60 * 1000;
+const NO_RECENT_DETECTION = "No satellite has detected this fire within 2 km in the last 24 hours, so Ignis can't forecast its spread.";
+
 const EVACUATION_STATUS = {
   'evacuation order': 'order',
   'evacuation warning': 'warning',
@@ -205,12 +210,12 @@ function byStatusThenSize(a, b) {
     || Number(b.acres || 0) - Number(a.acres || 0);
 }
 
-function resolvePredictionEligibility(incident, { hasPerimeter = false, hasHotspots = false } = {}) {
+function resolvePredictionEligibility(incident, { detectedLast24h = false } = {}) {
   const reasons = [];
   if (incident?.type !== 'wildfire') reasons.push('record is not an active wildfire');
   if (incident?.status === 'contained') reasons.push('incident is contained');
   else if (incident?.status !== 'active') reasons.push('incident is not active');
-  if (!hasPerimeter && !hasHotspots) reasons.push('prediction requires a recent hotspot cluster or matching perimeter');
+  if (!detectedLast24h) reasons.push(NO_RECENT_DETECTION);
   return {
     eligible: reasons.length === 0,
     reasons,
@@ -438,18 +443,21 @@ async function burnedAreaForIncident(incidentId) {
 
 // Hotspots are the fire's own by the same rule freshness uses, so the panel
 // cannot call them live while saying none fell near the fire.
-function annotateIncidents(incidents, incidentPerimeters, hotspots) {
+function annotateIncidents(incidents, incidentPerimeters, hotspots, now = Date.now()) {
   return incidents.map((incident) => {
     const { own } = incidentPerimeters.get(incident.id) || NO_PERIMETERS;
     const hasPerimeter = own.length > 0;
-    const hasHotspots = hotspots.some((fire) => detectedNearFire(fire, incident, own));
-    const predictionEligibility = resolvePredictionEligibility(incident, { hasPerimeter, hasHotspots });
+    const ownDetections = hotspots.filter((fire) => detectedNearFire(fire, incident, own));
+    const hasHotspots = ownDetections.length > 0;
+    const detectedLast24h = ownDetections.some((fire) => toMillis(fire.timestamp) >= now - FORECASTABLE_WITHIN_MS);
+    const predictionEligibility = resolvePredictionEligibility(incident, { detectedLast24h });
     return {
       ...incident,
       ...resolveAcreage(incident, own),
       reportedAcres: incident.acres,
       hasPerimeter,
       hasHotspots,
+      detectedLast24h,
       sourceNames: [
         ...incident.sourceNames,
         ...(hasPerimeter ? ['Perimeters'] : []),

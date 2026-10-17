@@ -150,10 +150,17 @@ describe('GET /api/map/bootstrap', () => {
   });
 
   it('returns normalized incidents, perimeters, hotspots, alerts, and layer status', async () => {
-    const res = await request(app)
-      .get('/api/map/bootstrap')
-      .query({ bbox: '-119,33,-117,35' })
-      .expect(200);
+    // The fixture's detection is from 2026-04-22 14:30Z; forecastability counts the last 24 h.
+    const clock = jest.spyOn(Date, 'now').mockReturnValue(Date.parse('2026-04-22T18:00:00Z'));
+    let res;
+    try {
+      res = await request(app)
+        .get('/api/map/bootstrap')
+        .query({ bbox: '-119,33,-117,35' })
+        .expect(200);
+    } finally {
+      clock.mockRestore();
+    }
 
     expect(res.body.incidents).toHaveLength(1);
     // The feed's raw attributes (97 per incident, three quarters of the
@@ -165,6 +172,7 @@ describe('GET /api/map/bootstrap', () => {
       status: 'active',
       hasPerimeter: true,
       hasHotspots: true,
+      detectedLast24h: true,
       predictionEligibility: { eligible: true, reasons: [] },
     });
     // Geometry is counted, not shipped. The map fetches /wildfires and
@@ -340,8 +348,8 @@ describe('matching perimeters to incidents', () => {
       properties: { source: 'FIRIS', mission: 'CA-ANF-BOQUET-N50X', incident_name: null, ...props },
     };
   };
-  const annotateAll = (incidents, features, hotspots = []) => (
-    annotateIncidents(incidents, matchPerimetersToIncidents(collection(features), incidents), hotspots)
+  const annotateAll = (incidents, features, hotspots = [], now = Date.parse('2026-10-04T21:00:00Z')) => (
+    annotateIncidents(incidents, matchPerimetersToIncidents(collection(features), incidents), hotspots, now)
   );
   const annotate = (incident, features) => annotateAll([incident], features)[0];
   const perimetersOf = (features, incidents = [bouquet()]) => (
@@ -455,6 +463,41 @@ describe('matching perimeters to incidents', () => {
       const [result] = annotateAll([bouquet()], [], [detectionWest(20)]);
       expect(result.hasHotspots).toBe(false);
       expect(result.predictionEligibility.eligible).toBe(false);
+    });
+  });
+
+  describe('forecastability', () => {
+    const KM_LON = 1 / (111.32 * Math.cos((34.561835 * Math.PI) / 180));
+    const DETECTED = Date.parse('2026-10-04T20:33:00Z');
+    const detection = { longitude: -118.40183 - 1.5 * KM_LON, latitude: 34.561835, timestamp: new Date(DETECTED) };
+    const hoursAfter = (h) => DETECTED + h * 60 * 60 * 1000;
+    const active = (over = {}) => bouquet({ type: 'wildfire', status: 'active', ...over });
+    const NO_RECENT = /within 2 km in the last 24 hours/;
+
+    it('forecasts a fire seen within 2 km in the last 24 h', () => {
+      const [result] = annotateAll([active()], [], [detection], hoursAfter(23));
+      expect(result.detectedLast24h).toBe(true);
+      expect(result.predictionEligibility).toEqual({ eligible: true, reasons: [] });
+    });
+
+    it('does not forecast a fire last seen more than 24 h ago', () => {
+      const [result] = annotateAll([active()], [], [detection], hoursAfter(25));
+      expect(result.detectedLast24h).toBe(false);
+      expect(result.predictionEligibility.eligible).toBe(false);
+      expect(result.predictionEligibility.reasons[0]).toMatch(NO_RECENT);
+    });
+
+    it('does not forecast a mapped fire no satellite has seen', () => {
+      // A perimeter alone used to qualify, and the forecast started from no fire.
+      const [result] = annotateAll([active()], [square(0, { poly_DateCurrent: FLIGHT_2109 })], [], hoursAfter(1));
+      expect(result.hasPerimeter).toBe(true);
+      expect(result.predictionEligibility.eligible).toBe(false);
+      expect(result.predictionEligibility.reasons[0]).toMatch(NO_RECENT);
+    });
+
+    it('still gives containment as the reason for a contained fire seen today', () => {
+      const [result] = annotateAll([active({ status: 'contained' })], [], [detection], hoursAfter(1));
+      expect(result.predictionEligibility).toEqual({ eligible: false, reasons: ['incident is contained'] });
     });
   });
 
