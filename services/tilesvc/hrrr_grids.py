@@ -40,9 +40,12 @@ HRRR_BANDS: Dict[str, Tuple[str, str]] = {
 }
 
 # HRRR publishes about 45-90 min after the cycle hour; give it a wide margin
-# before assuming a cycle exists.
+# before assuming a cycle exists. Every cycle runs 18 hours ahead and the
+# 00/06/12/18Z cycles run 48; their f48 files land about 1h50m after the cycle
+# hour, still inside the margin.
 PUBLISH_LAG = dt.timedelta(hours=2)
-MAX_FORECAST_HOUR = 18
+HOURLY_RUN_HOURS = 18
+SYNOPTIC_RUN_HOURS = 48
 
 
 @dataclass(frozen=True)
@@ -107,13 +110,15 @@ def cycle_for_valid_time(
     valid_time: dt.datetime,
     *,
     now: Optional[dt.datetime] = None,
-) -> Tuple[dt.datetime, int]:
+) -> Optional[Tuple[dt.datetime, int]]:
     """
-    Choose the HRRR cycle and forecast hour that best cover `valid_time`.
+    Choose the HRRR cycle and forecast hour whose file is valid at `valid_time`,
+    or None when no published cycle reaches it.
 
     Past hours use the cycle one hour earlier at f01: a one-hour lead is the
     shortest that still carries APCP, which does not exist in the f00 analysis.
-    Future hours forecast forward from the newest cycle expected to be published.
+    Future hours forecast forward from the newest published cycle that reaches
+    them: the newest cycle for 18 hours, then the newest 00/06/12/18Z cycle for 48.
     """
     now = now or dt.datetime.now(dt.timezone.utc)
     valid_time = valid_time.astimezone(dt.timezone.utc).replace(minute=0, second=0, microsecond=0)
@@ -123,8 +128,12 @@ def cycle_for_valid_time(
     if cycle <= newest_cycle:
         return cycle, 1
 
-    lead = int((valid_time - newest_cycle).total_seconds() // 3600)
-    return newest_cycle, min(max(lead, 1), MAX_FORECAST_HOUR)
+    newest_synoptic = newest_cycle - dt.timedelta(hours=newest_cycle.hour % 6)
+    for cycle, run_hours in ((newest_cycle, HOURLY_RUN_HOURS), (newest_synoptic, SYNOPTIC_RUN_HOURS)):
+        lead = int((valid_time - cycle).total_seconds() // 3600)
+        if lead <= run_hours:
+            return cycle, lead
+    return None
 
 
 def _download_bands(
@@ -212,20 +221,19 @@ def _finalize(arrays: Dict[str, np.ndarray]) -> Dict[str, np.ndarray]:
 def fetch_hrrr_tile_grids(
     lat: float,
     lon: float,
-    valid_time: dt.datetime,
+    cycle: dt.datetime,
+    forecast_hour: int,
     *,
     session: Optional[requests.Session] = None,
     timeout: float = 20.0,
-    now: Optional[dt.datetime] = None,
 ) -> Optional[Dict[str, np.ndarray]]:
     """
-    Fetch HRRR grids for one tile-hour, or None if HRRR cannot serve it.
+    Fetch one HRRR file's grids for a tile, or None if HRRR cannot serve it.
 
     Returning None rather than raising keeps this a strictly optional upgrade:
     the caller falls through to whatever it did before.
     """
     session = session or requests.Session()
-    cycle, forecast_hour = cycle_for_valid_time(valid_time, now=now)
     url = hrrr_sfc_url(cycle, forecast_hour)
 
     index = session.get(
