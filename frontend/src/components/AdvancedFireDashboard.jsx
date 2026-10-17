@@ -97,6 +97,9 @@ function IncidentCard({ incident, selected, onSelect }) {
           <strong>{formatAcres(incident.acres)}</strong>
           <span>{incident.status}</span>
           <span>{timeAgo(incident.updatedAt) ?? 'unknown'}</span>
+          {incident.type === 'wildfire' && incident.status === 'active' && incident.detectedLast24h === false && (
+            <span className="map-list-card-tag">No detection in 24 h</span>
+          )}
         </span>
       </span>
     </button>
