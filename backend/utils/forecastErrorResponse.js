@@ -9,6 +9,7 @@ const TIMEOUT_CODES = new Set(['ECONNABORTED', 'ETIMEDOUT']);
 // tilesvc's reason codes for missing forecast inputs, by prefix, in words.
 const UNAVAILABLE_INPUT_MESSAGES = [
   ['predictions_disabled', 'Forecasts are turned off on this server.'],
+  ['no_recent_fire', 'No satellite has detected fire in this area in the last day, so there is nothing to forecast from.'],
   ['static_', 'Terrain and fuel data for this area could not be loaded.'],
   ['firms_', 'Satellite fire detections for this forecast could not be loaded.'],
   ['calibration_', 'The forecast model is not available right now.'],

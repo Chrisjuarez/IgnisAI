@@ -23,6 +23,7 @@ def stubbed_model(monkeypatch):
     """The real rollout loop over a model that scores every cell the same."""
     order = list(app.MODEL_DYNAMIC_ORDER)
     dyn = np.zeros((3, len(order), SIZE, SIZE), dtype=np.float32)
+    dyn[-1, order.index("fire_t"), 50, 50] = 1.0  # a detection outside the burned block
     stat = np.zeros((app.MODEL_CS, SIZE, SIZE), dtype=np.float32)
     bounds = tile_bounds_lonlat(lonlat_to_tile(LON, LAT))
     base_time = dt.datetime(2026, 10, 4, 3, tzinfo=dt.timezone.utc)
