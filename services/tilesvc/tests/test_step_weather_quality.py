@@ -61,7 +61,8 @@ def _multistep(start, steps):
     # Called directly, so every Query default is passed explicitly.
     return app.predict_multistep(
         lat=LAT, lon=LON, model="ignis", Tseq=3, steps=steps, step_hours=24, thr=None,
-        display_floor=None, crop_frac=0.5, ignition=False, date=start.isoformat(), debug=None,
+        # No FIRMS is stubbed in, so the seed is the fire the forecast starts from.
+        display_floor=None, crop_frac=0.5, ignition=True, date=start.isoformat(), debug=None,
         burned_area=None,
     )["steps"]
 

@@ -14,6 +14,7 @@ describe('forecastErrorResponse', () => {
     ['firms_snapshot_missing', /Satellite fire detections/],
     ['calibration_missing', /model is not available/],
     ['predictions_disabled', /turned off/],
+    ['no_recent_fire', /No satellite has detected fire/],
     ['something_new', /could not gather the inputs/],
   ])('explains tilesvc reason %s', (reason, message) => {
     const { status, body } = forecastErrorResponse(upstream(422, { error: 'input_unavailable', reason, detail: 'internal detail' }));

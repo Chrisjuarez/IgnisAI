@@ -1203,6 +1203,20 @@ def _observed_fire_from_dyn(dyn: np.ndarray) -> np.ndarray:
     return (dyn[-1, fire_idx] >= 0.5).astype(np.float32)
 
 
+def _require_starting_fire(dyn: np.ndarray) -> None:
+    """Refuse a forecast whose latest input day holds no fire.
+
+    The rollout grows from that day. With nothing in it the model draws
+    artifacts along the tile edge, and calibration lifts them into bands.
+    """
+    try:
+        fire_idx = list(MODEL_DYNAMIC_ORDER).index("fire_t")
+    except ValueError:
+        fire_idx = 0
+    if not (dyn[-1, fire_idx] > 0).any():
+        raise InputUnavailable("No fire detected in the latest input day", reason="no_recent_fire")
+
+
 def _next_fire_from_delta(prob_new_burn: np.ndarray, observed_fire: np.ndarray, threshold: float) -> np.ndarray:
     return next_fire_from_delta(
         prob_new_burn,
@@ -1431,6 +1445,7 @@ def _rollout_multistep_predictions(
         hours_step=step_hours,
         return_weather=True,
     )
+    _require_starting_fire(dyn)
     if debug_sink is not None:
         # Capture the original (pre-rollout) inputs so callers in dump mode can
         # save the exact tensors the model started from. These are references,
@@ -2052,6 +2067,7 @@ def predict_multistep(
                 for i in range(normalized_steps)
             ]
         else:
+            _require_starting_fire(dyn)
             u_ms, v_ms, _ = wind_vector_from_sequence(dyn, MODEL_DYNAMIC_ORDER) or (0.0, 0.0, None)
             rollout = baseline_rollout(
                 _observed_fire_from_dyn(dyn),
