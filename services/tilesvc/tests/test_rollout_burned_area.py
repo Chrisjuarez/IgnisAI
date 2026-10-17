@@ -26,6 +26,7 @@ def stubbed_model(monkeypatch):
     stat = np.zeros((app.MODEL_CS, SIZE, SIZE), dtype=np.float32)
     bounds = tile_bounds_lonlat(lonlat_to_tile(LON, LAT))
     base_time = dt.datetime(2026, 10, 4, 3, tzinfo=dt.timezone.utc)
+    hrrr = {"status": "ok", "source": "hrrr_on_demand", "reason": ""}
     fire_given = []
 
     def predict(current_dyn, _stat, log_label=""):
@@ -35,12 +36,12 @@ def stubbed_model(monkeypatch):
     monkeypatch.setattr(app, "MODEL_TARGET_MODE", "delta")
     monkeypatch.setattr(app, "MODEL_AR_FEEDBACK_MODE", "soft")
     monkeypatch.setattr(app, "_prepare_prediction_inputs_with_summary",
-                        lambda *args, **kwargs: (dyn, stat, bounds, base_time, {}))
+                        lambda *args, **kwargs: (dyn, stat, bounds, base_time, {}, [hrrr] * 3))
     monkeypatch.setattr(app, "_predict_probability_from_inputs", predict)
-    monkeypatch.setattr(app, "fetch_weather_grids", lambda *args, **kwargs: {
+    monkeypatch.setattr(app, "fetch_weather_with_quality", lambda *args, **kwargs: ({
         name: np.zeros((SIZE, SIZE), dtype=np.float32)
         for name in ("u", "v", "gust", "temp", "tempC", "rh", "q", "prcp", "precip")
-    })
+    }, hrrr))
     return fire_given
 
 

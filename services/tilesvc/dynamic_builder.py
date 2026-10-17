@@ -37,10 +37,12 @@ _LAST_WEATHER_SOURCE = "unknown"
 _LAST_WEATHER_REASON = "not_requested"
 
 
-def _set_weather_source(source: str, reason: str = ""):
+def _set_weather_source(source: str, reason: str = "") -> dict:
+    """Record a fetch's source for /healthz, and return its quality to the caller."""
     global _LAST_WEATHER_SOURCE, _LAST_WEATHER_REASON
     _LAST_WEATHER_SOURCE = source
     _LAST_WEATHER_REASON = reason
+    return _weather_quality(source, reason)
 
 
 # Tagged source labels surfaced through /healthz weather_quality_status.
@@ -55,16 +57,21 @@ _NOAA_GRID_SOURCES = ("noaa_hrrr", "noaa_gfs", "noaa_gridded")
 GRIDDED_WEATHER_SOURCES = _NOAA_GRID_SOURCES + ("hrrr_on_demand",)
 
 
-def weather_quality_status():
+def _weather_quality(source: str, reason: str) -> dict:
     # Open-Meteo single-point fallbacks are flagged "degraded" so the health
     # surface reflects when predictions are running on a value broadcast flat
     # across the tile rather than true gridded weather.
-    ok = _LAST_WEATHER_SOURCE in GRIDDED_WEATHER_SOURCES
+    ok = source in GRIDDED_WEATHER_SOURCES
     return {
         "status": "ok" if ok else "degraded",
-        "source": _LAST_WEATHER_SOURCE,
-        "reason": _LAST_WEATHER_REASON,
+        "source": source,
+        "reason": reason,
     }
+
+
+def weather_quality_status():
+    """The latest fetch by any request. A forecast step reports its own weather."""
+    return _weather_quality(_LAST_WEATHER_SOURCE, _LAST_WEATHER_REASON)
 
 
 def _cache_get(store: dict, key, ttl: int):
@@ -187,8 +194,7 @@ def _fetch_noaa_cached_weather_grids(lat: float, lon: float, ref_time: dt.dateti
                     raw_tag = ""
                 if raw_tag in _NOAA_GRID_SOURCES:
                     source_tag = raw_tag
-        _set_weather_source(source_tag, str(path))
-        return grids
+        return grids, _set_weather_source(source_tag, str(path))
     except Exception as exc:
         if required:
             raise InputUnavailable(
@@ -210,9 +216,9 @@ def _fetch_hrrr_weather_grids(lat: float, lon: float, ref_time: dt.datetime | No
     can follow and a constant it cannot.
 
     Hours that have happened are written back into the npz cache, so the second
-    prediction for a tile-hour costs nothing. Any failure returns None and the
-    caller falls through to the existing fallback — this is an upgrade, never a
-    new way to fail a prediction.
+    prediction for a tile-hour costs nothing. Returns (grids, quality). Any
+    failure returns None and the caller falls through to the existing fallback —
+    this is an upgrade, never a new way to fail a prediction.
     """
     if not hrrr_enabled() or ref_time is None:
         return None
@@ -233,8 +239,8 @@ def _fetch_hrrr_weather_grids(lat: float, lon: float, ref_time: dt.datetime | No
     cache_key = ("hrrr", round(float(lat), 2), round(float(lon), 2), hour.isoformat())
     cached = _cache_get(_weather_cache, cache_key, _WEATHER_TTL_SEC)
     if cached is not None:
-        _set_weather_source("hrrr_on_demand", "memory_cache")
-        return {k: v.copy() for k, v in cached.items()}
+        quality = _set_weather_source("hrrr_on_demand", "memory_cache")
+        return {k: v.copy() for k, v in cached.items()}, quality
 
     try:
         grids = fetch_hrrr_tile_grids(lat, lon, cycle, forecast_hour, timeout=_HRRR_TIMEOUT_SEC)
@@ -252,11 +258,11 @@ def _fetch_hrrr_weather_grids(lat: float, lon: float, ref_time: dt.datetime | No
     if forecast_hour == 1:
         _write_noaa_cache(_noaa_cache_path(lat, lon, hour), grids)
     _cache_set(_weather_cache, cache_key, {k: v.copy() for k, v in grids.items()})
-    _set_weather_source(
+    quality = _set_weather_source(
         "hrrr_on_demand",
         f"{lat:.2f},{lon:.2f}@{hour:%Y%m%dT%H} t{cycle:%Y%m%d%H}z f{forecast_hour:02d}",
     )
-    return grids
+    return grids, quality
 
 
 def _write_noaa_cache(path: Path | None, grids: dict) -> None:
@@ -649,7 +655,12 @@ def _sample_hourly(series: dict, target: dt.datetime) -> dict:
 
 
 def fetch_weather_grids(lat: float, lon: float, ref_time: dt.datetime = None):
-    """Weather for `ref_time`, as per-pixel grids.
+    """Weather for `ref_time`, as per-pixel grids. See fetch_weather_with_quality."""
+    return fetch_weather_with_quality(lat, lon, ref_time)[0]
+
+
+def fetch_weather_with_quality(lat: float, lon: float, ref_time: dt.datetime = None):
+    """Weather for `ref_time`, as (per-pixel grids, quality of the tier that served them).
 
     Three tiers, best first: the prebuilt NOAA cache; an on-demand HRRR fetch
     for tiles nobody backfilled; and Open-Meteo, which reads the hour matching
@@ -657,13 +668,15 @@ def fetch_weather_grids(lat: float, lon: float, ref_time: dt.datetime = None):
     lead-time weather. Only the first two carry real spatial structure — the
     Open-Meteo tier broadcasts one point value across the whole tile.
     """
-    noaa_grids = _fetch_noaa_cached_weather_grids(lat, lon, ref_time)
-    if noaa_grids is not None:
-        return {k: v.copy() for k, v in noaa_grids.items()}
+    noaa = _fetch_noaa_cached_weather_grids(lat, lon, ref_time)
+    if noaa is not None:
+        noaa_grids, quality = noaa
+        return {k: v.copy() for k, v in noaa_grids.items()}, quality
 
-    hrrr_grids = _fetch_hrrr_weather_grids(lat, lon, ref_time)
-    if hrrr_grids is not None:
-        return {k: v.copy() for k, v in hrrr_grids.items()}
+    hrrr = _fetch_hrrr_weather_grids(lat, lon, ref_time)
+    if hrrr is not None:
+        hrrr_grids, quality = hrrr
+        return {k: v.copy() for k, v in hrrr_grids.items()}, quality
 
     now = dt.datetime.now(dt.timezone.utc)
     target = _as_utc(ref_time) if ref_time is not None else now
@@ -693,11 +706,11 @@ def fetch_weather_grids(lat: float, lon: float, ref_time: dt.datetime = None):
         "prcp":   np.full((H, W), P, np.float32),
         "precip": np.full((H, W), P, np.float32),
     }
-    _set_weather_source(
+    quality = _set_weather_source(
         "open_meteo_fallback",
         "archive_hourly" if use_archive else "forecast_hourly",
     )
-    return grids
+    return grids, quality
 
 
 # ---------------- Public API ----------------
@@ -717,12 +730,15 @@ def build_dynamic_for_tile(
     ignition: bool = False,
     ref_time: dt.datetime = None,
     channel_order=None,
+    return_weather: bool = False,
 ):
     """
     Build dynamic tensor for the tile containing (lat,lon).
 
     Returns `x_dyn` with shape [T, 7, SIZE, SIZE]
     default channels = [fire_t, u, v, gust, tempC, q, precip]
+    With `return_weather`, returns (x_dyn, weather): each frame's weather
+    quality, oldest first.
 
     If ref_time is provided, uses historical weather from that date.
     FIRMS data is only available for recent dates (1-5 days); for older dates
@@ -799,11 +815,13 @@ def build_dynamic_for_tile(
     # Weather (constant over the tile for now; uses archive for historical dates)
     # Assemble dynamic tensor
     dyn = []
+    weather = []
     order = list(channel_order or DEFAULT_DYNAMIC_ORDER)
     for t in range(T_seq):
         # Use the end of each slice as the weather timestamp for that timestep.
         step_ref_time = weather_time - dt.timedelta(hours=(T_seq - 1 - t) * hours_step)
-        wx = fetch_weather_grids(lat, lon, ref_time=step_ref_time)
+        wx, quality = fetch_weather_with_quality(lat, lon, ref_time=step_ref_time)
+        weather.append(quality)
         channels = {
             "fire_t": fire_stack[t],
             "frp": frp_stack[t],
@@ -822,4 +840,4 @@ def build_dynamic_for_tile(
             raise KeyError(f"Unsupported dynamic channel(s): {missing}; available={sorted(channels.keys())}")
         dyn.append(np.stack([channels[name] for name in order], axis=0))
     x_dyn = np.stack(dyn, axis=0).astype(np.float32)              # [T,7,H,W]
-    return x_dyn
+    return (x_dyn, weather) if return_weather else x_dyn

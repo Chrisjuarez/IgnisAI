@@ -58,6 +58,6 @@ def test_required_reads_the_cache_even_without_noaa_grib_enabled(cache_dir, monk
     arrays = {name: np.full((SIZE, SIZE), 2.0, np.float32) for name in ("u", "v", "gust", "tempC", "q", "precip")}
     np.savez_compressed(cache_dir / "20260514T20_39.48_-112.27.npz", **arrays)
 
-    grids = dynamic_builder._fetch_noaa_cached_weather_grids(39.48, -112.27, REF_HOUR)
+    grids, _quality = dynamic_builder._fetch_noaa_cached_weather_grids(39.48, -112.27, REF_HOUR)
 
     assert float(grids["u"][0, 0]) == 2.0

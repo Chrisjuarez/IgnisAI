@@ -52,7 +52,7 @@ def test_fetched_hour_is_readable_by_the_cache_reader(cache_dir, monkeypatch):
     assert [p.name for p in cache_dir.glob("*.npz")] == ["20250107T18_34.08_-118.56.npz"]
 
     dynamic_builder._weather_cache.clear()
-    read_back = dynamic_builder._fetch_noaa_cached_weather_grids(34.078, -118.555, REF_TIME)
+    read_back, _quality = dynamic_builder._fetch_noaa_cached_weather_grids(34.078, -118.555, REF_TIME)
     assert read_back is not None
     np.testing.assert_allclose(read_back["u"], written["u"])
 

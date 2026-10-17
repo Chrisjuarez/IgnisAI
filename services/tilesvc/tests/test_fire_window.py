@@ -31,7 +31,8 @@ def builder(monkeypatch):
 
     def weather(lat, lon, ref_time=None):
         weather_times.append(ref_time)
-        return {name: np.zeros((db.SIZE, db.SIZE), dtype=np.float32) for name in WEATHER}
+        grids = {name: np.zeros((db.SIZE, db.SIZE), dtype=np.float32) for name in WEATHER}
+        return grids, {"status": "ok", "source": "hrrr_on_demand", "reason": ""}
 
     def build(detections, ref_time=None):
         monkeypatch.setattr(db, "_load_firms_points_from_snapshots",
@@ -40,7 +41,7 @@ def builder(monkeypatch):
                                          channel_order=["fire_t", "u", "v", "gust", "tempC", "q", "precip"])
 
     monkeypatch.setattr(db, "_utcnow", lambda: REQUEST)
-    monkeypatch.setattr(db, "fetch_weather_grids", weather)
+    monkeypatch.setattr(db, "fetch_weather_with_quality", weather)
     build.weather_times = weather_times
     return build
 
