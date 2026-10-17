@@ -71,11 +71,50 @@ def test_future_hours_forecast_from_the_newest_published_cycle():
     assert forecast_hour == 6
 
 
-def test_forecast_hour_is_capped_at_the_end_of_the_hrrr_run():
-    now = dt.datetime(2026, 9, 5, 12, tzinfo=UTC)
-    valid = dt.datetime(2026, 9, 8, 12, tzinfo=UTC)
-    _, forecast_hour = cycle_for_valid_time(valid, now=now)
-    assert forecast_hour == 18
+def test_every_chosen_file_is_valid_at_the_requested_hour():
+    # A forecast day asks for weather at its own hour. A file valid at another
+    # hour hands the model the wrong weather under the right label.
+    now = dt.datetime(2026, 9, 5, 12, 30, tzinfo=UTC)
+    base = dt.datetime(2026, 9, 5, 12, tzinfo=UTC)
+    for hours_ahead in range(-72, 73):
+        valid = base + dt.timedelta(hours=hours_ahead)
+        run = cycle_for_valid_time(valid, now=now)
+        if run is None:
+            continue
+        cycle, forecast_hour = run
+        assert cycle + dt.timedelta(hours=forecast_hour) == valid, (valid, run)
+
+
+def test_hours_past_the_hourly_run_come_from_the_newest_48_hour_cycle():
+    # Newest cycle is 10z, whose run stops at 18 h. The 06z run goes to 48 h.
+    now = dt.datetime(2026, 9, 5, 12, 30, tzinfo=UTC)
+    valid = dt.datetime(2026, 9, 6, 12, tzinfo=UTC)
+    assert cycle_for_valid_time(valid, now=now) == (dt.datetime(2026, 9, 5, 6, tzinfo=UTC), 30)
+
+
+def test_the_hourly_run_is_used_up_to_its_last_hour():
+    now = dt.datetime(2026, 9, 5, 12, 30, tzinfo=UTC)
+    valid = dt.datetime(2026, 9, 6, 4, tzinfo=UTC)
+    assert cycle_for_valid_time(valid, now=now) == (dt.datetime(2026, 9, 5, 10, tzinfo=UTC), 18)
+
+
+def test_the_48_hour_cycle_can_be_the_previous_day():
+    # Just after midnight the newest 48-hour run is yesterday's 18z.
+    now = dt.datetime(2026, 9, 5, 1, 30, tzinfo=UTC)
+    valid = dt.datetime(2026, 9, 6, 0, tzinfo=UTC)
+    assert cycle_for_valid_time(valid, now=now) == (dt.datetime(2026, 9, 4, 18, tzinfo=UTC), 30)
+
+
+def test_a_48_hour_cycle_reaches_its_last_hour():
+    now = dt.datetime(2026, 9, 5, 14, 10, tzinfo=UTC)
+    valid = dt.datetime(2026, 9, 7, 12, tzinfo=UTC)
+    assert cycle_for_valid_time(valid, now=now) == (dt.datetime(2026, 9, 5, 12, tzinfo=UTC), 48)
+
+
+def test_no_file_for_an_hour_no_published_run_reaches():
+    now = dt.datetime(2026, 9, 5, 12, 30, tzinfo=UTC)
+    valid = dt.datetime(2026, 9, 7, 7, tzinfo=UTC)  # 49 h after the 06z cycle
+    assert cycle_for_valid_time(valid, now=now) is None
 
 
 def test_url_matches_the_public_archive_layout():
@@ -89,7 +128,7 @@ def test_missing_index_returns_none_rather_than_raising():
             return type("Response", (), {"status_code": 404, "text": ""})()
 
     result = fetch_hrrr_tile_grids(
-        34.078, -118.555, dt.datetime(2025, 1, 7, 18, tzinfo=UTC), session=MissingIndex()
+        34.078, -118.555, dt.datetime(2025, 1, 7, 17, tzinfo=UTC), 1, session=MissingIndex()
     )
     assert result is None
 
@@ -103,7 +142,7 @@ def test_live_fetch_returns_a_spatially_varying_wind_field():
     The whole point of HRRR is spatial structure. A field that comes back
     constant means we have bought nothing over the point fallback.
     """
-    grids = fetch_hrrr_tile_grids(34.078, -118.555, dt.datetime(2025, 1, 7, 18, tzinfo=UTC))
+    grids = fetch_hrrr_tile_grids(34.078, -118.555, dt.datetime(2025, 1, 7, 17, tzinfo=UTC), 1)
     assert grids is not None
 
     for name in ("u", "v", "gust", "tempC"):

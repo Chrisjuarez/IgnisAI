@@ -13,7 +13,7 @@ from shapely.geometry import Point
 from rasterio.features import rasterize
 
 from .grid import SIZE, lonlat_to_tile, tile_affine, tile_bounds_lonlat, lonlat_to_xy_m
-from .hrrr_grids import fetch_hrrr_tile_grids, hrrr_enabled
+from .hrrr_grids import cycle_for_valid_time, fetch_hrrr_tile_grids, hrrr_enabled
 from .static_catalog import InputUnavailable
 from ignis_ml.src.data.transforms import wind_to_uv, rh_to_q, fire_boost
 
@@ -209,27 +209,35 @@ def _fetch_hrrr_weather_grids(lat: float, lon: float, ref_time: dt.datetime | No
     32 km. HRRR is 3 km, which is the difference between a wind field the model
     can follow and a constant it cannot.
 
-    Results are written back into the npz cache, so the second prediction for a
-    tile-hour costs nothing. Any failure returns None and the caller falls
-    through to the existing fallback — this is an upgrade, never a new way to
-    fail a prediction.
+    Hours that have happened are written back into the npz cache, so the second
+    prediction for a tile-hour costs nothing. Any failure returns None and the
+    caller falls through to the existing fallback — this is an upgrade, never a
+    new way to fail a prediction.
     """
     if not hrrr_enabled() or ref_time is None:
         return None
 
+    hour = ref_time.replace(minute=0, second=0, microsecond=0)
+    run = cycle_for_valid_time(hour, now=_utcnow())
+    if run is None:
+        # In a live forecast, the weather for days 3-6. Serving the furthest hour
+        # HRRR does reach would give the model another hour's weather under this
+        # hour's label.
+        _set_weather_source("open_meteo_fallback", f"hrrr_no_run_reaches:{hour:%Y%m%dT%H}")
+        return None
+    cycle, forecast_hour = run
+
     # The npz cache is only read back when NOAA_GRIB_ENABLED is set, so keep an
     # in-process cache too: a multistep request asks for six distinct hours, and
     # users re-click the same tile.
-    hour = ref_time.replace(minute=0, second=0, microsecond=0)
     cache_key = ("hrrr", round(float(lat), 2), round(float(lon), 2), hour.isoformat())
     cached = _cache_get(_weather_cache, cache_key, _WEATHER_TTL_SEC)
     if cached is not None:
         _set_weather_source("hrrr_on_demand", "memory_cache")
         return {k: v.copy() for k, v in cached.items()}
 
-    cache_path = _noaa_cache_path(lat, lon, ref_time)
     try:
-        grids = fetch_hrrr_tile_grids(lat, lon, ref_time, timeout=_HRRR_TIMEOUT_SEC)
+        grids = fetch_hrrr_tile_grids(lat, lon, cycle, forecast_hour, timeout=_HRRR_TIMEOUT_SEC)
     except Exception as exc:
         _set_weather_source("open_meteo_fallback", f"hrrr_fetch_failed:{exc}")
         print(f"⚠️  HRRR on-demand fetch failed ({lat},{lon} @ {ref_time}): {exc}")
@@ -239,9 +247,15 @@ def _fetch_hrrr_weather_grids(lat: float, lon: float, ref_time: dt.datetime | No
         _set_weather_source("open_meteo_fallback", "hrrr_unavailable_for_hour")
         return None
 
-    _write_noaa_cache(cache_path, grids)
+    # A later forecast reads the npz cache as the weather that happened, so a
+    # forecast hour stays out of it.
+    if forecast_hour == 1:
+        _write_noaa_cache(_noaa_cache_path(lat, lon, hour), grids)
     _cache_set(_weather_cache, cache_key, {k: v.copy() for k, v in grids.items()})
-    _set_weather_source("hrrr_on_demand", f"{lat:.2f},{lon:.2f}@{ref_time:%Y%m%dT%H}")
+    _set_weather_source(
+        "hrrr_on_demand",
+        f"{lat:.2f},{lon:.2f}@{hour:%Y%m%dT%H} t{cycle:%Y%m%d%H}z f{forecast_hour:02d}",
+    )
     return grids
 
 
