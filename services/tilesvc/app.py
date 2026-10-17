@@ -27,7 +27,7 @@ from .grid import (
     PIX,
     SIZE,
 )
-from .dynamic_builder import DEFAULT_DYNAMIC_ORDER, build_dynamic_for_tile, fetch_weather_grids, weather_quality_status
+from .dynamic_builder import DEFAULT_DYNAMIC_ORDER, build_dynamic_for_tile, fetch_weather_with_quality, weather_quality_status
 from .static_builder import CHANNEL_ORDER
 from .burned_area import burned_area_geometry, burned_cells
 from .cache_health import firms_snapshot_status, noaa_cycle_status
@@ -936,10 +936,13 @@ def _prepare_prediction_inputs_with_summary(
     ignition: bool = False,
     ref_time: Optional[dt.datetime] = None,
     hours_step: int = 24,
-) -> Tuple[np.ndarray, np.ndarray, Tuple[float, float, float, float], dt.datetime, Dict[str, Any]]:
+    return_weather: bool = False,
+) -> Tuple[Any, ...]:
+    """(dyn, stat, bounds, base_time, static_summary), plus each input frame's
+    weather quality when `return_weather` is set."""
     _ensure_model_metadata_loaded(load_checkpoint=True)
     tile, _, bounds = build_grid(lat, lon)
-    dyn = build_dynamic_for_tile(
+    dyn, weather = build_dynamic_for_tile(
         lat,
         lon,
         T_seq=Tseq,
@@ -947,9 +950,11 @@ def _prepare_prediction_inputs_with_summary(
         ignition=ignition,
         ref_time=ref_time,
         channel_order=MODEL_DYNAMIC_ORDER,
+        return_weather=True,
     )
     stat, static_summary = _load_static_tensor_with_summary(tile)
-    return dyn, stat, bounds, _resolve_prediction_time(ref_time), static_summary
+    prepared = (dyn, stat, bounds, _resolve_prediction_time(ref_time), static_summary)
+    return prepared + (weather,) if return_weather else prepared
 
 
 def _predict_probability(
@@ -1219,11 +1224,14 @@ def _probability_contract(
     display_score: np.ndarray,
     risk_class: np.ndarray,
     calibration_meta: Dict[str, Any],
+    weather: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
+    """`weather` is the quality of the weather this prediction ran on; without
+    it, the latest fetch stands in."""
     p_next_fire = _next_fire_from_delta(prob_new_burn, observed_fire, threshold)
-    weather_quality = weather_quality_status()
-    quality_status = weather_quality.get("status", "degraded")
-    quality_reasons = [] if quality_status == "ok" else [weather_quality.get("reason") or "open_meteo_weather_fallback"]
+    weather_quality = weather or weather_quality_status()
+    quality = _weather_quality_block(weather_quality)
+    quality_status = quality["status"]
     if quality_status == "ok":
         _metric_inc("ignis_noaa_weather_predictions_total")
     else:
@@ -1256,11 +1264,7 @@ def _probability_contract(
             "description": "Calibrated advisory risk classes for display",
             "fractions": _risk_class_summary(risk_class),
         },
-        "quality": {
-            "status": quality_status,
-            "degraded": quality_status != "ok",
-            "reasons": quality_reasons,
-        },
+        "quality": quality,
         "data_sources": {
             "fire": "NASA FIRMS live/archive window plus optional click ignition",
             "weather": "NOAA gridded" if quality_status == "ok" else "Open-Meteo fallback",
@@ -1268,6 +1272,24 @@ def _probability_contract(
             "static": "STATIC_CATALOG_PATH COG/S3 manifest",
         },
     }
+
+
+def _weather_quality_block(weather: Dict[str, Any]) -> Dict[str, Any]:
+    status = weather.get("status", "degraded")
+    return {
+        "status": status,
+        "degraded": status != "ok",
+        "reasons": [] if status == "ok" else [weather.get("reason") or "open_meteo_weather_fallback"],
+    }
+
+
+def _worst_weather(weather: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """The newest fallback among these weather qualities, else the newest.
+
+    A step is only as good as the worst weather frame it ran on, and a number
+    added up over several days only as good as the worst of them.
+    """
+    return next((w for w in reversed(weather) if w.get("status") != "ok"), weather[-1])
 
 
 def _step_label(lead_hours: int) -> str:
@@ -1400,13 +1422,14 @@ def _rollout_multistep_predictions(
     burn again, so they get no new fire on any day - and because each day is
     fed back, that also keeps a burned-out interior from seeding the next.
     """
-    dyn, stat, bounds, base_time, static_summary = _prepare_prediction_inputs_with_summary(
+    dyn, stat, bounds, base_time, static_summary, input_weather = _prepare_prediction_inputs_with_summary(
         lat,
         lon,
         Tseq,
         ignition=ignition,
         ref_time=ref_time,
         hours_step=step_hours,
+        return_weather=True,
     )
     if debug_sink is not None:
         # Capture the original (pre-rollout) inputs so callers in dump mode can
@@ -1420,6 +1443,10 @@ def _rollout_multistep_predictions(
     crop_window = None
     rollout = []
     current_dyn = dyn.copy()
+    # Weather quality of each frame in current_dyn, oldest first. Day 1 runs on
+    # the input frames; each later day on the window slid forward by one fetch,
+    # which can come from a coarser tier than the inputs did.
+    window_weather = list(input_weather)
 
     for index in range(normalized_steps):
         lead_hours = (index + 1) * int(step_hours)
@@ -1433,13 +1460,14 @@ def _rollout_multistep_predictions(
             "lead_hours": lead_hours,
             "label": _step_label(lead_hours),
             "prob": prob,
+            "weather": _worst_weather(window_weather),
         })
 
         if index == normalized_steps - 1:
             continue
 
         next_time = base_time + dt.timedelta(hours=lead_hours)
-        wx = fetch_weather_grids(lat, lon, ref_time=next_time)
+        wx, wx_quality = fetch_weather_with_quality(lat, lon, ref_time=next_time)
         try:
             fire_idx = list(MODEL_DYNAMIC_ORDER).index("fire_t")
         except ValueError:
@@ -1483,6 +1511,7 @@ def _rollout_multistep_predictions(
             current_dyn = next_slice[None, ...]
         else:
             current_dyn = np.concatenate([current_dyn[1:], next_slice[None, ...]], axis=0)
+        window_weather = (window_weather + [wx_quality])[-current_dyn.shape[0]:]
 
     if crop_window is None:
         crop_window = _build_crop_window(current_dyn.shape[-2:], bounds, lat, lon, crop_frac)
@@ -1602,8 +1631,12 @@ def site_exposure_endpoint(
         arrival_threshold=float(arrival_threshold),
         model_sha256=file_sha256(MODEL_PATH),
     )
+    for entry, step in zip(exposure["series"], rollout):
+        entry["quality"] = _weather_quality_block(step["weather"])
+        entry["weather_source"] = step["weather"].get("source")
 
-    weather_quality = weather_quality_status()
+    # The headline adds up every day, so the worst day's weather qualifies it.
+    weather_quality = _worst_weather([step["weather"] for step in rollout])
 
     return {
         "site": {"lat": site_lat, "lon": site_lon},
@@ -1613,12 +1646,7 @@ def site_exposure_endpoint(
         "bounds": [float(v) for v in bounds],
         **exposure,
         "model_meta": _model_metadata(),
-        "quality": {
-            "status": weather_quality.get("status", "degraded"),
-            "degraded": weather_quality.get("status") != "ok",
-            "reasons": [] if weather_quality.get("status") == "ok"
-                       else [weather_quality.get("reason") or "open_meteo_weather_fallback"],
-        },
+        "quality": _weather_quality_block(weather_quality),
         "data_sources": {
             "fire": "NASA FIRMS live/archive window plus seeded ignition",
             "weather": "NOAA gridded" if weather_quality.get("status") == "ok" else "Open-Meteo fallback",
@@ -2140,6 +2168,8 @@ def predict_multistep(
             display_score=display_score,
             risk_class=risk_class,
             calibration_meta=calibration_meta,
+            # Model steps carry their own; the baseline and the solid test do not.
+            weather=step.get("weather"),
         )
         payload_steps.append({
             "index": step["index"],

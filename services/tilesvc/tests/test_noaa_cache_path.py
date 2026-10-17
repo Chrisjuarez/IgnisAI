@@ -94,7 +94,7 @@ def test_fetch_noaa_cached_weather_grids_propagates_source_tag(tmp_path, monkeyp
     path = tmp_path / "20250107T18_34.05_-118.55.npz"
     _write_noaa_npz(path, source="noaa_hrrr")
 
-    grids = dynamic_builder._fetch_noaa_cached_weather_grids(34.05, -118.55, REF_HOUR)
+    grids, _quality = dynamic_builder._fetch_noaa_cached_weather_grids(34.05, -118.55, REF_HOUR)
 
     assert grids is not None
     assert grids["u"].shape == (SIZE, SIZE)
@@ -110,7 +110,7 @@ def test_fetch_noaa_cached_weather_grids_falls_back_to_generic_tag(tmp_path, mon
     path = tmp_path / "20250107T18_34.05_-118.55.npz"
     _write_noaa_npz(path, source=None)
 
-    grids = dynamic_builder._fetch_noaa_cached_weather_grids(34.05, -118.55, REF_HOUR)
+    grids, _quality = dynamic_builder._fetch_noaa_cached_weather_grids(34.05, -118.55, REF_HOUR)
 
     assert grids is not None
     assert dynamic_builder.weather_quality_status()["source"] == "noaa_gridded"
