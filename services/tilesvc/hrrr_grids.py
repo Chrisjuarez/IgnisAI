@@ -54,6 +54,7 @@ class IndexRecord:
     level: str
     start: int
     end: Optional[int]
+    forecast: str = ""
 
     @property
     def byte_range(self) -> str:
@@ -75,7 +76,7 @@ def parse_grib_index(index_text: str) -> List[IndexRecord]:
     Each line is `msg:offset:d=YYYYMMDDHH:VAR:level:forecast:`. A record runs
     until the next message's offset; the final record runs to end of file.
     """
-    offsets: List[Tuple[int, str, str]] = []
+    offsets: List[Tuple[int, str, str, str]] = []
     for line in index_text.splitlines():
         fields = line.split(":")
         if len(fields) < 5:
@@ -84,24 +85,48 @@ def parse_grib_index(index_text: str) -> List[IndexRecord]:
             offset = int(fields[1])
         except ValueError:
             continue
-        offsets.append((offset, fields[3], fields[4]))
+        forecast = fields[5] if len(fields) > 5 else ""
+        offsets.append((offset, fields[3], fields[4], forecast))
 
     records: List[IndexRecord] = []
-    for idx, (offset, variable, level) in enumerate(offsets):
+    for idx, (offset, variable, level, forecast) in enumerate(offsets):
         end = offsets[idx + 1][0] if idx + 1 < len(offsets) else None
-        records.append(IndexRecord(variable=variable, level=level, start=offset, end=end))
+        records.append(
+            IndexRecord(variable=variable, level=level, start=offset, end=end, forecast=forecast)
+        )
     return records
 
 
+def _is_one_hour_window(forecast: str) -> bool:
+    """True for a forecast field spanning one hour, e.g. `29-30 hour acc fcst`."""
+    parts = forecast.split()
+    if len(parts) < 2 or parts[1] != "hour":
+        return False
+    start, sep, end = parts[0].partition("-")
+    try:
+        return bool(sep) and int(end) - int(start) == 1
+    except ValueError:
+        return False
+
+
 def select_bands(records: Sequence[IndexRecord]) -> Dict[str, IndexRecord]:
-    """Pick the first record matching each channel's variable and level."""
+    """
+    Pick the first record matching each channel's variable and level, except
+    that a one-hour window wins over an earlier longer one.
+
+    Past f01, a file lists APCP twice: the run total (0-N h) first, then the
+    last hour. Training frames and past hours read f01, a one-hour total, so a
+    forecast hour has to feed the model the last hour too.
+    """
     wanted = {name: (variable, level) for name, (variable, level) in HRRR_BANDS.items()}
     found: Dict[str, IndexRecord] = {}
     for record in records:
         for name, (variable, level) in wanted.items():
-            if name in found:
+            if record.variable != variable or record.level != level:
                 continue
-            if record.variable == variable and record.level == level:
+            if name not in found or (
+                _is_one_hour_window(record.forecast) and not _is_one_hour_window(found[name].forecast)
+            ):
                 found[name] = record
     return found
 

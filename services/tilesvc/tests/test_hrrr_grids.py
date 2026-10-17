@@ -25,6 +25,25 @@ SAMPLE_IDX = """1:0:d=2025010718:REFC:entire atmosphere:1 hour fcst:
 7:3800000:d=2025010718:APCP:surface:0-1 hour acc fcst:
 """
 
+# Trimmed from a real hrrr.t06z.wrfsfcf30.grib2.idx (2026-10-16). Past f01 the
+# file carries APCP twice: the run total first, then the last hour.
+SAMPLE_F30_IDX = """1:0:d=2026101606:REFC:entire atmosphere:30 hour fcst:
+9:4365156:d=2026101606:GUST:surface:30 hour fcst:
+10:5740639:d=2026101606:UGRD:250 mb:30 hour fcst:
+71:48032204:d=2026101606:TMP:2 m above ground:30 hour fcst:
+72:49293159:d=2026101606:POT:2 m above ground:30 hour fcst:
+73:50508588:d=2026101606:SPFH:2 m above ground:30 hour fcst:
+74:52011537:d=2026101606:DPT:2 m above ground:30 hour fcst:
+77:55746312:d=2026101606:UGRD:10 m above ground:30 hour fcst:
+78:58127927:d=2026101606:VGRD:10 m above ground:30 hour fcst:
+79:60509542:d=2026101606:WIND:10 m above ground:29-30 hour max fcst:
+84:65062122:d=2026101606:APCP:surface:0-30 hour acc fcst:
+85:66286701:d=2026101606:WEASD:surface:0-30 hour acc fcst:
+89:66798944:d=2026101606:BGRUN:surface:29-30 hour acc fcst:
+90:66799312:d=2026101606:APCP:surface:29-30 hour acc fcst:
+91:67091994:d=2026101606:WEASD:surface:29-30 hour acc fcst:
+"""
+
 
 def test_index_records_span_to_the_next_offset():
     records = parse_grib_index(SAMPLE_IDX)
@@ -41,6 +60,33 @@ def test_select_bands_finds_every_channel():
     assert set(bands) == set(HRRR_BANDS)
     assert bands["u"].start == 2600000
     assert bands["v"].start == 3200000
+
+
+def test_forecast_hour_precip_is_the_last_hour_not_the_run_total():
+    # Training frames and past hours read f01, a one-hour total. A forecast
+    # hour has to feed the model the same quantity, not 0-N hours of rain.
+    bands = select_bands(parse_grib_index(SAMPLE_F30_IDX))
+    assert bands["precip"].start == 66799312
+    assert bands["precip"].byte_range == "bytes=66799312-67091993"
+    assert bands["precip"].forecast == "29-30 hour acc fcst"
+
+
+def test_f01_precip_is_still_its_only_one_hour_record():
+    bands = select_bands(parse_grib_index(SAMPLE_IDX))
+    assert bands["precip"].start == 3800000
+    assert bands["precip"].end is None
+
+
+def test_preferring_hourly_precip_leaves_other_channels_alone():
+    bands = select_bands(parse_grib_index(SAMPLE_F30_IDX))
+    assert set(bands) == set(HRRR_BANDS)
+    assert {name: record.start for name, record in bands.items() if name != "precip"} == {
+        "gust": 4365156,
+        "tempC": 48032204,
+        "q": 50508588,
+        "u": 55746312,
+        "v": 58127927,
+    }
 
 
 def test_select_bands_ignores_a_matching_variable_at_the_wrong_level():
