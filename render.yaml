@@ -169,6 +169,11 @@ services:
         value: /data/firms_snapshots
       - key: FIRMS_SNAPSHOT_REQUIRED
         value: "0"
+      # Dated forecasts read their days' detections here; a missing day is
+      # fetched from FIRMS once and kept. tools/deploy_firms_history_lambda.py
+      # sets up the job that keeps each day's near-real-time copy.
+      - key: FIRMS_HISTORY_S3
+        value: s3://ignisai-static-chrisjuarez-2026/history/firms
       - key: PRED_DISPLAY_FLOOR
         value: "0.10"
       - key: PRED_SMOOTH_SIGMA
