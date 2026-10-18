@@ -300,7 +300,11 @@ function indexPerimeters(perimeters) {
       name: normalizeName(perimeterIncidentName(feature)),
       irwinId: irwinKey(firstValue(props, ['attr_IrwinID', 'poly_IRWINID'])),
       bbox: bboxOf(feature?.geometry),
-      mappedAt: toMillis(firstValue(props, ['poly_DateCurrent', 'poly_PolygonDateTime', 'CreationDate', 'poly_CreateDate'])),
+      // On a WFIGS perimeter poly_DateCurrent is when the record was last
+      // edited - for the Dome Fire, three days after its shape was mapped - and
+      // poly_PolygonDateTime is the mapping. FIRIS dates each flight in
+      // poly_DateCurrent, and a few of its perimeters only in CreationDate.
+      mappedAt: toMillis(firstValue(props, ['poly_PolygonDateTime', 'poly_DateCurrent', 'CreationDate', 'poly_CreateDate'])),
       acres: toNumber(firstValue(props, ['area_acres', 'poly_GISAcres', 'GISAcres'])),
       // FIRIS's public view carries USFS heat perimeters as well as its own, and
       // says which in `source`. WFIGS perimeters have no such field.

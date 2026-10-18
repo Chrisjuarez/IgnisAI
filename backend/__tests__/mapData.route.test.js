@@ -392,6 +392,35 @@ describe('matching perimeters to incidents', () => {
     expect(result.acresSource.provider).toBe('FIRIS');
   });
 
+  describe('a WFIGS perimeter edited after it was mapped', () => {
+    // The Dome Fire's WFIGS perimeter was mapped 10-08 03:36 and its record
+    // last edited 10-11 12:02 - the same shape FIRIS carries as 10-08 03:36.
+    const { freshnessFor } = require('../routes/mapData')._private;
+    const MAPPED = Date.parse('2026-10-04T03:36:00Z');
+    const EDITED = Date.parse('2026-10-07T12:02:00Z');
+    const incident = bouquet({ irwinId: 'BOUQUET-ID' });
+    const wfigs = square(0, {
+      source: undefined, mission: undefined, poly_IncidentName: 'Bouquet', attr_IrwinID: '{bouquet-id}',
+      poly_GISAcres: 900, poly_PolygonDateTime: MAPPED, poly_DateCurrent: EDITED,
+    });
+
+    it('is dated when its shape was mapped, not when its record was edited', async () => {
+      const result = annotate(incident, [wfigs]);
+      const payload = { hotspots: [], incidentPerimeters: matchPerimetersToIncidents(collection([wfigs]), [incident]) };
+
+      expect(result.acresSource).toEqual({ kind: 'perimeter', provider: 'WFIGS', asOf: '2026-10-04T03:36:00.000Z' });
+      expect((await freshnessFor(payload, incident)).perimeterMappedAt).toBe('2026-10-04T03:36:00.000Z');
+    });
+
+    it('gives way to a flight mapped after it but before the edit', () => {
+      const flight = square(112, { area_acres: 1048.26, poly_DateCurrent: Date.parse('2026-10-05T04:09:00Z') });
+      const result = annotate(incident, [wfigs, flight]);
+
+      expect(result.acres).toBe(1048);
+      expect(result.acresSource).toEqual({ kind: 'perimeter', provider: 'FIRIS', asOf: '2026-10-05T04:09:00.000Z' });
+    });
+  });
+
   it('keeps a reported size that is already larger than the measurement', () => {
     // Reported sizes include estimates beyond the last flight; a smaller,
     // older perimeter must not drag a correct figure down.
