@@ -1,6 +1,7 @@
 // backend/routes/firePerimeters.js
 const express = require('express');
 const { fetchArcgisGeoJson } = require('../utils/arcgis');
+const { bboxOf } = require('../utils/geo');
 
 const router = express.Router();
 
@@ -119,6 +120,78 @@ function filterByIncidentName(features, incidentName) {
   });
 }
 
+// When a perimeter's shape was mapped. On WFIGS, poly_DateCurrent is when the
+// record was last edited - for the Dome Fire, three days after its shape was
+// mapped - and poly_PolygonDateTime is the mapping. FIRIS dates each flight in
+// poly_DateCurrent, and a few of its perimeters only in CreationDate.
+const MAPPED_AT_FIELDS = ['poly_PolygonDateTime', 'poly_DateCurrent', 'CreationDate', 'poly_CreateDate'];
+const NAME_FIELDS = ['poly_IncidentName', 'attr_IncidentName', 'IncidentName', 'incident_name', 'FIRE_NAME', 'FireName'];
+
+function firstValue(props, names) {
+  for (const name of names) {
+    const value = props[name];
+    if (value != null && value !== '') return value;
+  }
+  return null;
+}
+
+function normalizeName(value) {
+  return String(value || '')
+    .replace(/\s+fire$/i, '')
+    .replace(/[^a-z0-9]+/gi, ' ')
+    .trim()
+    .toLowerCase();
+}
+
+// FIRIS mission codes read state-unit-name-aircraft, as CA-ANF-BOQUET-N50X. A
+// FIRIS perimeter with no incident name carries its fire's name only there.
+function missionName(mission) {
+  const [state, unit, name] = String(mission || '').split('-');
+  return /^[A-Z]{2}$/.test(state) && /^[A-Z]+$/.test(unit || '') ? name || null : null;
+}
+
+function perimeterIdentity(feature) {
+  const props = feature.properties || {};
+  const irwinId = firstValue(props, ['attr_IrwinID', 'poly_IRWINID']);
+  return {
+    feature,
+    mappedAt: asTimestamp(firstValue(props, MAPPED_AT_FIELDS)),
+    irwinId: irwinId ? String(irwinId).replace(/[{}]/g, '').trim().toUpperCase() : null,
+    name: normalizeName(firstValue(props, NAME_FIELDS) || missionName(props.mission)),
+    bbox: bboxOf(feature.geometry),
+  };
+}
+
+function bboxesOverlap(a, b) {
+  return Boolean(a && b) && a[0] <= b[2] && b[0] <= a[2] && a[1] <= b[3] && b[1] <= a[3];
+}
+
+// Whether two perimeters map the same fire. An IRWIN ID names one incident, so
+// when both carry one it decides; otherwise a fire is its name where it burns.
+function sameFire(a, b) {
+  if (a.irwinId && b.irwinId) return a.irwinId === b.irwinId;
+  return Boolean(a.name) && a.name === b.name && bboxesOverlap(a.bbox, b.bbox);
+}
+
+// Whether `other` makes `entry` history: the same fire, mapped later - or at
+// the same moment by WFIGS, which FIRIS republishes as NIFC rows without the
+// IRWIN ID. The pieces one flight mapped of a fire share a time and all stay.
+function supersedes(other, entry) {
+  if (!sameFire(other, entry)) return false;
+  if (other.mappedAt > entry.mappedAt) return true;
+  return other.mappedAt === entry.mappedAt && Boolean(other.irwinId) && !entry.irwinId;
+}
+
+// Each fire as it was last mapped. FIRIS keeps every flight's perimeter, and a
+// month of them drawn together hid the Dome Fire's shape under their own. A
+// perimeter with no date to order it by stays.
+function latestPerimeters(features) {
+  const entries = features.map(perimeterIdentity);
+  return entries
+    .filter((entry) => entry.mappedAt == null || !entries.some((other) => supersedes(other, entry)))
+    .map((entry) => entry.feature);
+}
+
 function mergeFeatureCollections(collections) {
   const seen = new Set();
   const features = [];
@@ -152,6 +225,7 @@ router.get('/', async (req, res) => {
     const merged = mergeFeatureCollections(collections);
     merged.features = filterByIncidentName(merged.features, req.query.incidentName);
     merged.features = filterByTime(merged.features, req.query.from, req.query.to);
+    merged.features = latestPerimeters(merged.features);
 
     return res.json({
       geojson: merged,
