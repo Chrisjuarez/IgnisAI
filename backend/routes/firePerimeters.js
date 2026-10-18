@@ -72,6 +72,14 @@ function arcgisParams({ bbox }) {
   return params;
 }
 
+// FIRIS keeps a fire's perimeters once it is over and marks them Inactive,
+// about when WFIGS Current drops the fire. On 2026-10-18, 238 of the 315
+// perimeters drawn at the western-US view were Inactive FIRIS ones, Yosemite
+// fires out since August among them. Left out server side, they also stop
+// counting toward resultRecordCount: FIRIS held 488 rows, 500 are asked for.
+// The status is today's, so a past window still gets every perimeter.
+const FIRIS_ACTIVE_WHERE = "displayStatus IS NULL OR displayStatus <> 'Inactive'";
+
 function asTimestamp(value) {
   if (value == null) return null;
   if (typeof value === 'number') return value;
@@ -211,11 +219,12 @@ function mergeFeatureCollections(collections) {
 router.get('/', async (req, res) => {
   const bbox = parseBbox(req.query.bbox);
   const params = arcgisParams({ bbox });
+  const pastWindow = asTimestamp(req.query.from) != null || asTimestamp(req.query.to) != null;
 
   try {
     const results = await Promise.allSettled([
       fetchArcgisGeoJson(WFIGS_CURRENT_URL, params),
-      fetchArcgisGeoJson(FIRIS_PUBLIC_URL, params),
+      fetchArcgisGeoJson(FIRIS_PUBLIC_URL, pastWindow ? params : { ...params, where: FIRIS_ACTIVE_WHERE }),
     ]);
 
     const collections = results
