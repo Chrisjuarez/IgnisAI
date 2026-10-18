@@ -137,17 +137,51 @@ def near_real_time_from(product: str = "VIIRS_NOAA20_NRT") -> dt.date:
 
 # ---------------- S3 ----------------
 
-class S3Store:
-    """Text files under one s3://bucket/prefix."""
+class WrongAwsAccount(PermissionError):
+    """Refused: these credentials, or the bucket, are not the Ignis account's."""
 
-    def __init__(self, uri: str):
+
+def _ignis_account() -> str:
+    account = (os.getenv("IGNIS_AWS_ACCOUNT_ID") or "").strip()
+    if not account:
+        raise WrongAwsAccount("IGNIS_AWS_ACCOUNT_ID is not set; refusing to write FIRMS history")
+    return account
+
+
+class S3Store:
+    """Text files under one s3://bucket/prefix, written only in the Ignis account.
+
+    A machine can hold credentials for more than one AWS account, and a tool run
+    without a profile picks up whichever is the default. Before its first write
+    the store checks whose credentials it has, and every write names the bucket
+    owner it expects, so S3 itself rejects a bucket in any other account.
+    """
+
+    def __init__(self, uri: str, *, s3=None, sts=None):
         parsed = urlparse(uri)
         if parsed.scheme != "s3" or not parsed.netloc:
             raise ValueError(f"expected s3://bucket/prefix, got {uri!r}")
-        import boto3
-
         self.bucket, self.prefix = parsed.netloc, parsed.path.strip("/")
-        self.client = boto3.client("s3", region_name=os.getenv("AWS_REGION") or os.getenv("AWS_DEFAULT_REGION"))
+        if s3 is None or sts is None:
+            import boto3
+
+            region = os.getenv("AWS_REGION") or os.getenv("AWS_DEFAULT_REGION")
+            s3 = s3 or boto3.client("s3", region_name=region)
+            sts = sts or boto3.client("sts", region_name=region)
+        self.client, self._sts = s3, sts
+        self._account_checked = False
+
+    def _check_account(self) -> str:
+        expected = _ignis_account()
+        if not self._account_checked:
+            actual = self._sts.get_caller_identity()["Account"]
+            if actual != expected:
+                raise WrongAwsAccount(
+                    f"credentials are for AWS account …{actual[-4:]}, not the Ignis account …{expected[-4:]}; "
+                    "refusing to write FIRMS history"
+                )
+            self._account_checked = True
+        return expected
 
     def _key(self, name: str) -> str:
         return f"{self.prefix}/{name}" if self.prefix else name
@@ -164,8 +198,9 @@ class S3Store:
         return body.read().decode("utf-8")
 
     def put_text(self, name: str, text: str) -> None:
+        owner = self._check_account()
         self.client.put_object(Bucket=self.bucket, Key=self._key(name), Body=text.encode("utf-8"),
-                               ContentType="text/csv")
+                               ContentType="text/csv", ExpectedBucketOwner=owner)
 
 
 def open_store(uri: str) -> S3Store:

@@ -151,3 +151,73 @@ def test_a_dated_forecast_sees_its_days_detections_from_the_store(monkeypatch):
 
     col, row_ = ~tile_affine(lonlat_to_tile(LON, LAT)) * lonlat_to_xy_m(LON, LAT)
     assert dyn[-1, 0, int(row_), int(col)] > 0, "the 09:30Z detection belongs in the forecast's latest day"
+
+
+# ---------------- Writing only into the Ignis account ----------------
+
+IGNIS, OTHER = "111122223333", "444455556666"
+
+
+class FakeS3:
+    def __init__(self):
+        self.puts = []
+
+    def put_object(self, **kwargs):
+        self.puts.append(kwargs)
+
+
+class FakeSts:
+    def __init__(self, account):
+        self.account, self.calls = account, 0
+
+    def get_caller_identity(self):
+        self.calls += 1
+        return {"Account": self.account, "Arn": f"arn:aws:iam::{self.account}:user/someone"}
+
+
+def s3_store(caller_account):
+    s3, sts = FakeS3(), FakeSts(caller_account)
+    return firms_history.S3Store("s3://ignis-bucket/history/firms", s3=s3, sts=sts), s3, sts
+
+
+def test_writes_with_another_accounts_credentials_are_refused(monkeypatch):
+    # The shell's default profile is another job's account.
+    monkeypatch.setenv("IGNIS_AWS_ACCOUNT_ID", IGNIS)
+    store, s3, _ = s3_store(OTHER)
+
+    with pytest.raises(firms_history.WrongAwsAccount, match="6666"):
+        store.put_text("2026-10-16.nrt.csv", "latitude\n")
+    assert s3.puts == []
+
+
+def test_writes_are_refused_when_the_ignis_account_is_not_configured(monkeypatch):
+    monkeypatch.delenv("IGNIS_AWS_ACCOUNT_ID", raising=False)
+    store, s3, _ = s3_store(IGNIS)
+
+    with pytest.raises(firms_history.WrongAwsAccount, match="IGNIS_AWS_ACCOUNT_ID"):
+        store.put_text("2026-10-16.nrt.csv", "latitude\n")
+    assert s3.puts == []
+
+
+def test_writes_in_the_ignis_account_name_the_bucket_owner_too(monkeypatch):
+    monkeypatch.setenv("IGNIS_AWS_ACCOUNT_ID", IGNIS)
+    store, s3, sts = s3_store(IGNIS)
+
+    store.put_text("2026-10-16.nrt.csv", "a\n")
+    store.put_text("2026-10-17.nrt.csv", "b\n")
+
+    assert [put["Key"] for put in s3.puts] == ["history/firms/2026-10-16.nrt.csv", "history/firms/2026-10-17.nrt.csv"]
+    # S3 rejects the write if the bucket belongs to any other account.
+    assert {put["ExpectedBucketOwner"] for put in s3.puts} == {IGNIS}
+    assert sts.calls == 1, "the account is checked once per store"
+
+
+def test_a_forecast_still_gets_its_day_when_the_account_is_wrong(monkeypatch):
+    monkeypatch.setenv("IGNIS_AWS_ACCOUNT_ID", IGNIS)
+    store, s3, _ = s3_store(OTHER)
+    store.get_text = lambda name: None
+    day = dt.date(2026, 10, 16)
+
+    text = day_text(day, store, Firms({"VIIRS_NOAA20_NRT": [row(34.56, -118.40, day, "2033")]}))
+
+    assert "2026-10-16,2033" in text and s3.puts == []

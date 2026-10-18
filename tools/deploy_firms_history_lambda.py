@@ -5,9 +5,12 @@ in the history store, before FIRMS replaces them with the reprocessed archive.
 It runs services/tilesvc/firms_history.py as is.
 
 Safe to re-run: every step creates what is missing and updates what exists.
+Nothing is created unless the profile's credentials belong to --account, the
+Ignis AWS account; the Lambda checks the same account before each write.
 
-    python tools/deploy_firms_history_lambda.py --profile ignis-personal \\
-        --store s3://ignisai-static-chrisjuarez-2026/history/firms --region us-west-1
+    python tools/deploy_firms_history_lambda.py --profile <ignis admin profile> \\
+        --account <Ignis account id> --region us-west-1 \\
+        --store s3://ignisai-static-chrisjuarez-2026/history/firms
 
 The NASA key is read from backend/.env and never printed.
 """
@@ -19,9 +22,6 @@ import time
 import zipfile
 from pathlib import Path
 from urllib.parse import urlparse
-
-import boto3
-from botocore.exceptions import ClientError
 
 REPO = Path(__file__).resolve().parents[1]
 SOURCE = REPO / "services/tilesvc/firms_history.py"
@@ -43,7 +43,20 @@ def package() -> bytes:
     return buffer.getvalue()
 
 
+def confirm_account(session, expected: str) -> None:
+    """Stop before creating anything unless these credentials are the Ignis account's."""
+    actual = session.client("sts").get_caller_identity()["Account"]
+    if actual != expected:
+        sys.exit(f"credentials are for AWS account …{actual[-4:]}, not the Ignis account …{expected[-4:]}; nothing was created")
+
+
+def lambda_environment(store: str, account: str, key: str) -> dict:
+    return {"Variables": {"FIRMS_HISTORY_S3": store, "IGNIS_AWS_ACCOUNT_ID": account, "NASA_API_KEY": key}}
+
+
 def ensure_role(iam, bucket: str, prefix: str) -> str:
+    from botocore.exceptions import ClientError
+
     trust = {"Version": "2012-10-17", "Statement": [{"Effect": "Allow", "Principal": {"Service": "lambda.amazonaws.com"},
                                                      "Action": "sts:AssumeRole"}]}
     try:
@@ -66,8 +79,8 @@ def ensure_role(iam, bucket: str, prefix: str) -> str:
     return arn
 
 
-def ensure_function(lam, role_arn: str, store: str) -> str:
-    env = {"Variables": {"FIRMS_HISTORY_S3": store, "NASA_API_KEY": nasa_key()}}
+def ensure_function(lam, role_arn: str, store: str, account: str) -> str:
+    env = lambda_environment(store, account, nasa_key())
     code = package()
     try:
         lam.get_function(FunctionName=NAME)
@@ -93,20 +106,24 @@ def ensure_schedule(events, lam, function_arn: str) -> None:
         pass  # already allowed
 
 
-def main() -> None:
+def main(argv=None) -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--profile", required=True)
+    parser.add_argument("--account", required=True, help="the Ignis AWS account id; nothing is created in any other")
     parser.add_argument("--store", required=True, help="s3://bucket/prefix of the history files")
     parser.add_argument("--region", required=True)
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
     if args.profile == "default":
-        sys.exit("refusing the default AWS profile; use ignis-personal")
+        sys.exit("refusing the default AWS profile: on this machine it is another job's account")
     parsed = urlparse(args.store)
     bucket, prefix = parsed.netloc, parsed.path.strip("/")
 
+    import boto3
+
     session = boto3.Session(profile_name=args.profile, region_name=args.region)
+    confirm_account(session, args.account)
     role_arn = ensure_role(session.client("iam"), bucket, prefix)
-    function_arn = ensure_function(session.client("lambda"), role_arn, args.store)
+    function_arn = ensure_function(session.client("lambda"), role_arn, args.store, args.account)
     ensure_schedule(session.client("events"), session.client("lambda"), function_arn)
     print(f"{NAME}: deployed, runs {SCHEDULE} (UTC), writes {args.store}")
 
