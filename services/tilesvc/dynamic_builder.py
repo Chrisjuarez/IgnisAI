@@ -206,7 +206,12 @@ def _fetch_noaa_cached_weather_grids(lat: float, lon: float, ref_time: dt.dateti
         print(f"⚠️  NOAA weather cache failed ({path}): {exc}")
         return None
 
-def _fetch_hrrr_weather_grids(lat: float, lon: float, ref_time: dt.datetime | None):
+def _fetch_hrrr_weather_grids(
+    lat: float,
+    lon: float,
+    ref_time: dt.datetime | None,
+    issued_at: dt.datetime | None = None,
+):
     """
     Fetch HRRR grids for this tile-hour when the prebuilt npz cache misses.
 
@@ -224,7 +229,7 @@ def _fetch_hrrr_weather_grids(lat: float, lon: float, ref_time: dt.datetime | No
         return None
 
     hour = ref_time.replace(minute=0, second=0, microsecond=0)
-    run = cycle_for_valid_time(hour, now=_utcnow())
+    run = cycle_for_valid_time(hour, now=issued_at or _utcnow())
     if run is None:
         # In a live forecast, the weather for days 3-6. Serving the furthest hour
         # HRRR does reach would give the model another hour's weather under this
@@ -235,8 +240,9 @@ def _fetch_hrrr_weather_grids(lat: float, lon: float, ref_time: dt.datetime | No
 
     # The npz cache is only read back when NOAA_GRIB_ENABLED is set, so keep an
     # in-process cache too: a multistep request asks for six distinct hours, and
-    # users re-click the same tile.
-    cache_key = ("hrrr", round(float(lat), 2), round(float(lon), 2), hour.isoformat())
+    # users re-click the same tile. Keyed by file: forecasts issued at different
+    # times can need different runs for the same hour.
+    cache_key = ("hrrr", round(float(lat), 2), round(float(lon), 2), cycle.isoformat(), forecast_hour)
     cached = _cache_get(_weather_cache, cache_key, _WEATHER_TTL_SEC)
     if cached is not None:
         quality = _set_weather_source("hrrr_on_demand", "memory_cache")
@@ -542,6 +548,10 @@ def _rasterize_frp(points, t_start, t_end, affine):
 
 # ---------------- Weather (Open-Meteo) ----------------
 OPEN_METEO_ARCHIVE = "https://archive-api.open-meteo.com/v1/archive"
+# Every hour as forecast N days earlier (previous_dayN), so a dated forecast can
+# read the run that was current when it was issued.
+OPEN_METEO_PREVIOUS_RUNS = "https://previous-runs-api.open-meteo.com/v1/forecast"
+_PREVIOUS_RUN_DAYS = 7
 
 
 _HOURLY_VARIABLES = (
@@ -574,7 +584,31 @@ def _series_covers(series: dict, target: dt.datetime) -> bool:
     return _parse_series_time(times[0]) <= target <= _parse_series_time(times[-1])
 
 
-def _fetch_hourly_series(lat: float, lon: float, target: dt.datetime, use_archive: bool) -> dict:
+def _issued_series(raw: dict, issued_at: dt.datetime) -> dict:
+    """Each hour after `issued_at` as forecast by the newest run out by then.
+
+    previous_dayN holds the run from N days before each hour, so an hour d days
+    after the issue time reads previous_day{ceil(d)}, the run that was current then.
+    """
+    series = {"time": raw.get("time") or []}
+    for name in _HOURLY_VARIABLES.split(","):
+        values = []
+        for index, stamp in enumerate(series["time"]):
+            days_ahead = math.ceil((_parse_series_time(stamp) - issued_at).total_seconds() / 86400)
+            column = name if days_ahead <= 0 else f"{name}_previous_day{min(days_ahead, _PREVIOUS_RUN_DAYS)}"
+            column_values = raw.get(column) or []
+            values.append(column_values[index] if index < len(column_values) else None)
+        series[name] = values
+    return series
+
+
+def _fetch_hourly_series(
+    lat: float,
+    lon: float,
+    target: dt.datetime,
+    use_archive: bool,
+    issued_at: dt.datetime | None = None,
+) -> dict:
     common = {
         "latitude": lat,
         "longitude": lon,
@@ -585,7 +619,14 @@ def _fetch_hourly_series(lat: float, lon: float, target: dt.datetime, use_archiv
         "timezone": "UTC",
     }
 
-    if use_archive:
+    if issued_at is not None:
+        names = _HOURLY_VARIABLES.split(",")
+        columns = names + [f"{n}_previous_day{d}" for n in names for d in range(1, _PREVIOUS_RUN_DAYS + 1)]
+        start = issued_at.date()
+        params = {**common, "hourly": ",".join(columns), "start_date": start.isoformat(),
+                  "end_date": (start + dt.timedelta(days=_FORECAST_DAYS)).isoformat()}
+        url, timeout = OPEN_METEO_PREVIOUS_RUNS, 20
+    elif use_archive:
         # The archive lags real time by a couple of days; asking past its edge
         # returns an error rather than a truncated series.
         latest = dt.datetime.now(dt.timezone.utc).date() - dt.timedelta(days=2)
@@ -598,14 +639,20 @@ def _fetch_hourly_series(lat: float, lon: float, target: dt.datetime, use_archiv
         url, timeout = OPEN_METEO, 15
 
     try:
-        response = requests.get(url, params=params, timeout=timeout).json()
-        return response.get("hourly", {}) or {}
+        hourly = requests.get(url, params=params, timeout=timeout).json().get("hourly", {}) or {}
     except Exception as exc:
         print(f"⚠️  Open-Meteo hourly fetch failed: {exc}")
         return {}
+    return _issued_series(hourly, issued_at) if issued_at is not None and hourly else hourly
 
 
-def _hourly_series(lat: float, lon: float, target: dt.datetime, use_archive: bool) -> dict:
+def _hourly_series(
+    lat: float,
+    lon: float,
+    target: dt.datetime,
+    use_archive: bool,
+    issued_at: dt.datetime | None = None,
+) -> dict:
     """Hourly weather series covering `target`, cached per location.
 
     The rollout needs one sample per lead time. Caching the series rather than
@@ -613,13 +660,14 @@ def _hourly_series(lat: float, lon: float, target: dt.datetime, use_archive: boo
     one per step, and — unlike Open-Meteo's `current` endpoint — the value
     actually varies with lead time.
     """
-    cache_key = (round(float(lat), 2), round(float(lon), 2), bool(use_archive))
+    cache_key = (round(float(lat), 2), round(float(lon), 2), bool(use_archive),
+                 issued_at.isoformat() if issued_at else None)
 
     cached = _cache_get(_weather_cache, cache_key, _WEATHER_TTL_SEC)
     if cached is not None and _series_covers(cached, target):
         return cached
 
-    series = _fetch_hourly_series(lat, lon, target, use_archive)
+    series = _fetch_hourly_series(lat, lon, target, use_archive, issued_at)
     if series.get("time"):
         _cache_set(_weather_cache, cache_key, series)
     return series
@@ -654,12 +702,22 @@ def _sample_hourly(series: dict, target: dt.datetime) -> dict:
     }
 
 
-def fetch_weather_grids(lat: float, lon: float, ref_time: dt.datetime = None):
+def fetch_weather_grids(
+    lat: float,
+    lon: float,
+    ref_time: dt.datetime = None,
+    issued_at: dt.datetime = None,
+):
     """Weather for `ref_time`, as per-pixel grids. See fetch_weather_with_quality."""
-    return fetch_weather_with_quality(lat, lon, ref_time)[0]
+    return fetch_weather_with_quality(lat, lon, ref_time, issued_at)[0]
 
 
-def fetch_weather_with_quality(lat: float, lon: float, ref_time: dt.datetime = None):
+def fetch_weather_with_quality(
+    lat: float,
+    lon: float,
+    ref_time: dt.datetime = None,
+    issued_at: dt.datetime = None,
+):
     """Weather for `ref_time`, as (per-pixel grids, quality of the tier that served them).
 
     Three tiers, best first: the prebuilt NOAA cache; an on-demand HRRR fetch
@@ -667,22 +725,29 @@ def fetch_weather_with_quality(lat: float, lon: float, ref_time: dt.datetime = N
     `ref_time` out of a cached hourly series so each forecast step gets its own
     lead-time weather. Only the first two carry real spatial structure — the
     Open-Meteo tier broadcasts one point value across the whole tile.
+
+    `issued_at` is when the forecast is made; None means now. An hour after it
+    gets the weather forecast of that time, never the weather that followed.
     """
-    noaa = _fetch_noaa_cached_weather_grids(lat, lon, ref_time)
+    now = dt.datetime.now(dt.timezone.utc)
+    target = _as_utc(ref_time) if ref_time is not None else now
+    issued = _as_utc(issued_at) if issued_at is not None else None
+    ahead_of_issue = issued is not None and target > issued
+
+    # The npz cache holds weather that happened.
+    noaa = None if ahead_of_issue else _fetch_noaa_cached_weather_grids(lat, lon, ref_time)
     if noaa is not None:
         noaa_grids, quality = noaa
         return {k: v.copy() for k, v in noaa_grids.items()}, quality
 
-    hrrr = _fetch_hrrr_weather_grids(lat, lon, ref_time)
+    hrrr = _fetch_hrrr_weather_grids(lat, lon, ref_time, issued)
     if hrrr is not None:
         hrrr_grids, quality = hrrr
         return {k: v.copy() for k, v in hrrr_grids.items()}, quality
 
-    now = dt.datetime.now(dt.timezone.utc)
-    target = _as_utc(ref_time) if ref_time is not None else now
-    use_archive = (now - target).total_seconds() > 86400
-
-    sample = _sample_hourly(_hourly_series(lat, lon, target, use_archive), target)
+    use_archive = not ahead_of_issue and (now - target).total_seconds() > 86400
+    series = _hourly_series(lat, lon, target, use_archive, issued if ahead_of_issue else None)
+    sample = _sample_hourly(series, target)
 
     T = sample.get("temperature_2m", 15.0)        # °C
     RH = sample.get("relative_humidity_2m", 50.0)  # %
@@ -708,7 +773,7 @@ def fetch_weather_with_quality(lat: float, lon: float, ref_time: dt.datetime = N
     }
     quality = _set_weather_source(
         "open_meteo_fallback",
-        "archive_hourly" if use_archive else "forecast_hourly",
+        "issued_forecast_hourly" if ahead_of_issue else "archive_hourly" if use_archive else "forecast_hourly",
     )
     return grids, quality
 
@@ -820,7 +885,7 @@ def build_dynamic_for_tile(
     for t in range(T_seq):
         # Use the end of each slice as the weather timestamp for that timestep.
         step_ref_time = weather_time - dt.timedelta(hours=(T_seq - 1 - t) * hours_step)
-        wx, quality = fetch_weather_with_quality(lat, lon, ref_time=step_ref_time)
+        wx, quality = fetch_weather_with_quality(lat, lon, ref_time=step_ref_time, issued_at=ref_time)
         weather.append(quality)
         channels = {
             "fire_t": fire_stack[t],

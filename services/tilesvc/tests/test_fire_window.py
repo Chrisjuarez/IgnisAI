@@ -29,7 +29,7 @@ def builder(monkeypatch):
     """build_dynamic_for_tile over given detections, with the clock pinned."""
     weather_times = []
 
-    def weather(lat, lon, ref_time=None):
+    def weather(lat, lon, ref_time=None, issued_at=None):
         weather_times.append(ref_time)
         grids = {name: np.zeros((db.SIZE, db.SIZE), dtype=np.float32) for name in WEATHER}
         return grids, {"status": "ok", "source": "hrrr_on_demand", "reason": ""}

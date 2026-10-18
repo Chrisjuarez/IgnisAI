@@ -1482,7 +1482,7 @@ def _rollout_multistep_predictions(
             continue
 
         next_time = base_time + dt.timedelta(hours=lead_hours)
-        wx, wx_quality = fetch_weather_with_quality(lat, lon, ref_time=next_time)
+        wx, wx_quality = fetch_weather_with_quality(lat, lon, ref_time=next_time, issued_at=ref_time)
         try:
             fire_idx = list(MODEL_DYNAMIC_ORDER).index("fire_t")
         except ValueError:

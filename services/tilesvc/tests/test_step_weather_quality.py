@@ -22,7 +22,7 @@ LON, LAT = -118.40183, 34.561835
 UTC = dt.timezone.utc
 NOW = dt.datetime(2026, 9, 5, 12, 30, tzinfo=UTC)
 LIVE = dt.datetime(2026, 9, 5, 12, tzinfo=UTC)
-# Every hour of a short forecast from here has happened by NOW, so HRRR has it all.
+# A forecast dated well before NOW: its input days had happened when it was issued.
 HINDCAST = dt.datetime(2026, 8, 1, 12, tzinfo=UTC)
 WEATHER = ("u", "v", "gust", "temp", "tempC", "rh", "q", "prcp", "precip")
 
@@ -93,13 +93,13 @@ def test_healthz_still_reports_the_latest_fetch(hrrr_fails_at):
 
 
 def test_an_input_day_on_point_weather_flags_the_days_still_run_on_it(hrrr_fails_at):
-    # With Tseq=3, day 1 runs on input days -2, -1 and 0, day 2 on -1, 0 and
-    # +24 h, and day 3 on 0, +24 h and +48 h.
-    hrrr_fails_at.add(HINDCAST - dt.timedelta(hours=24))
+    # With Tseq=3, day 1 runs on input days -2, -1 and 0, and day 2 on -1, 0
+    # and +24 h, which HRRR covers from the 06Z run.
+    hrrr_fails_at.add(HINDCAST - dt.timedelta(hours=48))
 
-    steps = _multistep(HINDCAST, steps=3)
+    steps = _multistep(HINDCAST, steps=2)
 
-    assert [s["quality"]["degraded"] for s in steps] == [True, True, False]
+    assert [s["quality"]["degraded"] for s in steps] == [True, False]
 
 
 def test_site_exposure_reports_each_days_weather(hrrr_fails_at):
