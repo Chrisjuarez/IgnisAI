@@ -212,4 +212,29 @@ describe('GET /api/fire-perimeters', () => {
       expect(await drawn({ from: new Date(day(0)).toISOString(), to: new Date(day(8)).toISOString() })).toEqual([2]);
     });
   });
+
+  // FIRIS keeps a fire's perimeters once it is over and marks them Inactive.
+  // Near the Dome Fire, the map drew Yosemite fires out since August.
+  describe('leaves out FIRIS perimeters of fires that are over', () => {
+    const ACTIVE_ONLY = "displayStatus IS NULL OR displayStatus <> 'Inactive'";
+
+    async function whereSent(query) {
+      axios.get.mockResolvedValue({ data: { type: 'FeatureCollection', features: [] } });
+      await request(app).get('/api/fire-perimeters').query(query).expect(200);
+      const where = {};
+      for (const [url, config] of axios.get.mock.calls) {
+        where[String(url).includes('WFIGS') ? 'wfigs' : 'firis'] = config.params.where;
+      }
+      return where;
+    }
+
+    it('asks FIRIS only for perimeters it does not mark Inactive', async () => {
+      expect(await whereSent({ bbox: '-125.1,31,-101.8,49.5' })).toEqual({ wfigs: '1=1', firis: ACTIVE_ONLY });
+    });
+
+    it('asks FIRIS for every perimeter in a past window, when those fires burned', async () => {
+      expect(await whereSent({ bbox: '-120,37,-119,38', from: '2026-08-10', to: '2026-08-18' }))
+        .toEqual({ wfigs: '1=1', firis: '1=1' });
+    });
+  });
 });
