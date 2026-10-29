@@ -453,7 +453,8 @@ function annotateIncidents(incidents, incidentPerimeters, hotspots, now = Date.n
     const hasPerimeter = own.length > 0;
     const ownDetections = hotspots.filter((fire) => detectedNearFire(fire, incident, own));
     const hasHotspots = ownDetections.length > 0;
-    const detectedLast24h = ownDetections.some((fire) => toMillis(fire.timestamp) >= now - FORECASTABLE_WITHIN_MS);
+    const detectionsLast24h = ownDetections.filter((fire) => toMillis(fire.timestamp) >= now - FORECASTABLE_WITHIN_MS).length;
+    const detectedLast24h = detectionsLast24h > 0;
     const predictionEligibility = resolvePredictionEligibility(incident, { detectedLast24h });
     return {
       ...incident,
@@ -462,6 +463,7 @@ function annotateIncidents(incidents, incidentPerimeters, hotspots, now = Date.n
       hasPerimeter,
       hasHotspots,
       detectedLast24h,
+      detectionsLast24h,
       sourceNames: [
         ...incident.sourceNames,
         ...(hasPerimeter ? ['Perimeters'] : []),
