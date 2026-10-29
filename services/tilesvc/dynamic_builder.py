@@ -673,6 +673,19 @@ def _hourly_series(
     return series
 
 
+def _has_every_value(series: dict, target: dt.datetime) -> bool:
+    """Whether the series has a value of every variable for `target`'s hour."""
+    times = series.get("time") or []
+    wanted = target.replace(minute=0, second=0, microsecond=0).strftime(_SERIES_TIME_FORMAT)
+    if wanted not in times:
+        return False
+    index = times.index(wanted)
+    return all(
+        index < len(series.get(name) or []) and series[name][index] is not None
+        for name in _HOURLY_VARIABLES.split(",")
+    )
+
+
 def _sample_hourly(series: dict, target: dt.datetime) -> dict:
     times = series.get("time") or []
     if not times:
@@ -747,6 +760,14 @@ def fetch_weather_with_quality(
 
     use_archive = not ahead_of_issue and (now - target).total_seconds() > 86400
     series = _hourly_series(lat, lon, target, use_archive, issued if ahead_of_issue else None)
+    reason = "issued_forecast_hourly" if ahead_of_issue else "archive_hourly" if use_archive else "forecast_hourly"
+    if ahead_of_issue and not _has_every_value(series, target):
+        # Open-Meteo kept no run from the issue time for this hour: before about
+        # 2024 its earlier runs hold only temperature. The weather that happened,
+        # said so, rather than defaults passed off as a forecast.
+        use_archive = (now - target).total_seconds() > 86400
+        series = _hourly_series(lat, lon, target, use_archive)
+        reason = ("archive_hourly" if use_archive else "forecast_hourly") + "_no_issued_forecast"
     sample = _sample_hourly(series, target)
 
     T = sample.get("temperature_2m", 15.0)        # °C
@@ -771,10 +792,7 @@ def fetch_weather_with_quality(
         "prcp":   np.full((H, W), P, np.float32),
         "precip": np.full((H, W), P, np.float32),
     }
-    quality = _set_weather_source(
-        "open_meteo_fallback",
-        "issued_forecast_hourly" if ahead_of_issue else "archive_hourly" if use_archive else "forecast_hourly",
-    )
+    quality = _set_weather_source("open_meteo_fallback", reason)
     return grids, quality
 
 

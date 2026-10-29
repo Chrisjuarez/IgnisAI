@@ -20,10 +20,15 @@ LON, LAT = -118.40183, 34.561835
 UTC = dt.timezone.utc
 NOW = dt.datetime(2026, 10, 17, 18, 0, tzinfo=UTC)
 ISSUED = dt.datetime(2026, 9, 11, 12, tzinfo=UTC)
+# Dixie's third day: years before Open-Meteo began keeping its earlier runs.
+ISSUED_BEFORE_RUNS_KEPT = dt.datetime(2021, 8, 14, 12, tzinfo=UTC)
 WEATHER = ("u", "v", "gust", "temp", "tempC", "rh", "q", "prcp", "precip")
 # Wind speeds that say which Open-Meteo answer a frame came from.
 OBSERVED, CURRENT_RUN = 99.0, 55.0
 RUN_DAYS_BEFORE = {n: 10.0 * n for n in range(1, 8)}
+# Before about 2024 the earlier runs answer with every hour empty but their
+# temperature.
+RUNS_KEPT_FROM = dt.date(2024, 3, 1)
 
 
 def _open_meteo(url, params=None, timeout=None):
@@ -37,6 +42,8 @@ def _open_meteo(url, params=None, timeout=None):
     speed = OBSERVED if "archive" in url else CURRENT_RUN
 
     def value(column):
+        if "_previous_day" in column and start < RUNS_KEPT_FROM and not column.startswith("temperature_2m"):
+            return None
         if column.startswith("wind_speed_10m_previous_day"):
             return RUN_DAYS_BEFORE[int(column.rsplit("day", 1)[1])]
         if column.startswith("wind_speed_10m"):
@@ -84,19 +91,19 @@ def forecast(monkeypatch, tmp_path):
     def run(issued=ISSUED, steps=3):
         hrrr_files.clear(); wind_seen.clear()
         # Called directly, so every Query default is passed explicitly.
-        app.predict_multistep(
+        response = app.predict_multistep(
             lat=LAT, lon=LON, model="ignis", Tseq=3, steps=steps, step_hours=24, thr=None,
             display_floor=None, crop_frac=0.5, ignition=True, date=issued.isoformat(), debug=None,
             burned_area=None,
         )
-        return list(hrrr_files), list(wind_seen)
+        return list(hrrr_files), list(wind_seen), response["steps"]
 
     yield run
     dynamic_builder._weather_cache.clear()
 
 
 def test_the_next_day_comes_from_an_hrrr_run_published_by_the_issue_time(forecast):
-    files, _ = forecast()
+    files, _, _ = forecast()
 
     # +24 h: the newest 48-hour run out by 12Z is 06Z, at f30.
     assert (dt.datetime(2026, 9, 11, 6, tzinfo=UTC), 30) in files
@@ -107,11 +114,22 @@ def test_the_next_day_comes_from_an_hrrr_run_published_by_the_issue_time(forecas
 
 
 def test_hours_no_run_reached_use_open_meteos_forecast_from_the_issue_time(forecast):
-    _, wind = forecast()
+    _, wind, steps = forecast()
 
     # Day 3 runs on the +48 h hour: HRRR's runs out by 12Z stop short of it, so
     # Open-Meteo serves it - as forecast two days ahead, not as observed.
     assert wind[2] == pytest.approx(RUN_DAYS_BEFORE[2])
+    assert steps[2]["quality"]["reasons"] == ["issued_forecast_hourly"]
+
+
+def test_before_open_meteo_kept_its_runs_later_days_get_the_weather_that_happened_and_say_so(forecast):
+    _, wind, steps = forecast(issued=ISSUED_BEFORE_RUNS_KEPT, steps=6)
+
+    # Days 3-6 run on hours no HRRR run out by then reached, and Open-Meteo kept
+    # no run from that morning: the observed archive serves them, not defaults,
+    # and each day says it ran on weather that happened after it was issued.
+    assert wind[2:] == pytest.approx([OBSERVED] * 4)
+    assert [s["quality"]["reasons"] for s in steps[2:]] == [["archive_hourly_no_issued_forecast"]] * 4
 
 
 def test_observed_weather_on_disk_is_not_served_for_an_hour_after_issue(forecast, monkeypatch, tmp_path):
@@ -122,16 +140,16 @@ def test_observed_weather_on_disk_is_not_served_for_an_hour_after_issue(forecast
     observed = {name: np.full((SIZE, SIZE), 30.0, np.float32) for name in ("u", "v", "gust", "tempC", "q", "precip")}
     np.savez_compressed(dynamic_builder._noaa_cache_path(LAT, LON, later), source=np.array("noaa_hrrr"), **observed)
 
-    _, wind = forecast()
+    _, wind, _ = forecast()
 
     assert wind[1] == pytest.approx(0.0), "day 2 must run on the forecast from 06Z, not the stored observation"
 
 
 def test_forecasts_issued_at_different_times_do_not_share_an_hour(forecast):
     shared_hour = ISSUED + dt.timedelta(hours=24)
-    first, _ = forecast(issued=ISSUED, steps=2)
+    first, _, _ = forecast(issued=ISSUED, steps=2)
     # Issued a day after that hour, so its input day there is long published.
-    second, _ = forecast(issued=shared_hour + dt.timedelta(hours=24), steps=1)
+    second, _, _ = forecast(issued=shared_hour + dt.timedelta(hours=24), steps=1)
 
     # For the first it was a forecast; by the second's issue time it had happened.
     assert (dt.datetime(2026, 9, 11, 6, tzinfo=UTC), 30) in first
