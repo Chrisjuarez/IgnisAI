@@ -1,5 +1,21 @@
 // backend/models/Wildfire.js
 const mongoose = require('mongoose');
+
+// The map reads at most the last 5 days of detections, so the TTL index on
+// `timestamp` lets MongoDB delete anything much older. The floor stops a bad
+// env value from expiring detections the map still reads, or ones the next
+// FIRMS poll would re-serve and the ingest re-insert. On a database that
+// already has a plain `timestamp_1` index (production does), this definition
+// is not applied automatically; see "Detection Retention" in docs/runbook.md.
+const DEFAULT_RETENTION_DAYS = 30;
+const MIN_RETENTION_DAYS = 7;
+
+function retentionDays(raw = process.env.WILDFIRE_RETENTION_DAYS) {
+  const n = Number(raw || DEFAULT_RETENTION_DAYS);
+  if (!Number.isFinite(n)) return DEFAULT_RETENTION_DAYS;
+  return Math.max(MIN_RETENTION_DAYS, Math.round(n));
+}
+
 const WildfireSchema = new mongoose.Schema({
   latitude: { type: Number, required: true, index: true },
   longitude: { type: Number, required: true, index: true },
@@ -14,7 +30,11 @@ const WildfireSchema = new mongoose.Schema({
   daynight: { type: String },
   version: { type: String },
   brightTi5: { type: Number },
-  timestamp: { type: Date, required: true, index: true }
+  timestamp: {
+    type: Date,
+    required: true,
+    index: { expireAfterSeconds: retentionDays() * 24 * 60 * 60 },
+  }
 }, { timestamps: false });
 
 // FIRMS near-real-time products re-serve the same detections on every poll, so
