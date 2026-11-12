@@ -698,13 +698,17 @@ const AdvancedFireDashboard = () => {
           failed={mapDataFailed || layerStatus.incidents?.ok === false}
           onRefresh={refreshMap}
         />
-        <div className="user-chip">
-          <div>
-            <strong>{user?.fullName || user?.name || 'Guest'}</strong>
-            {user?.email && <span>{user.email}</span>}
+        {user ? (
+          <div className="user-chip">
+            <div>
+              <strong>{user.fullName || user.name || 'Guest'}</strong>
+              {user.email && <span>{user.email}</span>}
+            </div>
+            <em>{userInitials}</em>
           </div>
-          <em>{userInitials}</em>
-        </div>
+        ) : (
+          <a className="user-chip sign-in-link" href="/login">Sign in</a>
+        )}
       </header>
 
       <main className={stageClassName}>

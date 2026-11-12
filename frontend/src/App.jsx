@@ -82,15 +82,8 @@ function App() {
           <Route path="/register" element={<RegisterForm />} />
           <Route path="/forgot-password" element={<ForgotPasswordForm />} />
 
-          {/* Protected dashboard */}
-          <Route
-            path="/dashboard"
-            element={
-              <ProtectedRoute>
-                <AdvancedFireDashboard />
-              </ProtectedRoute>
-            }
-          />
+          {/* Open to everyone; an account is optional. */}
+          <Route path="/dashboard" element={<AdvancedFireDashboard />} />
 
           {/* Original dashboard preserved at legacy route. */}
           <Route
