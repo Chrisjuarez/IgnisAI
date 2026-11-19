@@ -13,6 +13,7 @@ from shapely.geometry import Point
 from rasterio.features import rasterize
 
 from .grid import SIZE, lonlat_to_tile, tile_affine, tile_bounds_lonlat, lonlat_to_xy_m
+from . import firms_history
 from .hrrr_grids import cycle_for_valid_time, fetch_hrrr_tile_grids, hrrr_enabled
 from .static_catalog import InputUnavailable
 from ignis_ml.src.data.transforms import wind_to_uv, rh_to_q, fire_boost
@@ -486,13 +487,38 @@ def _load_firms_points_from_snapshots(bbox, t_start: dt.datetime, t_end: dt.date
     if missing:
         print(f"⚠️  FIRMS snapshots missing dates {missing}; falling back to live FIRMS API")
         return None
+    return _points_within(points, bbox, t_start, t_end)
 
+
+def _points_within(points, bbox, t_start: dt.datetime, t_end: dt.datetime):
     w, s, e, n = bbox
-    filtered = [
+    return [
         pt for pt in points
         if w <= pt["lon"] <= e and s <= pt["lat"] <= n and t_start <= pt["ts"] <= t_end
     ]
-    return filtered
+
+
+def _load_firms_points_from_history(bbox, t_start: dt.datetime, t_end: dt.datetime):
+    """A dated forecast's detections from the FIRMS history store (FIRMS_HISTORY_S3).
+
+    The live FIRMS API serves about five days; the store keeps every day, and
+    fetches and keeps one the first time a forecast asks for it.
+    """
+    try:
+        store = firms_history.open_store(os.environ["FIRMS_HISTORY_S3"])
+        points = []
+        day = t_start.date()
+        while day <= t_end.date():
+            text = firms_history.day_csv(day, store=store, fetch_rows=firms_history.firms_rows)
+            points.extend(_parse_firms_points(text))
+            day += dt.timedelta(days=1)
+    except Exception as exc:
+        raise InputUnavailable(
+            "FIRMS history could not be read for the forecast's days",
+            reason="firms_history_unavailable",
+            details={"start": t_start.isoformat(), "end": t_end.isoformat(), "error": str(exc)},
+        ) from exc
+    return _points_within(points, bbox, t_start, t_end)
 
 
 def _points_in_window(points, t_start, t_end):
@@ -844,6 +870,14 @@ def build_dynamic_for_tile(
     window_start = observed_until - dt.timedelta(hours=window_hours)
     days = math.ceil(window_hours / 24.0)
     points = _load_firms_points_from_snapshots(bbox, window_start, observed_until)
+    if points is None and ref_time is not None and os.getenv("FIRMS_HISTORY_S3"):
+        try:
+            points = _load_firms_points_from_history(bbox, window_start, observed_until)
+        except InputUnavailable as exc:
+            # A store that can't be read leaves the forecast where it was before
+            # there was one: the live API below, and an ignition seed if asked.
+            print(f"⚠️  [tilesvc] FIRMS history unavailable, using the live FIRMS API: "
+                  f"{exc.details.get('error', exc)}")
 
     # The live FIRMS NRT API only covers ~5 days. Falling through silently
     # for older windows produces an empty fire channel — the model then has
