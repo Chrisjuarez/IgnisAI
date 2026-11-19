@@ -173,6 +173,23 @@ The backend returns `predictions_disabled` for prediction routes while observed 
 4. Keep `MODEL_CONFIG_PATH`, `STATIC_CATALOG_PATH`, and `CALIBRATION_PATH` pinned to artifacts built for the same v3 model.
 5. Verify `/healthz` exposes the resolved `modelSha256`, ML package source commit, static catalog version, and calibration status.
 
+### Detection Retention
+
+Stored FIRMS detections (`wildfires`) expire `WILDFIRE_RETENTION_DAYS` (default 30, minimum 7) days after their `timestamp`, through a TTL index on that field. Mongoose creates it on a new database. Production already has a plain `timestamp_1` index, so the backend's build fails with `IndexOptionsConflict`, mongoose doesn't log it, and nothing expires. Convert the index once as an Atlas admin (`collMod` needs `dbAdmin`):
+
+```js
+// mongosh "$MONGODB_URI"
+db.runCommand({
+  collMod: "wildfires",
+  index: { keyPattern: { timestamp: 1 }, expireAfterSeconds: 30 * 24 * 60 * 60 }
+})
+```
+
+- Deletion of everything older starts within a minute and can't be undone. To keep a copy, export first: `mongoexport --uri "$MONGODB_URI" --collection wildfires --query '{"timestamp":{"$lt":{"$date":"<cutoff ISO date>"}}}' | gzip > wildfires-before-ttl.json.gz`
+- With a read/write-only user: `db.wildfires.dropIndex("timestamp_1")`, then `db.wildfires.createIndex({ timestamp: 1 }, { expireAfterSeconds: 30 * 24 * 60 * 60 })`.
+- Check: `db.wildfires.getIndexes()` shows `expireAfterSeconds: 2592000` on `timestamp_1`.
+- Changing `WILDFIRE_RETENTION_DAYS` later doesn't change the existing index either. Run the same `collMod` with the new value.
+
 ## Monitoring & Alerting
 
 ### Application Metrics
