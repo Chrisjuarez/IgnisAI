@@ -58,6 +58,11 @@ const FORECAST_RENDER_TIMEOUT_MS = 15_000;
 // the training distribution; tilesvc will otherwise fall back to its own
 // default which may drift if re-tuned.
 const DEFAULT_STEP_HOURS = 24;
+// At most this many satellite detections at a fire in the day before its
+// forecast, and it is labelled quiet. In replays, fires this quiet mostly
+// stopped while the bands still drew growth for them; the label states the
+// count, not what the fire will do.
+const QUIET_FIRE_DETECTIONS = 10;
 
 const SPREAD_BAND_FILL_OPACITY = 0.62;
 const SPREAD_OBSERVED_FILL_OPACITY = 0.55;
@@ -607,6 +612,7 @@ const MapComponent = forwardRef(({
   // Whether tilesvc grew this forecast from the official perimeter. Only then
   // are the bands growth beyond it, and only then may the panel say so.
   const [forecastBurnedArea, setForecastBurnedArea] = useState(null);
+  const [forecastDetections, setForecastDetections] = useState(null);
 
   // Historical fire testing state
   const [showHistPanel, setShowHistPanel] = useState(false);
@@ -919,6 +925,7 @@ const MapComponent = forwardRef(({
     setForecastScene(null);
     setForecastHybrid(null);
     setForecastBurnedArea(null);
+    setForecastDetections(null);
     setActiveForecastIndex(0);
     setForecastLayerMode('new_burn');
     removePredictionOverlays(mapRef.current);
@@ -1006,6 +1013,7 @@ const MapComponent = forwardRef(({
     stepHours,
     ignition,
     incidentId,
+    detectionsLast24h = null,
     fitBounds = true,
   }) => {
     const run = ++forecastRunRef.current;
@@ -1095,6 +1103,7 @@ const MapComponent = forwardRef(({
       }
 
       setForecastTitle(title);
+      setForecastDetections(Number.isFinite(detectionsLast24h) ? detectionsLast24h : null);
       setForecastScene(prepared.scene || null);
       setForecastHybrid(prepared.hybrid || null);
       setForecastBurnedArea(prepared.burnedArea || null);
@@ -1205,6 +1214,7 @@ const MapComponent = forwardRef(({
         stepHours: DEFAULT_STEP_HOURS,
         ignition: useSyntheticIgnition,
         incidentId: incident.id,
+        detectionsLast24h: incident.detectionsLast24h,
       });
     } catch (error) {
       console.error('Incident forecast failed:', error);
@@ -2286,6 +2296,11 @@ const MapComponent = forwardRef(({
       }
       .forecast-badge.warn { color: #111; background: #ffcf70; border-color: transparent; }
       .forecast-badge.good { color: #111; background: #91f0b7; border-color: transparent; }
+      .forecast-activity {
+        font-size: 12px; line-height: 1.35; color: rgba(247,243,234,0.88);
+        margin: -2px 0 10px;
+      }
+      .forecast-activity strong { color: #ffcf70; }
       .forecast-layer-btn {
         border: 1px solid rgba(255,255,255,0.14); border-radius: 8px;
         background: transparent; color: #f7f3ea; padding: 6px 9px;
@@ -2550,6 +2565,12 @@ const MapComponent = forwardRef(({
               <span key={reason} className="forecast-badge warn">{reason.replace(/_/g, ' ')}</span>
             ))}
           </div>
+          {forecastDetections != null && (
+            <div className="forecast-activity" role="note" aria-label="Fire activity">
+              {forecastDetections <= QUIET_FIRE_DETECTIONS && <strong>Quiet fire · </strong>}
+              {forecastDetections} satellite detection{forecastDetections === 1 ? '' : 's'} at this fire in the last 24 h
+            </div>
+          )}
           <div className="forecast-view-controls" role="group" aria-label="Spread view">
             <button
               className={`forecast-layer-btn ${showingBands ? 'active' : ''}`}

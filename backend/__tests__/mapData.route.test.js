@@ -528,6 +528,17 @@ describe('matching perimeters to incidents', () => {
       const [result] = annotateAll([active({ status: 'contained' })], [], [detection], hoursAfter(1));
       expect(result.predictionEligibility).toEqual({ eligible: false, reasons: ['incident is contained'] });
     });
+
+    it("counts the fire's own detections in the last 24 h", () => {
+      const at = (hoursBefore, km = 1.5) => ({
+        ...detection,
+        longitude: -118.40183 - km * KM_LON,
+        timestamp: new Date(hoursAfter(30) - hoursBefore * 60 * 60 * 1000),
+      });
+      // Two in the last day, one the day before, and one 20 km away: another fire's.
+      const [result] = annotateAll([active()], [], [at(2), at(20), at(26), at(3, 20)], hoursAfter(30));
+      expect(result.detectionsLast24h).toBe(2);
+    });
   });
 
   it('rounds measured acreage the way the panel displays it', () => {
