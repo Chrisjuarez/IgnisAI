@@ -153,6 +153,34 @@ def test_a_dated_forecast_sees_its_days_detections_from_the_store(monkeypatch):
     assert dyn[-1, 0, int(row_), int(col)] > 0, "the 09:30Z detection belongs in the forecast's latest day"
 
 
+class UnreadableStore(Store):
+    """What S3 answers credentials that cannot read the prefix."""
+
+    def get_text(self, name):
+        raise PermissionError("AccessDenied")
+
+
+def test_a_dated_forecast_runs_as_before_when_the_store_cannot_be_read(monkeypatch, capsys):
+    # Turning the store on must not cost the forecasts that worked without it:
+    # they fall back to the live API (and an ignition seed, if asked) as before.
+    issued = dt.datetime(2026, 9, 11, 12, tzinfo=UTC)
+    live_api = f"latitude,longitude,acq_date,acq_time,frp\n{LAT},{LON},2026-09-11,0930,40\n"
+    monkeypatch.delenv("FIRMS_SNAPSHOT_DIR", raising=False)
+    monkeypatch.setenv("FIRMS_HISTORY_S3", "s3://example-bucket/history/firms")
+    monkeypatch.setattr(firms_history, "open_store", lambda uri: UnreadableStore())
+    monkeypatch.setattr(dynamic_builder, "_fetch_firms_csv", lambda *a, **k: live_api)
+    monkeypatch.setattr(dynamic_builder, "fetch_weather_with_quality",
+                        lambda *a, **k: ({n: np.zeros((64, 64), np.float32) for n in
+                                          ("u", "v", "gust", "temp", "tempC", "rh", "q", "prcp", "precip")}, {}))
+
+    dyn = dynamic_builder.build_dynamic_for_tile(LAT, LON, T_seq=3, hours_step=24, ref_time=issued,
+                                                 channel_order=["fire_t", "u", "v", "gust", "tempC", "q", "precip"])
+
+    col, row_ = ~tile_affine(lonlat_to_tile(LON, LAT)) * lonlat_to_xy_m(LON, LAT)
+    assert dyn[-1, 0, int(row_), int(col)] > 0, "the live API's detection is the forecast's fire"
+    assert "FIRMS history unavailable" in capsys.readouterr().out, "the fallback is said, not silent"
+
+
 # ---------------- Writing only into the Ignis account ----------------
 
 IGNIS, OTHER = "111122223333", "444455556666"

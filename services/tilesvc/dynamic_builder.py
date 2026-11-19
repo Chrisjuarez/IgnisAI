@@ -871,7 +871,13 @@ def build_dynamic_for_tile(
     days = math.ceil(window_hours / 24.0)
     points = _load_firms_points_from_snapshots(bbox, window_start, observed_until)
     if points is None and ref_time is not None and os.getenv("FIRMS_HISTORY_S3"):
-        points = _load_firms_points_from_history(bbox, window_start, observed_until)
+        try:
+            points = _load_firms_points_from_history(bbox, window_start, observed_until)
+        except InputUnavailable as exc:
+            # A store that can't be read leaves the forecast where it was before
+            # there was one: the live API below, and an ignition seed if asked.
+            print(f"⚠️  [tilesvc] FIRMS history unavailable, using the live FIRMS API: "
+                  f"{exc.details.get('error', exc)}")
 
     # The live FIRMS NRT API only covers ~5 days. Falling through silently
     # for older windows produces an empty fire channel — the model then has
